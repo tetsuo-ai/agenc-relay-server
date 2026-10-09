@@ -123,6 +123,8 @@ mod origin_journal;
 mod recovery_submission;
 #[path = "stage_eight_e2ee/requester_copies.rs"]
 mod requester_copies;
+#[path = "stage_eight_e2ee/root_rotation.rs"]
+mod root_rotation;
 #[path = "stage_eight_e2ee/stage_ten_capacity.rs"]
 mod stage_ten_capacity;
 #[path = "stage_eight_e2ee/stage_ten_drills.rs"]

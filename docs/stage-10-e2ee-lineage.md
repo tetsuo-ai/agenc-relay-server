@@ -11,9 +11,11 @@ and keeps attachment counters in their account and device scope. The third
 restores each capability head against the roster it names, so its lineage
 survives a restart after a roster renewal, keeps that roster retained while
 a head names it, and lists only statements naming the current roster as
-current. The fourth restores stores written before these rules (G-08). No
-specification, profile hash, registry entry, named limit, reply code, wire
-object, table, key, row kind, field or storage generation changed.
+current. The fourth restores stores written before these rules (G-08), and
+the fifth drives a root rotation through the daemons across coordinator
+restarts. No specification, profile hash, registry entry, named limit,
+reply code, wire object, table, key, row kind, field or storage generation
+changed.
 
 ## A finalization's roots and rosters are checked per use (first commit)
 
@@ -388,15 +390,15 @@ its README; separate runs wrote identical files. In
 | `every_earlier_lineage_store_restores_from_sealed_storage` | The four stores restore through the storage reads a restart uses. |
 | `an_earlier_head_naming_the_replaced_roster_restores_and_holds_it` | After a same-root renewal, the head naming the replaced roster restores with its generation and identifier, and the restart derives that its capability row holds that roster, which object expiry past every window keeps; until a batch next writes the roster's owner row each restart derives the holding again and counts the account as rebuilt. The device's next statement continues the head and a reset is refused; the replaced roster then retires, expiry collects it, and the next restart reconstructs clean. |
 | `an_earlier_pending_root_restores_beside_the_roster_it_follows` | The account keeps its roster and the device's head while the continued root awaits its first roster; that root's roster at generation zero is admitted and one continuing the earlier root's counter is refused, and the new roster keeps no head of the earlier root. |
-| `an_earlier_rotation_keeps_the_counters_it_was_admitted_with` | A completed rotation whose roster and statement continued the earlier root's counters, as the writing coordinator required, restores under the new root with those heads; the next roster and statement advance by one from them, and a roster reset to generation zero is refused. |
+| `an_earlier_rotation_keeps_the_counters_it_was_admitted_with` | A completed rotation whose roster and statement continued the earlier root's counters, as the writing coordinator required, restores under the new root with those heads; the next roster and statement advance by one from them, and a roster reset to generation zero is refused. Since the fifth commit, the account's next root rotation is then stored with its roster at generation zero, which keeps no capability head of the earlier root. |
 | `an_earlier_head_whose_named_roster_was_collected_restores_nothing` | Once object expiry collected the replaced roster, the head naming it restores nothing, the current page lists no statement, and the device's next statement is admitted at generation zero. |
 
 A rotation that an earlier coordinator admitted with continued counters
-keeps them: its roster and statements were verified when they were stored,
-their signatures commit to their generations and predecessors, and the
-lineage continues from the stored heads by exactly one (Section 14).
-Rewriting them, or refusing the account, would leave the account no
-admissible next roster.
+keeps them: its roster and statements were verified under the rules of the
+coordinator that stored them, their signatures commit to their generations
+and predecessors, and restoring them unchanged writes and loses nothing.
+The lineage continues from the stored heads by exactly one (Section 14);
+see Limitations for what a client makes of it.
 
 A head whose named roster an earlier store no longer holds cannot be
 re-verified and restores nothing, as at the start commit (see Limitations).
@@ -417,22 +419,61 @@ roster that only a capability row held as unowned, so nothing collected
 it. The operator guide already says not to start release candidate 3 on a
 database this release has run on.
 
+## Daemon test (fifth commit)
+
+`crates/agenc-relay-server/tests/stage_eight_e2ee/root_rotation.rs` runs
+the production coordinator and two production edges of the Stage 08
+network with both profiles active. A client authenticated as an account on
+edge A publishes the account's root and roster and attaches its device,
+then drives the account's directory with `EKEY PUBLISH` and `EKEY FETCH`
+while the coordinator is stopped and started again from its database three
+times; after each restart both edges link again and the device attaches
+again. A request the edge answers transitionally while it settles after a
+restart is sent again; every other refusal must be the lineage refusal
+`E2EE_BINDING_AUTH_INVALID` where the test expects one.
+
+| Step | What `a_root_rotation_keeps_its_lineages_across_coordinator_restarts` requires |
+| --- | --- |
+| Renewal | The device's statement for the first roster and the roster's same-root renewal at generation one are stored. After a restart the current capability page is empty, since the head names the replaced roster; a reset to generation zero and a gap to generation two are refused, the statement continuing the head at generation one is stored, and the page then lists it. |
+| Continued root | The continued root is stored. After a restart the device attaches again and `EKEY FETCH ROSTER` returns the renewed roster. |
+| Rotation | Under the new root, a roster continuing the earlier root's counter is refused and its roster at generation zero is stored; a statement continuing the device's earlier head is refused and one at generation zero is stored. After a restart another statement at generation zero is refused, the statement at generation one is stored, and the page lists it. |
+
+This commit also extends
+`an_earlier_rotation_keeps_the_counters_it_was_admitted_with` with the
+account's next root rotation, stored with its roster at generation zero
+(see Limitations).
+
+The test passes in 5 of 5 runs at this commit, and in 3 of 3 confined to
+two processors. With the topic's production files set back to the start
+commit, and with the third commit's set back to the second commit, it
+fails at the first restart, where the reset of the capability lineage is
+stored. With the domain's next roster generation continuing across roots,
+it fails at the rotation, where the new root's roster at generation zero
+is refused; with startup restoring the roster under the newest root only,
+it fails at the second restart, where the device cannot attach again.
+
 ## Limitations
 
 - A capability head written before these rules whose named roster object
   expiry already collected restores nothing. The device's next statement
   must then be a generation-zero statement for the current roster, which a
-  client that pinned the earlier head refuses as a second identifier at
-  one generation (Section 8.5), until the account's next root rotation
-  starts new lineages. A head this topic's coordinator writes keeps its
-  named roster resident, so the case arises only in a store written before
-  these rules in which a device did not republish within the
-  security-proof window after a roster renewal. Restoring such a head's
-  generation and identifier from its row without re-verifying the
+  client that pinned the earlier head refuses as a rollback or a second
+  identifier at one generation (Section 8.5), until the account's next
+  root rotation starts new lineages. A head this topic's coordinator
+  writes keeps its named roster resident, so the case arises only in a
+  store written before these rules in which a device did not republish
+  within the security-proof window after a roster renewal. Restoring such
+  a head's generation and identifier from its row without re-verifying the
   statement, or re-verifying it under the device's continuing certificate
   in the current roster, would keep the counter; neither is done, since
   every restored head is re-verified, and the choice is recorded for the
   owner.
+- A rotation stored before these rules continued the earlier root's
+  roster and capability counters under the new root. A client that
+  starts each root's lineages at generation zero (Sections 8.4, 8.5 and
+  14) does not accept that lineage; the account's next root rotation
+  starts new lineages at generation zero, which this coordinator admits
+  (`an_earlier_rotation_keeps_the_counters_it_was_admitted_with`).
 - A store written before these rules can hold the capability row of a
   device its current roster does not keep, or of an earlier root's
   lineage. Startup restores no head from such a row and writes nothing, so
@@ -513,7 +554,8 @@ Release policy (`conformance/release-critical-coverage.toml`):
   documentation of `roster_snapshots.rs` and `roster_holds.rs`, which now
   names the capability row as a holder of a replaced roster.
 
-- Fourth commit: no production line changed, and no region moved.
+- Fourth and fifth commits: no production line changed, and no region
+  moved.
 
 Both policies' source inventories are refreshed at each commit.
 
@@ -580,6 +622,14 @@ Both policies' source inventories are refreshed at each commit.
   roster and the pending root. The other three pin what the start commit
   already did: the sealed-storage restore, the counters a rotation was
   admitted with, and a head whose named roster was collected.
+- Fifth commit: the daemon test fails with the topic's production files
+  set back to the start commit, with the third commit's set back to the
+  second commit, and under two single edits of the second commit's rule
+  (the domain's next generation continuing across roots, and startup
+  restoring the roster under the newest root only), as its section
+  states. With the topic's production files set back to the start
+  commit, the extended restore test fails at its further rotation, so
+  three of the five restore tests fail.
 
 ## Validation
 
@@ -640,5 +690,20 @@ identical files. The downgrade check ran a test-only module in an export
 of the start commit over three stores that the same kind of generator
 wrote in an export of the third commit, whose production code the later
 commits leave unchanged; its four tests passed.
+
+Fifth commit: the e2ee crate passes 375 of 375, the domain crate 264 of
+264 and the runtime library 2,845 of 2,845. `cargo nextest run -p
+agenc-relay-server --all-features --locked --no-fail-fast --test
+stage_eight_e2ee -E 'test(/root_rotation::/)'` passes in 5 of 5 runs and
+in 3 of 3 under `taskset -c 0-1`; the revert proofs and single edits ran
+the same command, and none fails to compile. On this commit's tree,
+`cargo nextest run --workspace --all-features --locked --no-fail-fast -E
+'not (test(/offline::tests::/) | test(/cli_provisioning/))'` passes 4,975
+of 4,975 and skips 62. Run alone, the excluded set fails exactly the ten
+`offline::tests` named above and the two Stage 08 `cli_provisioning`
+tests, whose `arcd init` cannot complete its authenticated storage
+operation on this host's root file system; they fail at every revision.
+The runtime library's `earlier_lineage::` tests ran the revert proof
+again with the extended test.
 
 Not run here: the full stage-nine gate, which cannot finish on this host.

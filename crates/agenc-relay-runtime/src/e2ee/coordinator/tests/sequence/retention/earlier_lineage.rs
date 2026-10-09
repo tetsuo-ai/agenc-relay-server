@@ -338,6 +338,37 @@ fn an_earlier_rotation_keeps_the_counters_it_was_admitted_with() -> TestResult {
         )?,
         None
     );
+    rotates_again(&mut harness, &continued)
+}
+
+/// The account's next root rotation from `current`: the root of the next
+/// generation and its roster at generation zero are stored, and the new
+/// roster keeps no capability head of the earlier root.
+fn rotates_again(harness: &mut Harness, current: &ArcRootIdentity) -> TestResult {
+    let generation = current.tbs.root_generation + 1;
+    let seed = ROOT_SEED + 2;
+    let next = crate::e2ee::coordinator::tests::support::root(
+        &key(seed),
+        &harness.account,
+        generation,
+        (0, 2_000_000),
+        Some((&key(ROOT_SEED + 1), current)),
+    )?;
+    let fresh = roster_under(seed, &next, 0, [0; 32], 0)?;
+    for (op, bytes) in [
+        (
+            Op::PublishIdentity,
+            wire(ArcWireObjectKind::RootIdentity, &next)?,
+        ),
+        (
+            Op::PublishRoster,
+            wire(ArcWireObjectKind::DeviceRoster, &fresh)?,
+        ),
+    ] {
+        assert_eq!(code(harness.run(op, &[], Some(&bytes))?), None);
+    }
+    assert_eq!(heads(harness)?, (Some((generation, 0)), None));
+    assert_eq!(head(harness)?, None);
     Ok(())
 }
 
