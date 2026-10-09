@@ -45,7 +45,9 @@ pub(in super::super) fn submit(
             Err(Violation::Ceiling)
         };
     }
-    if coordinator.pending.is_some() || context.is_quiescing() {
+    // Companion reads run one at a time, so one completion at most waits
+    // for a free batch slot (`parked_read`).
+    if coordinator.pending.is_some() || coordinator.replay_io_busy() || context.is_quiescing() {
         return Err(Violation::Ceiling);
     }
     let raw = context
@@ -99,6 +101,8 @@ pub(in super::super) fn completed(
     {
         coordinator.fail_link(context, link, peer, error);
     }
+    // A page read is companion work: what waited for it runs now.
+    coordinator.companion_read_settled(context);
 }
 
 fn validate(

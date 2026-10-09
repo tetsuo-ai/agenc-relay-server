@@ -252,6 +252,15 @@ enum PendingCommit {
 /// The most backlogged link items held across one in-flight batch.
 const MAX_BACKLOG: usize = 1_024;
 
+/// What one completed page of a multi-page companion read leaves it.
+enum ReadStep {
+    /// The next page, or `None` once every page is read.
+    Next(Option<agenc_relay_storage::ReadPlan>),
+    /// A batch of the coordinator's own committed during the read, which is
+    /// read again from its first page.
+    Stale,
+}
+
 /// Counters exposed through STATS FEDERATION.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CoordinatorCounters {
@@ -303,6 +312,14 @@ pub struct FederationCoordinator {
     companion: CompanionLinks,
     /// The E2EE executor; `None` on a node without a sequencer.
     companion_exec: Option<CompanionCoordinator>,
+    /// The batches of this coordinator's own that committed. No other router
+    /// writes companion rows, so a companion read is current while this
+    /// count is unchanged.
+    own_commits: u64,
+    /// The completion of a companion read that found a batch open; it
+    /// continues once no batch is open (`resume_parked_read`). It is declared
+    /// before the read slots, so its raw result drops before their leases.
+    parked_read: Option<crate::bridge::StorageReadCompletionMessage>,
     companion_page_read: Option<companion::page_read::Pending>,
     companion_ack_read: Option<Box<companion::ack_read::Pending>>,
     companion_response_read: Option<Box<response_read::Pending>>,
@@ -389,6 +406,8 @@ impl FederationCoordinator {
             queries,
             counters: CoordinatorCounters::default(),
             companion_exec: None,
+            own_commits: 0,
+            parked_read: None,
             companion_page_read: None,
             companion_ack_read: None,
             companion_response_read: None,
@@ -1251,6 +1270,19 @@ impl FederationCoordinator {
         context: &mut StateCoreContext,
         message: crate::bridge::StorageReadCompletionMessage,
     ) {
+        if self.parks_read(context, message.read_id) {
+            self.parked_read = Some(message);
+            return;
+        }
+        self.dispatch_storage_read(context, message);
+    }
+
+    /// Hands a completed storage read to the work that owns it.
+    fn dispatch_storage_read(
+        &mut self,
+        context: &mut StateCoreContext,
+        message: crate::bridge::StorageReadCompletionMessage,
+    ) {
         if object_read::owns(self, message.read_id) {
             object_read::completed(self, context, message);
             return;
@@ -1290,6 +1322,34 @@ impl FederationCoordinator {
         }
         request::replay_completed(self, context, message);
         request::drain_queued(self, context);
+    }
+
+    /// Whether the completion of a companion read waits: a batch is open,
+    /// the coordinator's own or one another router staged. The read's
+    /// continuation could not stage into it, and a batch of the
+    /// coordinator's own may change the rows it read. Page reads count as
+    /// companion work, so at most one companion read is in flight.
+    fn parks_read(&self, context: &StateCoreContext, id: StorageReadId) -> bool {
+        let companion = object_read::owns(self, id)
+            || response_read::owns(self, id)
+            || companion::ack_read::owns(self, id)
+            || companion::page_read::owns(self, id);
+        companion
+            && self.parked_read.is_none()
+            && !context.is_quiescing()
+            && (self.pending.is_some() || context.in_flight() || context.pending_len() != 0)
+    }
+
+    /// Continues the companion read whose completion waited, once no batch
+    /// is open: it is read again if a batch of the coordinator's own
+    /// committed meanwhile.
+    fn resume_parked_read(&mut self, context: &mut StateCoreContext) {
+        if self.pending.is_some() || context.in_flight() || context.pending_len() != 0 {
+            return;
+        }
+        if let Some(message) = self.parked_read.take() {
+            self.dispatch_storage_read(context, message);
+        }
     }
 
     /// Resumes the federated request whose crypto job completed.
@@ -1433,7 +1493,12 @@ impl FederationCoordinator {
         {
             None
         } else {
-            self.pending.take()
+            // The batch this receipt settles is the coordinator's own.
+            let pending = self.pending.take();
+            if pending.is_some() {
+                self.own_commits = self.own_commits.wrapping_add(1);
+            }
+            pending
         }
     }
 
@@ -1582,8 +1647,10 @@ impl FederationCoordinator {
     }
 
     fn continue_after_commit(&mut self, context: &mut StateCoreContext) {
-        // A companion batch held for a free slot goes first.
+        // A companion batch held for a free slot goes first, then a
+        // companion read that waited for this batch.
         companion::stage_held(self, context);
+        self.resume_parked_read(context);
         // A startup write that just committed resumes the reload here rather
         // than at the next maintenance tick.
         self.continue_restore(context);
@@ -1637,10 +1704,23 @@ impl FederationCoordinator {
     }
 
     fn replay_io_busy(&self) -> bool {
-        self.companion_ack_read.is_some()
+        self.companion_page_read.is_some()
+            || self.companion_ack_read.is_some()
             || self.companion_response_read.is_some()
             || self.companion_object_read.is_some()
             || self.replay_maintenance.busy()
+    }
+
+    /// Runs the work that waited for a companion read once none is in
+    /// flight: queued base and companion requests, then backlogged link
+    /// traffic.
+    fn companion_read_settled(&mut self, context: &mut StateCoreContext) {
+        if self.replay_io_busy() || context.is_quiescing() {
+            return;
+        }
+        request::drain_queued(self, context);
+        companion::drain_queued(self, context);
+        self.drain_backlog(context);
     }
 
     /// Whether companion work owns the next batch: a storage read or replay
@@ -1692,6 +1772,7 @@ impl FederationCoordinator {
         self.remote_grant_rejected();
         self.reject_pending_batch(context, error);
         companion::stage_held(self, context);
+        self.resume_parked_read(context);
         request::drain_queued(self, context);
         companion::drain_queued(self, context);
         self.drain_backlog(context);

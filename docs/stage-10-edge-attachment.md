@@ -24,9 +24,14 @@ once it is answered or refused. The fourth answers a fresh companion request
 the coordinator cannot run or stage for a local reason with its failed
 result, `E2EE_SYNCING` for a target's route state, refuses at the edge's
 ingress a payload that is no wire object of its command's kind, and bounds
-requests waiting for their payloads per peer. No specification, profile
-hash, registry entry, named limit, reply code, wire object, table, key, row
-kind, field or storage generation changed.
+requests waiting for their payloads per peer. The fifth keeps a commit
+landing during a companion storage read from failing the link: a read stays
+current across other routers' commits, its completion waits while a batch is
+open, a read across one of the coordinator's own commits is planned again,
+and a snapshot page read counts as companion work, one companion read at a
+time. No specification, profile hash, registry entry, named limit, reply
+code, wire object, table, key, row kind, field or storage generation
+changed.
 
 ## A generation's declarations name one principal, and an attachment ends with its principal (first commit)
 
@@ -589,3 +594,119 @@ the new extent of `run_with_object`, whose staging moved into
 `Fresh::stage`, and re-reviews and respans `cap74-router-accept-line`; the
 other regions of the changed files move with unchanged spans. Both source
 inventories are refreshed.
+
+## A commit landing during a companion read never fails the link (fifth commit)
+
+The third commit of [the link resume
+record](stage-10-link-resume.md) keeps link traffic and companion batches
+waiting while any batch is open, so local write contention never fails a
+link. This commit carries that rule to the coordinator's companion storage
+reads: a fresh request's object read, a stored reply's body reads, an
+acknowledgement's retention prefix read and a snapshot page read. A commit
+that lands while one of them is in flight never fails its link, whether
+another router made it or the coordinator's own batch did, which
+timer-driven base work (a grace fence, a resume reconciliation retry) and a
+base request whose signature check completed can stage at any time.
+
+The rules, in `crates/agenc-relay-runtime/src/federation/coordinator/`:
+
+- **A companion read stays current across other routers' commits.** No
+  other router writes companion rows. A node runs either the coordinator
+  role or the edge role (`daemon::attach_federation_role`), and on a
+  coordinator node only the coordinator's own batches write the
+  `E2eeObject` and `E2eeState` tables; the projector writes a barrier row
+  there only for the cross-profile assignment of a companion batch. The
+  coordinator counts its own batches as they commit (`own_commits`, at
+  `take_pending_for_receipt`), and each companion read is pinned to that
+  count instead of the storage commit sequence (`object_read::validate`,
+  `response_read::submit`, `companion::ack_read::submit`): a commit another
+  router makes while a read is in flight, or between two of its pages,
+  leaves it current, and a completion read at a later storage commit than
+  the one at submission is no longer malformed.
+- **A completion waits while a batch is open.** A companion read whose
+  completion finds a batch open, the coordinator's own or one another
+  router staged, waits (`parks_read`, `parked_read`) and continues once no
+  batch is open, at that batch's receipt or refusal (`resume_parked_read`,
+  from `continue_after_commit` and `batch_rejected_with_error`). Its
+  continuation, a fresh request's batch, an acknowledgement or a page's
+  `FETCH` advance, then finds the batch slot free. A completion that
+  arrives while the coordinator quiesces is settled at once, as before.
+- **A read across one of the coordinator's own commits is planned again.**
+  A batch of the coordinator's own that committed while a read was in
+  flight or waiting may have changed the rows the read describes. The
+  fresh request then runs again from its start and reads its object again
+  (`companion::run`); a stored reply is read again from its first body, and
+  an acknowledgement's prefix from its first page (`ReadStep::Stale`). A
+  batch that storage refused changed nothing, and the read continues with
+  what it has read.
+- **A page read is companion work.** A snapshot page read counts with the
+  other companion reads (`replay_io_busy`): link traffic, queued requests,
+  background work and expiry maintenance wait for it, and at most one
+  companion read is in flight, so a second companion batch can no longer
+  find the held batch's slot taken. When a companion read completes with no
+  other in flight, the queued base and companion requests and the backlog
+  that waited for it run (`companion_read_settled`), at a page read's
+  completion as at the others'.
+- **Companion reads run one at a time.** A page read or an
+  acknowledgement's prefix read is refused while another companion read is
+  in flight, and its link fails, as the object and reply reads already were
+  (`page_read::submit`, `ack_read::submit`). Link traffic and queued
+  requests wait while a read is in flight, so a conforming link never meets
+  the refusal, and the one completion that waits (`parked_read`) never
+  meets a second.
+
+| Test | What it pins |
+| --- | --- |
+| `federation::coordinator::tests::object_reads::contention::a_commit_of_another_router_during_an_object_read_leaves_it_current` | Through real storage, another router commits while a fresh request's object read is in flight: the read completes, and the request is answered at its sequence with the object it read, with no second read and the link up. Replaces `a_new_storage_commit_invalidates_a_pending_object_read`. |
+| `federation::coordinator::tests::object_reads::contention::an_object_read_completing_while_another_router_has_a_batch_open_waits_for_it` | The completion finds another router's batch open: it waits, nothing is staged or sent, and that batch's receipt runs the request with the object it read. |
+| `federation::coordinator::tests::object_reads::contention::an_own_commit_during_an_object_read_runs_its_request_again` | A batch of the coordinator's own opens while the read is in flight: the completion waits, and at that batch's receipt the request runs again, reads its object again and is answered at its sequence. |
+| `federation::coordinator::tests::object_reads::contention::an_object_read_behind_a_refused_batch_of_its_own_keeps_its_object` | Storage refuses that batch: the request runs with the object it read. |
+| `federation::coordinator::tests::response_reads::contention::a_commit_of_another_router_between_response_bodies_keeps_the_reply` | Another router commits between two of a stored reply's three bodies: the whole reply goes out once and the link stays up. Replaces `unrelated_storage_commit_between_response_pages_refuses_the_entire_reply`. |
+| `federation::coordinator::tests::response_reads::contention::an_own_commit_between_response_bodies_reads_the_reply_again` | A batch of the coordinator's own commits between two bodies: the completion waits, the reply is read again from its first body, and it goes out once. |
+| `federation::coordinator::tests::combined_barriers::ack_read::an_ack_read_keeps_its_pages_across_a_commit_of_another_router` | A prefix page completes while another router's batch is open: it waits, that batch commits, the read continues with its two remaining pages, and the acknowledgement commits with the link up. Replaces `an_unrelated_commit_between_ack_pages_refuses_mixed_inventory_without_advancing_coverage`. |
+| `federation::coordinator::tests::combined_barriers::ack_read::an_ack_read_completing_behind_a_batch_of_its_own_reads_again` | A batch of the coordinator's own opens while the prefix read is in flight: the page waits, at that batch's receipt the prefix is read again from its first page, and the acknowledgement commits with the link up. Replaces `an_ack_read_completing_behind_a_staged_batch_fails_its_link`. |
+| `federation::coordinator::tests::combined_barriers::ack_read::an_ack_read_completing_behind_a_refused_batch_of_its_own_continues` | Storage refuses that batch: the waiting page is admitted and the read continues with its remaining pages. |
+| `federation::coordinator::tests::combined_barriers::page_read::link_traffic_waits_for_a_page_read_and_runs_at_its_completion` | A base `FACK` that arrives while a page read is in flight waits in the backlog, and the read's completion runs it. |
+| `federation::coordinator::tests::combined_barriers::page_read::a_page_read_completion_waits_for_an_open_batch` | A page read's completion waits while another router's batch is open and settles at that batch's receipt. |
+| `federation::coordinator::tests::combined_barriers::page_read::the_base_request_queue_waits_for_a_page_read_and_drains_at_its_completion` | The base request queue is not visited while a page read is in flight, and is at its completion. |
+| `federation::coordinator::tests::object_reads::contention::a_completion_while_quiescing_settles_at_once_behind_another_batch` | A completion that arrives while the coordinator quiesces is settled at once although another router's batch is open: nothing waits, and the read's reservation is released. |
+| `federation::coordinator::tests::combined_barriers::ack_read::a_companion_read_is_refused_while_another_is_in_flight` | A snapshot page read is refused while an acknowledgement's prefix read is in flight, and the prefix read while a page read is. |
+
+`object_reads::failures::malformed_raw_reads_never_stage_a_response` and
+`response_reads::failures::malformed_raw_completions_fail_before_any_response_is_queued`
+no longer count a completion at another storage commit among their
+malformed completions.
+
+Single edits fail tests, each run on the coordinator's combined barrier,
+object read and response read tests: settling every completion at once fails
+eight; letting a completion wait while the coordinator quiesces fails the
+quiescing test; waiting only for the coordinator's own batch fails three;
+resuming a waiting read at no receipt fails six, and at no refusal two; not
+counting the coordinator's own commits fails three; keeping an object read,
+a reply's bodies or a prefix's pages across one of the coordinator's own
+commits fails one test each; leaving page reads out of companion work fails
+three, and settling nothing at a page read's completion two; visiting no
+base request at that completion fails one; letting a page read, or a prefix
+read, start while another companion read is in flight fails the
+one-at-a-time test; and refusing a completion read at an earlier storage
+commit than the current one, the former pin, fails two object read tests,
+one response read test and one acknowledgement test.
+
+The release coverage policy gains `coordinator-parked-read`,
+`coordinator-parked-read-resume` and `coordinator-companion-read-settled`
+(regions). It re-reviews and re-spans the fresh object read's regions
+`cap79-fresh-object-014-submit` through `-017-admit`, the response read's
+`cap79-response-018-submit`, `-021-advance` and `-023-prepare` through
+`-025-admit`, the acknowledgement read's `cap79-replay-089-submit`,
+`-090-prepare` and `-093-completed` through `-095-advance`, and
+`companion-page-read-completed`, whose reasons now name the coordinator's
+own commits; `companion-page-read-submit`, whose reason now names one
+companion read at a time, as the prefix read's `cap79-replay-089-submit`
+does; `cap79-maintenance-055-replay-io-busy`, which now counts page reads;
+`cap79-maintenance-056-reject-pending-batch` and
+`cap81-mod-federationcoordinator-batch-rejected-with-error`, which resume a
+waiting read at a refusal; `cap79-request-expiry-022-apply-pending-receipt`,
+which counts the coordinator's own commits; and `cap79-fresh-object-018-run`
+and `-019-run-with-object`, for `companion::run`, which the object read now
+calls. The other regions of the changed files move with unchanged spans.
+Both source inventories are refreshed.

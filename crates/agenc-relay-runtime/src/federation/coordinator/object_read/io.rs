@@ -38,42 +38,53 @@ pub(in super::super) fn completed(
         ..
     } = *pending;
     drop((_raw, _decode));
-    let result = result.and_then(|resolved| {
-        companion::run_with_object(
+    let result = match result {
+        Ok(Some(resolved)) => companion::run_with_object(
             coordinator,
             context,
             link,
             identity.peer,
             operation.complete,
             Some(&resolved),
-        )
-    });
+        ),
+        // A batch of the coordinator's own committed during the read: the
+        // request runs again against it.
+        Ok(None) => {
+            drop(_metadata);
+            companion::run(
+                coordinator,
+                context,
+                link,
+                identity.peer,
+                operation.complete,
+            )
+        }
+        Err(error) => Err(error),
+    };
     if let Err(error) = result
         && coordinator.link_is_live(link, identity.peer)
         && !context.is_quiescing()
     {
         coordinator.fail_link(context, link, identity.peer, error);
     }
-    if !context.is_quiescing() {
-        companion::drain_queued(coordinator, context);
-        coordinator.drain_backlog(context);
-    }
+    coordinator.companion_read_settled(context);
 }
 
+/// Admits the object the read found, or `None` when the read is no longer
+/// current and its request runs again.
 fn admit(
     coordinator: &FederationCoordinator,
     context: &StateCoreContext,
     completed: &Completed,
-) -> Result<Resolved, Violation> {
-    super::validate(coordinator, context, &completed.pending)?;
+) -> Result<Option<Resolved>, Violation> {
+    if !super::validate(coordinator, context, &completed.pending)? {
+        return Ok(None);
+    }
     let result = completed
         .message
         .result
         .as_ref()
         .map_err(|_| Violation::Ceiling)?;
-    if result.storage_commit_sequence != completed.pending.commit {
-        return Err(Violation::Phase);
-    }
     if result.truncated || result.records.len() > 1 {
         return Err(Violation::Codec);
     }
@@ -96,5 +107,6 @@ fn admit(
         records,
         &context.backing_reservations(),
     )
+    .map(Some)
     .map_err(companion::fault_violation)
 }

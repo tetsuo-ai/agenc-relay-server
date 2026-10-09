@@ -521,7 +521,8 @@ fn revised_writes(
     Ok((writes, owners))
 }
 
-fn run(
+/// Runs one complete request while no batch is open.
+pub(super) fn run(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,

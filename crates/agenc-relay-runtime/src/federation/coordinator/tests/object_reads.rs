@@ -1,5 +1,6 @@
 //! An evicted object is read once, reauthorized, and published only after its receipt.
 #![forbid(unsafe_code)]
+mod contention;
 mod failures;
 mod fixture;
 mod resident;
