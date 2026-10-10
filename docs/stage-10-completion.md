@@ -434,9 +434,10 @@ routes record](stage-10-recreated-routes.md).
 Plaintext between the accounts of a direct pair whose encrypted binding
 is live, closing or closed refused on every node, the coordinator deciding
 every line with the route table's one predicate, a direct pair's routes
-kept ordered and indexed, and a direct reservation bound only to the pair
-it reserved (D-50, SDK program, outside master #35), are recorded in [the
-direct plaintext record](stage-10-direct-plaintext.md).
+kept ordered and indexed, a direct reservation bound only to the pair it
+reserved, and daemon tests on one edge, across two edges and from the
+coordinator's own listener (D-50, SDK program, outside master #35), are
+recorded in [the direct plaintext record](stage-10-direct-plaintext.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

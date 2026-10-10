@@ -13,7 +13,8 @@ encrypted binding is live, closing or closed, on every node, until the
 pair's next incarnation binds, which refuses it in turn: the coordinator
 decides every line, from its own clients and from every edge, with the route
 table's one predicate, and an edge refuses earlier what its own projection
-shows. No
+shows. The fourth drives these rules through the production daemons, on one
+edge, across two edges and from the coordinator's own listener. No
 specification, profile hash, registry entry, named limit, reply code, wire
 object, table, key, row kind, field or storage generation changed.
 
@@ -222,7 +223,30 @@ tests); the coordinator refusing a `PRIVMSG` alone (the coordinator tests);
 the edge rendering the coordinator's refusal with the base renderer (the
 rendering test); and the coordinator's own client's refused line left
 uncharged (the charging test). The coordinator's two checks are pinned
-through the daemons by the next commit.
+through the daemons below.
+
+## Through the production daemons (fourth commit)
+
+`crates/agenc-relay-server/tests/stage_eight_e2ee/direct_plaintext.rs`
+drives the Stage 08 network of production daemons, a coordinator and two
+edges, through the client surface. Each refused line is followed by a line
+of the sender's to a plain channel every session joined, which every target
+reads up to: the coordinator orders a sender's lines and every node delivers
+them in that order, so a target that reads the fence without the refused
+line never received it.
+
+| Test | What it pins |
+| --- | --- |
+| `an_encrypted_pair_on_one_edge_refuses_plaintext_live_closed_and_recreated` | Two accounts on edge A bind, bootstrap and use a direct conversation. While it is live, after its authorized close and before the next incarnation binds, and after incarnation one, naming that close, binds, bootstraps and carries traffic, a `PRIVMSG` and a `NOTICE` to the peer, its nickname in upper case and a list naming carol first are each `FAIL ... E2EE_REQUIRED` with the targets as sent, and neither the peer nor carol receives them; the reverse direction is refused too; carol, an account in no pair, receives the creator's plaintext; and once incarnation one is live the pair takes no other reservation. |
+| `an_encrypted_pair_across_edges_and_the_coordinator_refuses_plaintext_live_closed_and_recreated` | The same, with the two accounts on edge A and edge B and carol on edge B, plus a second session of alice's account on the coordinator's own listener: its `PRIVMSG` to bob and bob's `NOTICE` to it are refused, and neither alice's sessions nor bob receives them, in all three phases. |
+
+The tests pass in 5 of 5 runs, and in 3 of 3 confined to two processors.
+Each of these fails them: the coordinator's check of an edge's request
+removed (the cross-edge test); its check of its own clients removed (the
+cross-edge test, at the coordinator's session); the edge rendering the
+coordinator's refusal with the base renderer (the cross-edge test); and the
+edge's rule set back to the start commit with both of the coordinator's
+checks removed (both tests).
 
 ## Stage 08 evidence (G-07)
 
@@ -236,8 +260,8 @@ every count of `conformance/stage-eight-model.toml` is unchanged: actions
 `destroying_an_instance_removes_only_its_tombstone` (gate 4) keep their
 names and bodies. The model and the transcript catalog
 (`scripts/run-stage-eight-model.sh`, `scripts/run-stage-eight-transcripts.sh`)
-were run at each of the three commits. The evidence that changed is new
-domain, coordinator and edge tests of companion Sections 9.4, 11.4,
+were run at each of the four commits. The evidence that changed is new
+domain, coordinator, edge and daemon tests of companion Sections 9.4, 11.4,
 11.5 and 12.5, with no transcript row; no box changes.
 
 ## Storage (G-08)
