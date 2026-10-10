@@ -6,9 +6,10 @@ FETCH BINDING-LOCKS`, `EKEY FETCH CAPABILITIES` and `EGROUP FETCH
 AUTHORIZATIONS`, `ACKS` and `RECEIPTS` page over one immutable cut each,
 continued only by the one live cursor of that cut, and every page is packed
 against all three batch limits together. The first commit holds the rules
-and their unit, handler and coordinator tests. No specification, profile
-hash, registry entry, named limit, reply code, wire object, table, key, row
-kind, field or storage generation changed.
+and their unit, handler and coordinator tests. The second adds a daemon test
+that pages a capability set through an edge. No specification, profile hash,
+registry entry, named limit, reply code, wire object, table, key, row kind,
+field or storage generation changed.
 
 ## The text these rules implement
 
@@ -336,6 +337,19 @@ regions: `companion-fresh-request-staging` 114/154 (106/146),
 its page helper takes no cursor) and
 `cap79-fresh-object-020-request-committed` 27/34 (24/31).
 
+## Daemon test (second commit)
+
+`listing_pages` in the Stage 08 daemon suite runs the production coordinator
+and two production edges with both profiles active:
+
+| Test | What it drives |
+| --- | --- |
+| `listing_pages::a_capability_set_longer_than_one_batch_pages_through_an_edge_over_one_cut` | An account on edge A whose roster holds 40 devices attaches each in turn and publishes its statement. `EKEY FETCH CAPABILITIES *` opens an object batch of 32 statements naming a next cursor; the last device publishes its next statement; the cursor's page holds the other 8 under the same snapshot token and names `*`, and the 40 statements are every device once in Device-ID order, the replaced statement among them. The consumed cursor and a forged one are refused `FAIL EKEY E2EE_OBJECT_NOT_FOUND`, a new cut holds the replacement, and edge A's link neither closes nor links again. |
+
+At this commit the test passes in each of three runs. At the start commit,
+through an export of that commit with this test file, it fails at the
+second page's snapshot token, exit 100.
+
 ## Validation
 
 First commit, with tests in the program's test environment (HOME and
@@ -360,6 +374,23 @@ system):
 - `git diff --cached --check`: exit 0.
 - The program's 59-command fast gate on the staged tree: 59 of 59 exit 0.
 - Not run here: the full stage-nine gate.
+
+Second commit, in the same environment:
+
+- `cargo nextest run -p agenc-relay-server --test stage_eight_e2ee
+  --all-features --locked --no-fail-fast -E 'test(/listing_pages::/)'`: 1
+  of 1 passes, exit 0, in each of three runs.
+- The same command at the start commit, through an export of that commit
+  with this test file and its own target directory: 0 of 1 passes, exit
+  100.
+- `cargo nextest run --workspace --all-features --locked --no-fail-fast`:
+  5,135 of 5,135 pass, exit 0, 24 skipped by the workspace's own
+  configuration.
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy --workspace --all-targets --all-features --locked --
+  -D warnings`: exit 0.
+- `git diff --cached --check`: exit 0.
+- The program's 59-command fast gate on the staged tree: 59 of 59 exit 0.
 
 ## What stays open
 

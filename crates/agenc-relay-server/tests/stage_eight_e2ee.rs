@@ -109,6 +109,8 @@ mod credential_replacement;
 mod encrypted_clients;
 #[path = "stage_eight_e2ee/link_faults.rs"]
 mod link_faults;
+#[path = "stage_eight_e2ee/listing_pages.rs"]
+mod listing_pages;
 #[path = "stage_eight_e2ee/login_after_registration.rs"]
 mod login_after_registration;
 #[path = "support/loopback_ports.rs"]
