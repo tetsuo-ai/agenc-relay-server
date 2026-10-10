@@ -9,7 +9,6 @@
 //! verify the quorum themselves before applying a state.
 
 use agenc_relay_crypto::{SemanticHashDomain, SignatureDomain};
-use agenc_relay_domain::e2ee::limits::MAX_BATCH_OBJECTS;
 use agenc_relay_domain::e2ee::projection::{EmptyKind, EventKind, PendingKind, StoreKind};
 use agenc_relay_domain::e2ee::sequencer_log::{CandidateSlot, SequencerLog};
 use agenc_relay_e2ee::E2eeError;
@@ -46,6 +45,7 @@ use agenc_relay_storage::e2ee_records::{
 use super::super::request::{Outcome, ResponseObject, ResultBody, state_row};
 use super::super::{CompanionCoordinator, ConversationState};
 use super::ack_context::AckSigner;
+use super::listing_snapshot::{self, Listing};
 use super::route::audience;
 use super::{Exec, Fail, cursor};
 
@@ -1801,18 +1801,14 @@ fn install_successor(
     }
 }
 
-fn page(
-    exec: &mut Exec<'_>,
-    objects: Vec<Vec<u8>>,
-    empty: EmptyKind,
-    cursor_after: Option<[u8; 32]>,
-) -> Result<Outcome, Fail> {
+/// A singleton object answer: a fresh snapshot token and no next cursor
+/// (companion 12.5), or `empty`.
+fn page(exec: &mut Exec<'_>, objects: Vec<Vec<u8>>, empty: EmptyKind) -> Result<Outcome, Fail> {
     if objects.is_empty() {
         return Ok(Outcome::scalar(ResultBody::Empty(empty)));
     }
     let mut outcome = Outcome::scalar(ResultBody::ObjectPage);
     outcome.snapshot_token = Some(exec.random()?);
-    outcome.next_cursor = cursor_after;
     outcome.responses = objects
         .into_iter()
         .map(|bytes| ResponseObject {
@@ -1859,119 +1855,67 @@ pub fn fetch_object(exec: &mut Exec<'_>) -> Result<super::Prepared, Fail> {
                 && super::membership::readable(exec, &conversation_id, bytes)
         })
         .map(<[u8]>::to_vec);
-    page(exec, bytes.into_iter().collect(), EmptyKind::Objects, None)
+    page(exec, bytes.into_iter().collect(), EmptyKind::Objects)
         .map(|outcome| super::Prepared::Complete(Box::new(outcome)))
 }
 
-/// A page of retained proof objects sorted by their accumulator key.
-fn proof_page(
-    exec: &mut Exec<'_>,
-    ids: Vec<[u8; 32]>,
-    cursor: Option<[u8; 32]>,
-    empty: EmptyKind,
-) -> Result<Outcome, Fail> {
-    let start = cursor.map_or(0, |cursor| {
-        ids.iter()
-            .position(|id| *id == cursor)
-            .map_or(ids.len(), |index| index + 1)
-    });
-    let window: Vec<[u8; 32]> = ids
-        .iter()
-        .skip(start)
-        .take(MAX_BATCH_OBJECTS + 1)
-        .copied()
-        .collect();
-    let next = window
-        .get(MAX_BATCH_OBJECTS)
-        .and_then(|_| window.get(MAX_BATCH_OBJECTS - 1).copied());
-    let objects: Vec<Vec<u8>> = window
-        .iter()
-        .take(MAX_BATCH_OBJECTS)
-        .filter_map(|id| exec.coordinator.state.objects.get(id).cloned())
-        .collect();
-    page(exec, objects, empty, next)
-}
-
-/// `fetch_authorizations`.
+/// `fetch_authorizations`: the candidate's retained approvals in their
+/// accumulator order, paged over one immutable cut.
 pub fn fetch_authorizations(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
-    let (conversation_id, candidate_id, cursor) = exec.params().read(|reader| {
+    let (conversation, candidate, cursor) = exec.params().read(|reader| {
         Ok((
             reader.fixed::<32>()?,
             reader.fixed::<32>()?,
             cursor(reader)?,
         ))
     })?;
-    exec.attached_device()?;
-    let ids: Vec<[u8; 32]> = exec
-        .coordinator
-        .state
-        .conversations
-        .get(&conversation_id)
-        .and_then(|state| state.approvals.get(&candidate_id))
-        .map(|approvals| approvals.values().copied().collect())
-        .unwrap_or_default();
-    proof_page(exec, ids, cursor, EmptyKind::Authorizations)
+    let attachment = exec.attached_device()?;
+    let listing = Listing::Authorizations {
+        conversation,
+        candidate,
+    };
+    let scope = listing_snapshot::scope(exec, listing, Some(attachment))?;
+    listing_snapshot::objects_page(exec, scope, cursor, EmptyKind::Authorizations)
 }
 
-/// `fetch_acks`.
+/// `fetch_acks`: the acknowledgements of one candidate or ReInit attempt
+/// in old-leaf order, paged over one immutable cut.
 pub fn fetch_acks(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
-    let (conversation_id, selector, cursor) = exec.params().read(|reader| {
+    let (conversation, selector, cursor) = exec.params().read(|reader| {
         Ok((
             reader.fixed::<32>()?,
             reader.fixed::<32>()?,
             cursor(reader)?,
         ))
     })?;
-    exec.attached_device()?;
-    let ids: Vec<[u8; 32]> = exec
-        .coordinator
-        .state
-        .conversations
-        .get(&conversation_id)
-        .and_then(|state| state.acks.get(&selector))
-        .map(|acks| acks.values().copied().collect())
-        .unwrap_or_default();
-    proof_page(exec, ids, cursor, EmptyKind::Acks)
+    let attachment = exec.attached_device()?;
+    let listing = Listing::Acks {
+        conversation,
+        selector,
+    };
+    let scope = listing_snapshot::scope(exec, listing, Some(attachment))?;
+    listing_snapshot::objects_page(exec, scope, cursor, EmptyKind::Acks)
 }
 
-/// `fetch_receipts`: contiguous records from the requested sequence.
+/// `fetch_receipts`: contiguous records from the requested sequence, paged
+/// over one immutable cut.
 pub fn fetch_receipts(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
-    let (conversation_id, first, cursor) = exec
+    let (conversation, first, cursor) = exec
         .params()
         .read(|reader| Ok((reader.fixed::<32>()?, reader.u64()?, cursor(reader)?)))?;
-    exec.attached_device()?;
-    let state = exec
+    let attachment = exec.attached_device()?;
+    if !exec
         .coordinator
         .state
         .conversations
-        .get(&conversation_id)
-        .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
-    let start = cursor
-        .and_then(|cursor| {
-            state
-                .records
-                .iter()
-                .find(|(_, id)| **id == cursor)
-                .map(|(sequence, _)| sequence.saturating_add(1))
-        })
-        .unwrap_or(first);
-    let mut objects = Vec::new();
-    let mut next = None;
-    let mut expected = start;
-    for (sequence, id) in state.records.range(start..) {
-        if *sequence != expected {
-            break;
-        }
-        if objects.len() == MAX_BATCH_OBJECTS {
-            next = objects
-                .last()
-                .and_then(|_| state.records.get(&(expected - 1)).copied());
-            break;
-        }
-        if let Some(bytes) = exec.coordinator.state.objects.get(id) {
-            objects.push(bytes.clone());
-        }
-        expected = expected.saturating_add(1);
+        .contains_key(&conversation)
+    {
+        return Err(Fail::with(E2eeReplyCode::RouteInvalid, &conversation));
     }
-    page(exec, objects, EmptyKind::Receipts, next)
+    let listing = Listing::Receipts {
+        conversation,
+        first,
+    };
+    let scope = listing_snapshot::scope(exec, listing, Some(attachment))?;
+    listing_snapshot::objects_page(exec, scope, cursor, EmptyKind::Receipts)
 }

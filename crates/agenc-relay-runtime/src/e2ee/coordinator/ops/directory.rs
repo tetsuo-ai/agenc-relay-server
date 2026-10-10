@@ -8,7 +8,6 @@ use std::collections::BTreeSet;
 use agenc_relay_domain::e2ee::directory::{
     CapabilityHead, ClaimOutcome, ClaimParameters, Directory, Package,
 };
-use agenc_relay_domain::e2ee::limits::MAX_BATCH_OBJECTS;
 use agenc_relay_domain::e2ee::projection::{EmptyKind, StoreKind};
 use agenc_relay_e2ee::identity::{
     ValidationTime, VerifiedRoot, capability_predecessor, roster_predecessor, verify_capabilities,
@@ -38,6 +37,7 @@ use agenc_relay_storage::e2ee_records::{
 
 use super::super::CompanionCoordinator;
 use super::super::request::{Outcome, ResponseObject, ResultBody, state_row};
+use super::listing_snapshot::{self, Listing};
 use super::{Exec, Fail, account, cursor};
 
 fn digest(exec: &Exec<'_>, account: &[u8; 24]) -> Result<[u8; 32], Fail> {
@@ -95,43 +95,30 @@ pub fn fetch_identity(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 }
 
 /// `fetch_root_chain`: one `root_identity_chain` object holding the
-/// contiguous page from the requested generation.
+/// contiguous page of an immutable cut of the account's roots from the
+/// requested generation (companion 11.6, 11.7).
 pub fn fetch_root_chain(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
-    let (target, first, _cursor) = exec
+    let (target, first, cursor) = exec
         .params()
         .read(|reader| Ok((account(reader)?, reader.u64()?, cursor(reader)?)))?;
     exec.account_id()?;
     let digest = digest(exec, &target)?;
-    let Some(root) = exec
-        .coordinator
-        .state
-        .directory
-        .account(&digest)
-        .and_then(|entry| entry.root.as_ref())
-    else {
+    usize::try_from(first).map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    let listing = Listing::RootChain {
+        account: digest,
+        first,
+    };
+    let scope = listing_snapshot::scope(exec, listing, None)?;
+    let Some(prepared) = listing_snapshot::prepare(exec, scope, cursor)? else {
         return Ok(Outcome::scalar(ResultBody::Empty(EmptyKind::RootChain)));
     };
-    let start = usize::try_from(first).map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
     let mut roots = Vec::new();
-    for id in root.chain.iter().skip(start).take(MAX_BATCH_OBJECTS) {
-        let bytes = exec
-            .coordinator
-            .state
-            .objects
-            .get(id)
-            .ok_or_else(|| Fail::from(E2eeReplyCode::ObjectNotFound))?;
-        let object = ArcWireObject::peek(bytes)
-            .ok()
-            .and_then(|(kind, _)| (kind == ArcWireObjectKind::RootIdentity).then_some(bytes))
-            .ok_or_else(|| Fail::from(E2eeReplyCode::ObjectNotFound))?;
+    for bytes in prepared.objects(exec)? {
         let mut budget = DecodeBudget::new(MAX_IDENTITY_OBJECT, 1 << 12);
         let wire =
-            ArcWireObject::decode_kind(object, Some(ArcWireObjectKind::RootIdentity), &mut budget)
+            ArcWireObject::decode_kind(&bytes, Some(ArcWireObjectKind::RootIdentity), &mut budget)
                 .map_err(|_| Fail::from(E2eeReplyCode::ObjectNotFound))?;
         roots.push(decode::<ArcRootIdentity>(wire.body(), MAX_IDENTITY_OBJECT)?);
-    }
-    if roots.is_empty() {
-        return Ok(Outcome::scalar(ResultBody::Empty(EmptyKind::RootChain)));
     }
     let chain = ArcAccountRootChain {
         account_id: Opaque::from_slice(&target)
@@ -144,7 +131,7 @@ pub fn fetch_root_chain(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let bytes = ArcWireObject::new(ArcWireObjectKind::RootIdentityChain, body)
         .and_then(|object| object.encode())
         .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))?;
-    single(exec, Some(bytes), EmptyKind::RootChain)
+    Ok(prepared.outcome(vec![bytes]))
 }
 
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler validates the root chain, derives the new head, and stages the object, head row, and directory event as one atomic set
@@ -328,49 +315,16 @@ pub fn publish_roster(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     Ok(outcome)
 }
 
-/// `fetch_capabilities`: every active device once, in Device ID order.
+/// `fetch_capabilities`: every active device once, in Device ID order,
+/// paged over one immutable cut of the account's capability set.
 pub fn fetch_capabilities(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let (target, cursor) = exec
         .params()
         .read(|reader| Ok((account(reader)?, cursor(reader)?)))?;
     exec.account_id()?;
     let digest = digest(exec, &target)?;
-    let pages = exec.coordinator.state.directory.capability_page(&digest);
-    let start = cursor.map_or(0, |cursor| {
-        pages
-            .iter()
-            .position(|(_, id)| *id == cursor)
-            .map_or(pages.len(), |index| index + 1)
-    });
-    let window: Vec<[u8; 32]> = pages
-        .iter()
-        .skip(start)
-        .take(MAX_BATCH_OBJECTS + 1)
-        .map(|(_, id)| *id)
-        .collect();
-    let next = window
-        .get(MAX_BATCH_OBJECTS)
-        .and_then(|_| window.get(MAX_BATCH_OBJECTS - 1).copied());
-    let objects: Vec<Vec<u8>> = window
-        .iter()
-        .take(MAX_BATCH_OBJECTS)
-        .filter_map(|id| exec.coordinator.state.objects.get(id).cloned())
-        .collect();
-    if objects.is_empty() {
-        return Ok(Outcome::scalar(ResultBody::Empty(EmptyKind::Capabilities)));
-    }
-    let mut outcome = Outcome::scalar(ResultBody::ObjectPage);
-    outcome.snapshot_token = Some(exec.random()?);
-    outcome.next_cursor = next;
-    outcome.responses = objects
-        .into_iter()
-        .map(|bytes| ResponseObject {
-            bytes,
-            delivery_token: None,
-            target_device_id: None,
-        })
-        .collect();
-    Ok(outcome)
+    let scope = listing_snapshot::scope(exec, Listing::Capabilities { account: digest }, None)?;
+    listing_snapshot::objects_page(exec, scope, cursor, EmptyKind::Capabilities)
 }
 
 /// `publish_capabilities`.
@@ -437,9 +391,9 @@ pub fn publish_capabilities(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 }
 
 /// `fetch_binding_locks`: the contiguous chain of one root from the
-/// requested sequence.
+/// requested sequence, paged over one immutable cut.
 pub fn fetch_binding_locks(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
-    let (target, fingerprint, first, _cursor) = exec.params().read(|reader| {
+    let (target, fingerprint, first, cursor) = exec.params().read(|reader| {
         Ok((
             account(reader)?,
             reader.fixed::<32>()?,
@@ -449,39 +403,13 @@ pub fn fetch_binding_locks(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     })?;
     exec.account_id()?;
     let digest = digest(exec, &target)?;
-    let objects: Vec<Vec<u8>> = exec
-        .coordinator
-        .state
-        .binding_locks
-        .get(&(digest, fingerprint))
-        .map(|locks| {
-            locks
-                .range(first..)
-                .take(MAX_BATCH_OBJECTS)
-                .filter_map(|(_, entry)| {
-                    exec.coordinator
-                        .state
-                        .objects
-                        .get(&entry.object_id)
-                        .cloned()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    if objects.is_empty() {
-        return Ok(Outcome::scalar(ResultBody::Empty(EmptyKind::BindingLock)));
-    }
-    let mut outcome = Outcome::scalar(ResultBody::ObjectPage);
-    outcome.snapshot_token = Some(exec.random()?);
-    outcome.responses = objects
-        .into_iter()
-        .map(|bytes| ResponseObject {
-            bytes,
-            delivery_token: None,
-            target_device_id: None,
-        })
-        .collect();
-    Ok(outcome)
+    let listing = Listing::BindingLocks {
+        account: digest,
+        root: fingerprint,
+        first,
+    };
+    let scope = listing_snapshot::scope(exec, listing, None)?;
+    listing_snapshot::objects_page(exec, scope, cursor, EmptyKind::BindingLock)
 }
 
 /// `whoami`.

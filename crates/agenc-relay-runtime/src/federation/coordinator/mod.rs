@@ -1374,6 +1374,7 @@ impl FederationCoordinator {
             || self.companion_timer_fired(context, entry)
             || companion::snapshot_timer_fired(self, context, entry)
             || companion::mailbox_timer_fired(self, context, entry)
+            || companion::listing_timer_fired(self, context, entry)
             || self.queries.timer_fired(context, entry)
     }
 

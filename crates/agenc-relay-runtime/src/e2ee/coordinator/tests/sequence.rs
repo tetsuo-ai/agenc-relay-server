@@ -46,6 +46,7 @@ mod ack_context;
 
 mod core_bindings;
 mod leaf_membership;
+pub(in crate::e2ee::coordinator::tests) mod listing_pages;
 mod object_expiry;
 mod owners;
 mod recreated_routes;

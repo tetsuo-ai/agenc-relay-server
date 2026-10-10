@@ -347,3 +347,50 @@ fn a_superseded_attachment_is_neither_targeted_nor_standing() -> TestResult {
     assert!(!standing(&harness));
     Ok(())
 }
+
+/// A refused declaration fences its origin where it stood and releases the
+/// listing cuts that origin held (companion 11.7, 16).
+#[test]
+fn a_refused_declaration_releases_its_origins_listing_cuts() -> TestResult {
+    use crate::e2ee::coordinator::tests::sequence::listing_pages::{
+        Requester, directory::locks_from, directory::seed_locks, evaluate,
+    };
+    let mut sync = attached(1)?;
+    let previous = opened(&mut sync)?;
+    seed_locks(&mut sync.harness, 0, 40)?;
+    let requester = Requester {
+        user: [0x68; 16],
+        origin: held_origin(&sync)?.clone(),
+        monotonic_millis: sync.harness.monotonic_millis,
+        session: true,
+    };
+    let params = [locks_from(&sync.harness, 0)?, vec![0]].concat();
+    let (outcome, _) = evaluate(
+        &sync.harness,
+        &requester,
+        super::super::Op::FetchBindingLocks,
+        &params,
+    )?;
+    let mut outcome = outcome.map_err(|fail| format!("{:?}", fail.code))?;
+    for effect in std::mem::take(&mut outcome.effects) {
+        effect(&mut sync.harness.coordinator.state);
+    }
+    assert_eq!(
+        sync.harness.coordinator.state.listing_snapshots.cursors(),
+        1
+    );
+    let account = sync.harness.account;
+    let refused = declare_one(
+        &mut sync,
+        previous,
+        Some((account, 3)),
+        Some((DEVICE_ID, 2)),
+    )?;
+    assert!(refused.is_empty(), "nothing is acknowledged");
+    assert_eq!(held(&sync)?, (0, 0, true));
+    assert_eq!(
+        sync.harness.coordinator.state.listing_snapshots.cursors(),
+        0
+    );
+    Ok(())
+}

@@ -280,6 +280,9 @@ impl CompanionCoordinator {
         self.state
             .mailbox_snapshots
             .fence_incarnations(home, incarnation);
+        self.state
+            .listing_snapshots
+            .fence_incarnations(home, incarnation);
         let sync = self.peers.entry(peer).or_default();
         sync.origins_reset = true;
         sync.origins_ready = false;
@@ -429,6 +432,7 @@ impl CompanionCoordinator {
             let held = origin.generation;
             self.state.entitlements.mark_departure(peer);
             self.state.mailbox_snapshots.close_origin(key, held);
+            self.state.listing_snapshots.close_origin(key);
         }
         Vec::new()
     }
@@ -695,6 +699,7 @@ impl CompanionCoordinator {
         self.state
             .mailbox_snapshots
             .close_origin(key, descriptor.origin_generation);
+        self.state.listing_snapshots.close_origin(key);
         let ack = line(
             &self.server_name,
             &CompanionFrame::OriginAck {
