@@ -25,6 +25,7 @@ fn removing_a_projection_releases_only_its_own_target_and_lock_indexes() -> Test
             incarnation: 0,
             binding_id: [4; 32],
             binding_generation: 0,
+            state_generation: 0,
             lifecycle: RouteLifecycle::Active,
             recovery: RecoveryState::Normal,
         };
@@ -553,6 +554,7 @@ fn reservations_expire_and_collisions_have_one_winner() -> TestResult {
         incarnation: 0,
         binding_id: [5; 32],
         binding_generation: 0,
+        state_generation: 0,
         lifecycle: RouteLifecycle::Active,
         recovery: RecoveryState::Normal,
     };
@@ -755,6 +757,7 @@ fn a_held_lock_slot_admits_no_second_binding_whatever_the_lineage_index() -> Tes
         incarnation: 0,
         binding_id: [4; 32],
         binding_generation: 0,
+        state_generation: 0,
         lifecycle: RouteLifecycle::Tombstone { close_id: [9; 32] },
         recovery: RecoveryState::Normal,
     };
@@ -825,6 +828,7 @@ fn a_restore_in_any_order_indexes_the_newest_route() -> TestResult {
             incarnation: 0,
             binding_id: [4; 32],
             binding_generation: 0,
+            state_generation: 0,
             lifecycle: RouteLifecycle::Tombstone { close_id: [9; 32] },
             recovery: RecoveryState::Normal,
         };
@@ -879,6 +883,7 @@ fn a_restore_in_any_order_indexes_the_newest_route() -> TestResult {
         incarnation: 0,
         binding_id: [4; 32],
         binding_generation: 0,
+        state_generation: 0,
         lifecycle: RouteLifecycle::Tombstone { close_id: [9; 32] },
         recovery: RecoveryState::Normal,
     };
@@ -911,6 +916,7 @@ fn a_restore_in_any_order_indexes_the_newest_route() -> TestResult {
         incarnation: 0,
         binding_id: [4; 32],
         binding_generation: 0,
+        state_generation: 0,
         lifecycle: RouteLifecycle::Tombstone { close_id: [9; 32] },
         recovery: RecoveryState::Normal,
     };
@@ -928,6 +934,197 @@ fn a_restore_in_any_order_indexes_the_newest_route() -> TestResult {
             table.restore_entry(entry);
         }
         assert_eq!(table.direct_route(&pair), Some(&live));
+    }
+    Ok(())
+}
+
+/// An edge's projections of one pair carry no incarnation or binding
+/// generation; their projected state generation orders them, then a route
+/// that is not a tombstone, so the pair indexes its newest route whatever
+/// the order its projections arrive in (companion 12.5).
+#[test]
+fn projections_of_one_pair_order_by_their_state_generation() -> TestResult {
+    let pair = DirectPair::new(account(1), account(2))?;
+    let older = RouteEntry {
+        conversation_id: ConversationId([1; 32]),
+        target: RouteTarget::Direct(pair),
+        lock: SemanticLockId([3; 32]),
+        lineage: SemanticLockId([3; 32]),
+        incarnation: 0,
+        binding_id: [4; 32],
+        binding_generation: 0,
+        state_generation: 7,
+        lifecycle: RouteLifecycle::Tombstone { close_id: [9; 32] },
+        recovery: RecoveryState::Normal,
+    };
+    let newer_closed = RouteEntry {
+        conversation_id: ConversationId([2; 32]),
+        lock: SemanticLockId([5; 32]),
+        lineage: SemanticLockId([5; 32]),
+        binding_id: [6; 32],
+        state_generation: 12,
+        lifecycle: RouteLifecycle::Tombstone { close_id: [10; 32] },
+        ..older
+    };
+    // The live projection's generation is below the older tombstone's, as
+    // no real route's is, so liveness alone does not decide the order.
+    let stale_live = RouteEntry {
+        conversation_id: ConversationId([3; 32]),
+        lock: SemanticLockId([11; 32]),
+        lineage: SemanticLockId([11; 32]),
+        binding_id: [12; 32],
+        state_generation: 5,
+        lifecycle: RouteLifecycle::Active,
+        ..older
+    };
+    for (first, second, newest) in [
+        (older, newer_closed, newer_closed),
+        (newer_closed, older, newer_closed),
+        (older, stale_live, older),
+        (stale_live, older, older),
+    ] {
+        let mut table = RouteTable::new();
+        table.restore_entry(first);
+        table.restore_entry(second);
+        assert_eq!(
+            table.direct_route(&pair).map(|route| route.conversation_id),
+            Some(newest.conversation_id)
+        );
+    }
+    Ok(())
+}
+
+/// Removing a route gives each index it held to the newest remaining route
+/// with that key, by the restore's rank rule: an edge whose newest
+/// projection of a pair is hidden indexes the next newest, and a discarded
+/// ReInit successor leaves its predecessor the concrete route, lock and
+/// lineage, so the pair or instance takes no reservation and no second
+/// incarnation zero binds under the predecessor's lock.
+#[test]
+fn removing_a_route_gives_its_indexes_to_the_newest_remaining_route() -> TestResult {
+    let pair = DirectPair::new(account(1), account(2))?;
+    // An edge holding three projections of one pair.
+    let tombstone = |seed: u8, generation: u64| RouteEntry {
+        conversation_id: ConversationId([seed; 32]),
+        target: RouteTarget::Direct(pair),
+        lock: SemanticLockId([seed.wrapping_add(100); 32]),
+        lineage: SemanticLockId([seed.wrapping_add(100); 32]),
+        incarnation: 0,
+        binding_id: [seed; 32],
+        binding_generation: 0,
+        state_generation: generation,
+        lifecycle: RouteLifecycle::Tombstone {
+            close_id: [seed; 32],
+        },
+        recovery: RecoveryState::Normal,
+    };
+    let (first, second) = (tombstone(1, 4), tombstone(2, 8));
+    let live = RouteEntry {
+        lifecycle: RouteLifecycle::Active,
+        ..tombstone(3, 12)
+    };
+    let mut table = RouteTable::new();
+    for entry in [second, live, first] {
+        table.restore_entry(entry);
+    }
+    assert_eq!(table.direct_route(&pair), Some(&live));
+    table.remove_projection(&live.conversation_id);
+    assert_eq!(table.direct_route(&pair), Some(&second));
+    assert!(!table.direct_plaintext_allowed(&pair));
+    table.remove_projection(&first.conversation_id);
+    assert_eq!(table.direct_route(&pair), Some(&second));
+    table.remove_projection(&second.conversation_id);
+    assert_eq!(table.direct_route(&pair), None);
+    assert!(table.direct_plaintext_allowed(&pair));
+
+    // Two incarnations of one channel route, each on its own instance and
+    // under its own lock, share only their lineage: removing the newer gives
+    // the lineage back to the older, and each instance keeps only its own.
+    let closed = RouteEntry {
+        conversation_id: ConversationId([20; 32]),
+        target: RouteTarget::Channel(instance(5)),
+        lock: SemanticLockId([21; 32]),
+        lineage: SemanticLockId([21; 32]),
+        incarnation: 0,
+        binding_id: [22; 32],
+        binding_generation: 0,
+        state_generation: 0,
+        lifecycle: RouteLifecycle::Tombstone { close_id: [23; 32] },
+        recovery: RecoveryState::Normal,
+    };
+    let next = RouteEntry {
+        conversation_id: ConversationId([24; 32]),
+        target: RouteTarget::Channel(instance(6)),
+        lock: SemanticLockId([25; 32]),
+        incarnation: 1,
+        binding_id: [26; 32],
+        lifecycle: RouteLifecycle::Active,
+        ..closed
+    };
+    let mut table = RouteTable::new();
+    table.restore_entry(closed);
+    table.restore_entry(next);
+    assert_eq!(
+        table.lineages.get(&closed.lineage),
+        Some(&next.conversation_id)
+    );
+    table.remove_projection(&next.conversation_id);
+    assert_eq!(
+        table.lineages.get(&closed.lineage),
+        Some(&closed.conversation_id)
+    );
+    assert_eq!(table.channel_route(&instance(5)), Some(&closed));
+    assert_eq!(table.channel_route(&instance(6)), None);
+    assert_eq!(table.locks.get(&next.lock), None);
+
+    // A ReInit predecessor and the successor that outranks it.
+    for target in [RouteTarget::Direct(pair), RouteTarget::Channel(instance(1))] {
+        let predecessor = RouteEntry {
+            conversation_id: ConversationId([10; 32]),
+            target,
+            lock: SemanticLockId([20; 32]),
+            lineage: SemanticLockId([20; 32]),
+            incarnation: 0,
+            binding_id: [30; 32],
+            binding_generation: 0,
+            state_generation: 0,
+            lifecycle: RouteLifecycle::Active,
+            recovery: RecoveryState::Normal,
+        };
+        let successor = RouteEntry {
+            conversation_id: ConversationId([11; 32]),
+            binding_id: [31; 32],
+            binding_generation: 1,
+            ..predecessor
+        };
+        let mut table = RouteTable::new();
+        table.restore_entry(predecessor);
+        table.restore_entry(successor);
+        assert!(table.is_current(&successor.conversation_id));
+        table.remove_projection(&successor.conversation_id);
+        assert!(table.is_current(&predecessor.conversation_id), "{target:?}");
+        assert_eq!(
+            table.lineages.get(&predecessor.lineage),
+            Some(&predecessor.conversation_id)
+        );
+        let owner = pair.smaller();
+        let reserved = match target {
+            RouteTarget::Direct(pair) => {
+                table.reserve_direct(ReservationId([5; 16]), pair, [6; 32], owner, 100)
+            }
+            RouteTarget::Channel(channel) => {
+                table.reserve_channel(ReservationId([5; 16]), channel, owner, 100)
+            }
+        };
+        assert_eq!(reserved, Err(RouteConflict::GroupConflict), "{target:?}");
+        table.reserve_channel(ReservationId([6; 16]), instance(2), owner, 100)?;
+        let mut fork = summary(40, 20, Some(2), None);
+        fork.lineage = predecessor.lineage;
+        assert_eq!(
+            table.bind(ReservationId([6; 16]), owner, fork, 50),
+            Err(RouteConflict::ForkedLineage),
+            "{target:?}"
+        );
     }
     Ok(())
 }

@@ -246,6 +246,7 @@ fn a_successor_route_without_a_conversation_fails_startup() {
         incarnation: 0,
         binding_id: [1; 32],
         binding_generation: 1,
+        state_generation: 0,
         lifecycle: RouteLifecycle::Active,
         recovery: RecoveryState::Normal,
     });
@@ -385,6 +386,93 @@ fn a_rebinding_of_the_same_conversation_is_not_treated_as_a_successor() -> TestR
     let mut state = conversations(&[(OLD, NEW_BINDING)]);
     discard_unanchored_successors(&mut state, &index, &std::collections::BTreeSet::new());
     assert!(state.conversations.contains_key(&OLD));
+    Ok(())
+}
+
+/// Startup restores an unanchored ReInit successor's route over its
+/// predecessor's, its binding generation being the later; discarding the
+/// successor gives every index it held back to the predecessor, by the
+/// restore's rank rule, so the route keeps its concrete route, lock and
+/// lineage: the pair or instance takes no reservation and no second
+/// incarnation zero binds under the predecessor's lock (companion 9.4).
+#[test]
+fn a_discarded_successor_leaves_its_predecessor_every_index() -> TestResult {
+    use agenc_relay_domain::e2ee::{BindingSummary, ReservationId, RouteConflict};
+    let principal = principal(40, &ACCOUNT_A, &[DEVICE])?;
+    let index = bindings_index(vec![
+        (OLD_BINDING, package(&principal, OLD, 0, [0; 32])?),
+        (NEW_BINDING, package(&principal, NEW, 1, OLD_BINDING)?),
+    ]);
+    let pair = DirectPair::new(
+        AccountId::parse_wire_bytes(&account_text(1)?)?,
+        AccountId::parse_wire_bytes(&account_text(2)?)?,
+    )?;
+    let instance = ChannelInstanceId::from_bytes([8; 16]);
+    for target in [RouteTarget::Channel(instance), RouteTarget::Direct(pair)] {
+        let mut state = conversations(&[(OLD, OLD_BINDING), (NEW, NEW_BINDING)]);
+        let predecessor = RouteEntry {
+            conversation_id: ConversationId(OLD),
+            target,
+            lock: SemanticLockId([2; 32]),
+            lineage: SemanticLockId([2; 32]),
+            incarnation: 0,
+            binding_id: OLD_BINDING,
+            binding_generation: 0,
+            state_generation: 0,
+            lifecycle: RouteLifecycle::Active,
+            recovery: RecoveryState::Normal,
+        };
+        let successor = RouteEntry {
+            conversation_id: ConversationId(NEW),
+            binding_id: NEW_BINDING,
+            binding_generation: 1,
+            ..predecessor
+        };
+        for entry in [predecessor, successor] {
+            state.routes.restore_entry(entry);
+        }
+        assert!(state.routes.is_current(&ConversationId(NEW)));
+        discard_unanchored_successors(&mut state, &index, &std::collections::BTreeSet::new());
+        assert!(state.routes.route(&ConversationId(NEW)).is_none());
+        assert!(state.routes.is_current(&ConversationId(OLD)), "{target:?}");
+        let owner = pair.smaller();
+        let refused = match target {
+            RouteTarget::Channel(instance) => {
+                state
+                    .routes
+                    .reserve_channel(ReservationId([5; 16]), instance, owner, 1_000)
+            }
+            RouteTarget::Direct(pair) => {
+                state
+                    .routes
+                    .reserve_direct(ReservationId([5; 16]), pair, [6; 32], owner, 1_000)
+            }
+        };
+        assert_eq!(refused, Err(RouteConflict::GroupConflict), "{target:?}");
+        // Another instance of the channel route opens no second incarnation
+        // zero under the predecessor's lock: its lineage is still held.
+        let fresh = ChannelInstanceId::from_bytes([9; 16]);
+        state
+            .routes
+            .reserve_channel(ReservationId([7; 16]), fresh, owner, 1_000)?;
+        let fork = BindingSummary {
+            conversation_id: ConversationId([0x30; 32]),
+            lock: predecessor.lock,
+            lineage: predecessor.lineage,
+            incarnation: 0,
+            predecessor_close_id: [0; 32],
+            binding_id: [0x31; 32],
+            binding_generation: 0,
+            previous_binding_id: [0; 32],
+            channel_instance_id: Some(fresh),
+            conversation_nonce: None,
+        };
+        assert_eq!(
+            state.routes.bind(ReservationId([7; 16]), owner, fork, 10),
+            Err(RouteConflict::ForkedLineage),
+            "{target:?}"
+        );
+    }
     Ok(())
 }
 

@@ -21,6 +21,7 @@ fn entries(target: RouteTarget) -> (RouteEntry, RouteEntry, BindingSummary) {
         incarnation: 0,
         binding_id: [3; 32],
         binding_generation: 0,
+        state_generation: 0,
         lifecycle: RouteLifecycle::Active,
         recovery: RecoveryState::Normal,
     };
