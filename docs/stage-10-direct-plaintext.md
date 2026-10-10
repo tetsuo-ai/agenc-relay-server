@@ -6,7 +6,8 @@ commit keeps a direct pair's routes ordered and indexed: an edge orders its
 projections of one pair by their state generation, and removing a route
 gives each index it held to the newest remaining route with that key, so a
 coordinator store holding a ReInit successor that no activation anchors
-leaves the successor's predecessor every index, and still does not start. No
+leaves the successor's predecessor every index, and still does not start.
+The second binds a direct reservation only to the pair it reserved. No
 specification, profile hash, registry entry, named limit, reply code, wire
 object, table, key, row kind, field or storage generation changed.
 
@@ -75,11 +76,48 @@ back only the concrete route (the same two tests, at the lineage). The
 unanchored store test pins the refusal that the recovery gates make, which
 this topic keeps.
 
+## A direct reservation binds only its pair (second commit)
+
+The companion text this rule implements:
+
+- Section 11.5: "Direct reservation binds the authenticated sender and
+  named peer", and the reservation the sequencer signs carries the concrete
+  `route_binding`.
+- Section 9.4: for a direct binding "the instance is empty and the nonce is
+  exactly 32 bytes. These values equal the reservation, or for a ReInit
+  successor the replaced binding's, and recompute the concrete
+  `route_binding` under Section 9.1", which hashes the nonce with the
+  pair's two Account IDs.
+
+The audit of how `EGROUP BIND` matches a direct reservation: the
+specification requires the binding's route to be the reserved one, so the
+account, the nonce and the pair must all match; the account is the
+reserving owner, the smaller account of the pair, as before. The rule:
+`BindingSummary::direct_pair` carries the pair a direct binding's semantic
+route names (`e2ee::coordinator::ops::route::binding_summary`), and
+`RouteTable::bind` admits a direct binding only when it names the reserved
+pair as well as the reserved nonce, and a channel binding only when it
+names no pair; any other binding takes no route and is
+`E2EE_BINDING_AUTH_INVALID`, the code the handler already gave a binding
+that does not fit its reservation. Every bound route is therefore indexed
+under the pair its own binding names, which is the pair the plaintext
+refusal below decides by.
+
+| Test | What it pins |
+| --- | --- |
+| `e2ee::route_table::tests::a_direct_reservation_binds_only_the_pair_it_reserved` | A binding naming another pair, or no pair, under the reserved nonce is refused and leaves both pairs free and the reservation standing; a channel binding naming a pair takes no channel reservation; the reserved pair then binds, and a binding of a conversation that already holds a route takes the standing reservation no more. |
+| `e2ee::coordinator::tests::sequence::recreated_routes::reserved_pair::a_direct_reservation_binds_no_other_pair_under_its_nonce` | Through the handlers: a binding of the creator with another account, signed by both and root-locked, on the nonce reserved for the peer, is `E2EE_BINDING_AUTH_INVALID` and indexes neither pair; the reservation then binds the peer's pair, and only that pair is encrypted. |
+
+Single edits that each fail a test: the nonce alone matching a direct
+reservation (both tests); a direct binding that names no pair admitted (the
+domain test); and a channel binding naming a pair admitted (the domain
+test).
+
 ## Stage 08 evidence (G-07)
 
-The first commit changes `crates/agenc-relay-domain/src/e2ee/route_table.rs`.
+The first two commits change `crates/agenc-relay-domain/src/e2ee/route_table.rs`.
 The bounded model (`crates/agenc-relay-testkit/src/e2ee_model.rs`) binds
-channel routes only and is unchanged; it
+channel routes only and now names no pair in its binding summary; it
 gains no action, since no new phase is reachable only through one, and
 every count of `conformance/stage-eight-model.toml` is unchanged: actions
 32, states 58, transitions 145, paths 27 and refusals 847. The pinned
@@ -87,9 +125,9 @@ every count of `conformance/stage-eight-model.toml` is unchanged: actions
 `destroying_an_instance_removes_only_its_tombstone` (gate 4) keep their
 names and bodies. The model and the transcript catalog
 (`scripts/run-stage-eight-model.sh`, `scripts/run-stage-eight-transcripts.sh`)
-were run at this commit. The evidence that changed is new
-domain, coordinator and edge tests of companion Sections 9.4, 12.5 and
-13.8, with no transcript row; no box changes.
+were run at each of the two commits. The evidence that changed is new
+domain, coordinator and edge tests of companion Sections 9.4, 11.5, 12.5
+and 13.8, with no transcript row; no box changes.
 
 ## Storage (G-08)
 
@@ -108,3 +146,6 @@ start commit to restore.
 
 - A store holding an unanchored ReInit successor keeps its refusal at
   startup; the discard now leaves the predecessor every index before it.
+- `EGROUP BIND` refuses a direct binding that names another pair than its
+  reservation with `E2EE_BINDING_AUTH_INVALID`, the code it gives every
+  other binding that does not fit its reservation.

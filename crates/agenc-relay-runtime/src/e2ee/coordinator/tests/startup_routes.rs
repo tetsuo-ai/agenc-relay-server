@@ -466,6 +466,7 @@ fn a_discarded_successor_leaves_its_predecessor_every_index() -> TestResult {
             previous_binding_id: [0; 32],
             channel_instance_id: Some(fresh),
             conversation_nonce: None,
+            direct_pair: None,
         };
         assert_eq!(
             state.routes.bind(ReservationId([7; 16]), owner, fork, 10),

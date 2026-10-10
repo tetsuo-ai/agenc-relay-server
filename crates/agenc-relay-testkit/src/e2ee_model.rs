@@ -478,6 +478,7 @@ fn bind(world: &mut World, conversation: u8, who: u8, binding: Binding) -> Resul
         previous_binding_id: [0; 32],
         channel_instance_id: Some(binding.instance),
         conversation_nonce: None,
+        direct_pair: None,
     };
     let bound = world
         .routes

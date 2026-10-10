@@ -728,8 +728,9 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 }
 
 /// What the route table admits of a verified binding: its own semantic
-/// lock, and its route's lineage, the lock of the route's incarnation zero
-/// (companion 9.4).
+/// lock, its route's lineage, the lock of the route's incarnation zero
+/// (companion 9.4), and the account pair a direct route names, which must be
+/// the pair its reservation reserved (companion 11.5).
 pub(super) fn binding_summary(
     verified: &VerifiedBinding,
     network_id: &[u8; 32],
@@ -738,6 +739,21 @@ pub(super) fn binding_summary(
         .route
         .lineage_lock_id(network_id)
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    let direct_pair = match &verified.route.key {
+        agenc_relay_e2ee::route::SemanticRouteKey::Direct {
+            account_a,
+            account_b,
+        } => Some(
+            AccountId::parse_wire_bytes(account_a)
+                .and_then(|first| {
+                    AccountId::parse_wire_bytes(account_b).map(|second| (first, second))
+                })
+                .ok()
+                .and_then(|(first, second)| DirectPair::new(first, second).ok())
+                .ok_or_else(|| Fail::from(E2eeReplyCode::BindingAuthInvalid))?,
+        ),
+        agenc_relay_e2ee::route::SemanticRouteKey::Channel { .. } => None,
+    };
     Ok(BindingSummary {
         conversation_id: ConversationId(verified.conversation_id),
         lock: SemanticLockId(verified.route.lock_id),
@@ -751,6 +767,7 @@ pub(super) fn binding_summary(
             .channel_instance_id
             .map(ChannelInstanceId::from_bytes),
         conversation_nonce: verified.conversation_nonce,
+        direct_pair,
     })
 }
 

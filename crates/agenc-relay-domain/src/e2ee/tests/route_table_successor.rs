@@ -48,6 +48,10 @@ fn entries(target: RouteTarget) -> (RouteEntry, RouteEntry, BindingSummary) {
             RouteTarget::Direct(_) => Some([6; 32]),
             _ => None,
         },
+        direct_pair: match target {
+            RouteTarget::Direct(pair) => Some(pair),
+            RouteTarget::Channel(_) => None,
+        },
     };
     (old, new, summary)
 }
@@ -319,6 +323,7 @@ fn a_restored_successor_leaves_a_later_incarnation_its_indexes() -> TestResult {
             previous_binding_id: [0; 32],
             channel_instance_id: (!direct).then(|| ChannelInstanceId::from_bytes([concrete; 16])),
             conversation_nonce: direct.then_some([concrete; 32]),
+            direct_pair: direct.then_some(pair),
         };
         let reserve = |table: &mut RouteTable, id: u8, concrete: u8| {
             if direct {

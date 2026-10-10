@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod earlier_stores;
+mod reserved_pair;
 mod row_mismatch;
 
 use agenc_relay_domain::e2ee::{ConversationId, DirectPair, RouteLifecycle};

@@ -87,6 +87,8 @@ fn summary(
         previous_binding_id: [0; 32],
         channel_instance_id: instance_seed.map(instance),
         conversation_nonce: nonce.map(|seed| [seed; 32]),
+        // Every direct test reserves this pair.
+        direct_pair: nonce.and_then(|_| DirectPair::new(account(1), account(2)).ok()),
     }
 }
 
@@ -934,6 +936,63 @@ fn a_restore_in_any_order_indexes_the_newest_route() -> TestResult {
             table.restore_entry(entry);
         }
         assert_eq!(table.direct_route(&pair), Some(&live));
+    }
+    Ok(())
+}
+
+/// A direct reservation binds the authenticated sender and the named peer
+/// (companion 11.5), and its signed concrete route binding covers that pair
+/// as well as the nonce (companion 9.1 and 9.4): a binding naming another
+/// pair, or none, under the reserved nonce takes no route, and the reserved
+/// pair stays free.
+#[test]
+fn a_direct_reservation_binds_only_the_pair_it_reserved() -> TestResult {
+    let pair = DirectPair::new(account(1), account(2))?;
+    let creator = pair.smaller();
+    let other = DirectPair::new(creator, account(3))?;
+    for named in [Some(other), None] {
+        let mut table = RouteTable::new();
+        table.reserve_direct(ReservationId([1; 16]), pair, [7; 32], creator, 100)?;
+        let mut foreign = summary(1, 1, None, Some(7));
+        foreign.direct_pair = named;
+        assert_eq!(
+            table.bind(ReservationId([1; 16]), creator, foreign, 50),
+            Err(RouteConflict::ReservationInvalid),
+            "{named:?}"
+        );
+        assert!(table.direct_plaintext_allowed(&pair));
+        assert!(table.direct_plaintext_allowed(&other));
+        assert_eq!(table.reservations().count(), 1);
+        // A channel binding naming a pair takes no channel reservation.
+        table.reserve_channel(ReservationId([2; 16]), instance(2), creator, 100)?;
+        let mut channel = summary(2, 2, Some(2), None);
+        channel.direct_pair = Some(pair);
+        assert_eq!(
+            table.bind(ReservationId([2; 16]), creator, channel, 50),
+            Err(RouteConflict::ReservationInvalid)
+        );
+        // The reserved pair binds under its own name.
+        let entry = table.bind(
+            ReservationId([1; 16]),
+            creator,
+            summary(1, 1, None, Some(7)),
+            50,
+        )?;
+        assert_eq!(entry.target, RouteTarget::Direct(pair));
+        assert!(!table.direct_plaintext_allowed(&pair));
+        assert!(table.direct_plaintext_allowed(&other));
+        // A binding of a conversation that already holds a route takes the
+        // standing channel reservation no more than another pair's does.
+        assert_eq!(
+            table.bind(
+                ReservationId([2; 16]),
+                creator,
+                summary(1, 2, Some(2), None),
+                50
+            ),
+            Err(RouteConflict::BadState)
+        );
+        assert_eq!(table.reservations().count(), 1);
     }
     Ok(())
 }

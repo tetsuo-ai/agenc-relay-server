@@ -240,6 +240,9 @@ pub struct BindingSummary {
     pub channel_instance_id: Option<ChannelInstanceId>,
     /// Concrete direct nonce, for a direct binding.
     pub conversation_nonce: Option<[u8; 32]>,
+    /// The account pair a direct binding's semantic route names, which must
+    /// be the pair its reservation reserved; none for a channel binding.
+    pub direct_pair: Option<DirectPair>,
 }
 
 /// The coordinator's authoritative route table.
@@ -392,7 +395,10 @@ impl RouteTable {
     /// name the reserved concrete route, the reservation must be live and
     /// owned by `actor`, its semantic lock slot must be free, and its
     /// incarnation must open the route or follow the close of the route's
-    /// newest incarnation.
+    /// newest incarnation. A direct reservation binds only the sender and
+    /// the peer it named (companion 11.5), so a direct binding must name
+    /// that pair as well as the reserved nonce: the concrete route binding
+    /// the reservation signed covers both (companion 9.1 and 9.4).
     pub fn bind(
         &mut self,
         reservation_id: ReservationId,
@@ -410,12 +416,13 @@ impl RouteTable {
             reservation.target,
             summary.channel_instance_id,
             summary.conversation_nonce,
+            summary.direct_pair,
         ) {
-            (RouteTarget::Channel(instance), Some(bound), None) if instance == bound => {
+            (RouteTarget::Channel(instance), Some(bound), None, None) if instance == bound => {
                 RouteTarget::Channel(instance)
             }
-            (RouteTarget::Direct(pair), None, Some(nonce))
-                if reservation.conversation_nonce == Some(nonce) =>
+            (RouteTarget::Direct(pair), None, Some(nonce), Some(named))
+                if reservation.conversation_nonce == Some(nonce) && named == pair =>
             {
                 RouteTarget::Direct(pair)
             }
