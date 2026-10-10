@@ -5,5 +5,6 @@
 
 pub mod barrier;
 pub mod coordinator;
+pub(crate) mod downgrade;
 pub mod edge;
 pub mod link;

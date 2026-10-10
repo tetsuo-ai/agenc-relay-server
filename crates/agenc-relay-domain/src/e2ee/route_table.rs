@@ -8,6 +8,10 @@
 //! share a lineage, keyed by the lock of its incarnation zero: after an
 //! authorized close, the next incarnation binds naming that close, and a
 //! direct pair is reserved again for it (companion 9.4 and 11.4).
+//!
+//! A pair with any route, live, closing or closed, refuses plaintext between
+//! its accounts ([`RouteTable::direct_plaintext_allowed`]): every node decides
+//! that refusal with this one predicate (companion 11.4 and 12.5).
 
 use std::collections::BTreeMap;
 
@@ -293,11 +297,32 @@ impl RouteTable {
         self.channel_route(channel_id).is_none()
     }
 
-    /// Whether plaintext may pass between two accounts: only when no live
-    /// or tombstoned direct binding exists for the pair.
+    /// Whether plaintext may pass between two accounts: only when no live,
+    /// closing or tombstoned direct binding exists for the pair, whatever
+    /// its recovery gate. A closed binding stays a tombstone that keeps the
+    /// pair encrypted until the next semantic incarnation binds, which keeps
+    /// it again (companion 11.4).
     #[must_use]
     pub fn direct_plaintext_allowed(&self, pair: &DirectPair) -> bool {
         self.direct_route(pair).is_none()
+    }
+
+    /// Whether plaintext may pass from the account `sender` to the account
+    /// `target`: always for a guest on either side or for one account
+    /// messaging itself, and otherwise as [`Self::direct_plaintext_allowed`]
+    /// decides for their pair, so unrelated pairs are unaffected.
+    #[must_use]
+    pub fn plaintext_allowed_between(
+        &self,
+        sender: Option<AccountId>,
+        target: Option<AccountId>,
+    ) -> bool {
+        match (sender, target) {
+            (Some(sender), Some(target)) => DirectPair::new(sender, target)
+                .ok()
+                .is_none_or(|pair| self.direct_plaintext_allowed(&pair)),
+            _ => true,
+        }
     }
 
     /// Every live reservation.

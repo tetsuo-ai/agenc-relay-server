@@ -940,6 +940,64 @@ fn a_restore_in_any_order_indexes_the_newest_route() -> TestResult {
     Ok(())
 }
 
+/// Companion 11.4: while a live encrypted direct binding exists for an
+/// Account-ID pair, plaintext between that pair is refused, and "A closed
+/// direct binding remains an encrypted tombstone until an explicitly
+/// approved new semantic generation is created and never silently falls
+/// back to plaintext". The one predicate every node decides with refuses a
+/// live, closing, closed, recovery-gated and recreated pair alike, either
+/// way round and for no other pair, guest or account.
+#[test]
+fn a_direct_pair_refuses_plaintext_in_every_state_of_its_binding() -> TestResult {
+    let mut table = RouteTable::new();
+    let pair = DirectPair::new(account(1), account(2))?;
+    let (alice, bob, carol) = (account(1), account(2), account(3));
+    let refuses = |table: &RouteTable| {
+        !table.direct_plaintext_allowed(&pair)
+            && !table.plaintext_allowed_between(Some(alice), Some(bob))
+            && !table.plaintext_allowed_between(Some(bob), Some(alice))
+            && table.plaintext_allowed_between(Some(alice), Some(carol))
+            && table.plaintext_allowed_between(Some(carol), Some(bob))
+            && table.plaintext_allowed_between(None, Some(bob))
+            && table.plaintext_allowed_between(Some(alice), None)
+            && table.plaintext_allowed_between(Some(alice), Some(alice))
+    };
+    assert!(table.plaintext_allowed_between(Some(alice), Some(bob)));
+    let creator = pair.smaller();
+    table.reserve_direct(ReservationId([1; 16]), pair, [7; 32], creator, 100)?;
+    assert!(
+        table.plaintext_allowed_between(Some(alice), Some(bob)),
+        "a reservation has no security effect"
+    );
+    table.bind(
+        ReservationId([1; 16]),
+        creator,
+        summary(1, 1, None, Some(7)),
+        50,
+    )?;
+    assert!(refuses(&table), "live");
+    let first = ConversationId([1; 32]);
+    let mut gated = table.clone();
+    gated.restore_pending();
+    assert!(refuses(&gated), "recovery pending");
+    gated.resolve_recovery(&first, RecoveryState::Conflict, None)?;
+    assert!(refuses(&gated), "recovery conflict");
+    table.begin_close(&first)?;
+    assert!(refuses(&table), "closing");
+    table.close(&first, [9; 32])?;
+    assert!(refuses(&table), "closed, before the next incarnation");
+    table.reserve_direct(ReservationId([2; 16]), pair, [8; 32], creator, 100)?;
+    assert!(refuses(&table), "reserved again");
+    table.bind(
+        ReservationId([2; 16]),
+        creator,
+        incarnation_summary(summary(2, 1, None, Some(8)), 2, 1, 1, [9; 32]),
+        50,
+    )?;
+    assert!(refuses(&table), "recreated");
+    Ok(())
+}
+
 /// A direct reservation binds the authenticated sender and the named peer
 /// (companion 11.5), and its signed concrete route binding covers that pair
 /// as well as the nonce (companion 9.1 and 9.4): a binding naming another

@@ -509,7 +509,11 @@ impl E2eeEdge {
     }
 
     /// The `FAIL <command> E2EE_REQUIRED` line when a plaintext line targets
-    /// a bound channel or a bound direct pair (companion 11.3, 11.4, 17).
+    /// a bound channel or a member of an encrypted direct pair the sender's
+    /// account belongs to (companion 11.3, 11.4, 17). The edge refuses what
+    /// its projection shows; the coordinator decides every line the edge
+    /// forwards, since a direct route is projected only while a local reason
+    /// needs it (companion 12.5).
     #[must_use]
     pub fn plaintext_refusal(
         &self,
@@ -522,45 +526,54 @@ impl E2eeEdge {
             return None;
         }
         let target = message.middle().first()?;
-        let bound = if target.starts_with('#') {
-            self.bound_channel(edge, target).is_some()
+        let channel_bound = target.starts_with('#')
+            && (self.bound_channel(edge, target).is_some()
                 || agenc_relay_domain::ChannelNameValue::parse(target)
                     .ok()
                     .and_then(|name| edge.replica().channel_by_name(&name))
                     .is_some_and(|record| {
                         record.content_policy == agenc_relay_domain::ContentPolicy::E2eeBound
-                    })
-        } else {
-            self.direct_pair_bound(edge, target, sender_account?)
-        };
-        if !bound {
+                    }));
+        if !channel_bound && !self.direct_target_refused(edge, target, sender_account) {
             return None;
         }
-        let body = agenc_relay_e2ee::wire::reply::E2eeReplyCode::Required
-            .render_fail(command, Some(target));
-        agenc_relay_e2ee::wire::response::render_fail(&self.config.server_name, &body)
-            .ok()
-            .and_then(|line| WireMessage::extension_line(&line).ok())
+        crate::e2ee::downgrade::refusal_line(&self.config.server_name, command, target)
     }
 
-    /// Whether the sender's account and the account behind `nickname` hold
-    /// a live direct binding.
-    fn direct_pair_bound(&self, edge: &EdgeFederation, nickname: &str, sender: [u8; 24]) -> bool {
-        let Some(peer) = edge
-            .replica()
-            .sessions()
-            .find(|session| session.nickname.presentation() == nickname)
-            .and_then(|session| session.account.map(|(account, _)| account))
+    // agenc-review: focus owner=runtime reviewed=2026-10-09 reason=the edge refuses plaintext to every local member of an encrypted direct pair, live or closed, by each target's canonical nickname, with the shared route-table predicate
+    /// Whether a nickname in the line's comma-separated `targets` names a
+    /// local session whose account forms, with the sender's account, a pair
+    /// whose projected routes keep it encrypted: a live, closing or
+    /// tombstoned binding (`RouteTable::plaintext_allowed_between`, companion
+    /// 11.4). Nicknames compare in their canonical form, as the coordinator
+    /// resolves them. A guest sender, an unrelated pair or a target that is
+    /// no local session refuses nothing here.
+    fn direct_target_refused(
+        &self,
+        edge: &EdgeFederation,
+        targets: &str,
+        sender: Option<[u8; 24]>,
+    ) -> bool {
+        let Some(sender) = sender
+            .and_then(|account| agenc_relay_types::AccountId::parse_wire_bytes(&account).ok())
         else {
             return false;
         };
-        let Ok(sender) = agenc_relay_types::AccountId::parse_wire_bytes(&sender) else {
-            return false;
-        };
-        agenc_relay_domain::e2ee::DirectPair::new(sender, peer)
-            .ok()
-            .and_then(|pair| self.routes.direct_route(&pair))
-            .is_some_and(|route| route.accepts_traffic())
+        targets
+            .split(',')
+            .filter(|target| !target.starts_with(['#', '&']))
+            .filter_map(|target| agenc_relay_domain::NicknameValue::parse(target).ok())
+            .any(|nickname| {
+                edge.replica()
+                    .sessions()
+                    .filter(|session| session.nickname == nickname)
+                    .any(|session| {
+                        !self.routes.plaintext_allowed_between(
+                            Some(sender),
+                            session.account.map(|(account, _)| account),
+                        )
+                    })
+            })
     }
 
     /// Sends companion lines over the base edge's live link.

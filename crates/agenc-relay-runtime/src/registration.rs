@@ -1037,6 +1037,7 @@ impl RegistrationRouter {
                         &mut state.nickname,
                         handoff,
                         observation,
+                        encrypted_routes(self.federation.as_ref()),
                     )
                     .map(ActionStep::from);
             }
@@ -1238,14 +1239,25 @@ impl RegistrationRouter {
         failure: (DomainError, bool),
     ) -> Result<(), RuntimeError> {
         let nickname = self.target(state).to_owned();
-        let frame = crate::client_render::failure_frame(
-            state.registration.capability_state(),
-            &self.config.server_prefix,
-            &nickname,
-            message,
-            failure.0,
-            None,
-        )?;
+        // The coordinator refuses a line naming a member of an encrypted
+        // direct pair the sender belongs to; the client meets the refusal an
+        // edge itself sends (companion 11.4 and 11.9).
+        let direct = (failure.0 == DomainError::EncryptedRoute)
+            .then(|| {
+                crate::client_render::direct_refusal_frame(&self.config.server_prefix, message)
+            })
+            .flatten();
+        let frame = match direct {
+            Some(frame) => frame,
+            None => crate::client_render::failure_frame(
+                state.registration.capability_state(),
+                &self.config.server_prefix,
+                &nickname,
+                message,
+                failure.0,
+                None,
+            )?,
+        };
         let frames = state.reply_pages.failure(
             state.registration.capability_state(),
             &self.config.server_prefix,
@@ -3068,6 +3080,17 @@ impl RegistrationRouter {
             }
         }
     }
+}
+
+/// The coordinator's encrypted route table, which decides its own clients'
+/// plaintext to the members of an encrypted direct pair; none on an edge or
+/// a node without the encrypted profile.
+fn encrypted_routes(
+    federation: Option<&FederationCoordinator>,
+) -> Option<&agenc_relay_domain::e2ee::RouteTable> {
+    federation
+        .and_then(FederationCoordinator::companion_executor)
+        .map(|executor| &executor.state.routes)
 }
 
 fn charge_preauth(

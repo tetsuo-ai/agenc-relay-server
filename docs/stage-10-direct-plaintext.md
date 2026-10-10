@@ -7,7 +7,13 @@ projections of one pair by their state generation, and removing a route
 gives each index it held to the newest remaining route with that key, so a
 coordinator store holding a ReInit successor that no activation anchors
 leaves the successor's predecessor every index, and still does not start.
-The second binds a direct reservation only to the pair it reserved. No
+The second binds a direct reservation only to the pair it reserved. The
+third refuses plaintext between the two accounts of a direct pair whose
+encrypted binding is live, closing or closed, on every node, until the
+pair's next incarnation binds, which refuses it in turn: the coordinator
+decides every line, from its own clients and from every edge, with the route
+table's one predicate, and an edge refuses earlier what its own projection
+shows. No
 specification, profile hash, registry entry, named limit, reply code, wire
 object, table, key, row kind, field or storage generation changed.
 
@@ -113,9 +119,114 @@ reservation (both tests); a direct binding that names no pair admitted (the
 domain test); and a channel binding naming a pair admitted (the domain
 test).
 
+## Plaintext between an encrypted direct pair is refused on every node (third commit)
+
+The companion and architecture text these rules implement:
+
+- Companion Section 11.4: "While a live encrypted direct binding exists for
+  an Account-ID pair, the server resolves nickname targets to Account IDs
+  and rejects plaintext `PRIVMSG` or `NOTICE` between that pair with
+  `E2EE_REQUIRED`. Nick changes, multiple sessions, and routing through
+  another edge do not bypass this rule; unrelated account pairs are
+  unaffected. A closed direct binding remains an encrypted tombstone until
+  an explicitly approved new semantic generation is created and never
+  silently falls back to plaintext."
+- Companion Section 12.5: "The coordinator remains authoritative for every
+  lookup not already entitled and for every base direct-message downgrade
+  check, so absence from this cache never authorizes plaintext", and a
+  direct route is projected to an edge only while an event, operation or
+  mailbox item of a local origin requires it.
+- Companion Section 11.9: `:server FAIL <actual-command|*> <code>
+  [context-token] :description`, where "The optional context is one
+  already supplied by the requester" and "The command parameter is the
+  actual triggering command, including `JOIN`, `PRIVMSG`, or `NOTICE`";
+  `E2EE_REQUIRED` means "Plaintext is forbidden for the target".
+- Architecture Section 15.2: "On an E2EE-bound channel or direct route,
+  plaintext `PRIVMSG` and `NOTICE` are rejected"; Section 18.2: for an E2EE
+  route, companion rules override base behavior for "allowed targets and
+  commands"; Section 18.3: "Encrypted direct conversations resolve
+  immutable Account IDs through the companion reservation and
+  semantic-route lock."
+
+The rules:
+
+- One predicate decides every refusal: `RouteTable::direct_plaintext_allowed`
+  refuses a pair with any route, live, closing or tombstoned, whatever its
+  recovery gate, and `RouteTable::plaintext_allowed_between` applies it to
+  two accounts, allowing a guest on either side and an account messaging
+  itself, so unrelated pairs are unaffected. A closed pair refuses
+  plaintext until its next incarnation binds, which refuses it in turn.
+- The coordinator decides every line (`e2ee::downgrade::refused_direct_target`).
+  Before it plans a plaintext `PRIVMSG`, `NOTICE` or client-only `TAGMSG`,
+  from one of its own clients (`channels::RegisteredCommandExecutor::route_registered`)
+  or from an edge's request (`federation::coordinator::request::plan_command`),
+  it resolves each nickname target to its current session's account, as the
+  plan resolves it, and refuses the line when the predicate keeps that
+  account's pair with the sender's account encrypted. Every session of
+  either account, any spelling of a nickname and any position in a target
+  list meet the refusal, whichever nodes hold the sender and the target.
+- The line is refused whole, before any plan: none of its targets receives
+  it. A line from the coordinator's own client is charged first as its plan
+  would charge it, so the refusal is no cheaper than the work it replaces
+  (architecture Section 19.1: "tokens are charged even when later semantic
+  validation fails"), and a line whose tokens are short is `SERVER_BUSY`,
+  silent for a `NOTICE`, as every other refused command is
+  (`channels::refuse_direct_line`).
+- The refusal is `FAIL <command> E2EE_REQUIRED <targets> :plaintext is
+  forbidden for the target`, the companion's reply with the targets as the
+  requester supplied them as its context, on every capability set, for a
+  `NOTICE` and a `TAGMSG` too. An edge renders the coordinator's refusal of
+  its request this way (`registration::RegistrationRouter::render_edge_failure`,
+  `client_render::direct_refusal_frame`), and the coordinator answers its
+  own client with it under the request's label
+  (`client_render::render_direct_refusal`). The base renderer's
+  `E2EE_REQUIRED`, which names a channel (architecture Section 9.5), and
+  every channel refusal are unchanged.
+- An edge refuses earlier what its projection shows
+  (`E2eeEdge::plaintext_refusal`): a line any nickname of whose target list
+  names a local session of an account whose pair with the sender's account
+  the predicate keeps encrypted, the nickname compared in its canonical
+  form. An edge projects a direct route only while a local reason needs it,
+  so the coordinator's check is the one every line meets.
+
+Which node refuses:
+
+| Sender | Target | Refused by |
+| --- | --- | --- |
+| a session on an edge | a session on the same edge, while that edge projects the pair's route | that edge, before forwarding the line |
+| a session on an edge | any other session, on any node | the coordinator, before planning the edge's request |
+| a session on the coordinator's own listener | any session | the coordinator, before planning |
+
+The refusal is decided by accounts, as companion Section 11.4 states, and
+consults no device attachment: the current-attachment predicate and the
+per-connection rules of [the edge attachment record](stage-10-edge-attachment.md)
+are unchanged.
+
+| Test | What it pins |
+| --- | --- |
+| `e2ee::route_table::tests::a_direct_pair_refuses_plaintext_in_every_state_of_its_binding` | The predicate refuses the pair, either way round, while it is live, recovery-gated, closing, closed, reserved again and recreated, and allows an unrelated pair, a guest on either side and one account; a reservation alone refuses nothing. |
+| `e2ee::downgrade::tests::the_coordinator_refuses_plaintext_between_an_encrypted_pair_in_every_state` | The coordinator's decision over a seeded domain: a `PRIVMSG`, `NOTICE` and `TAGMSG` to the peer, its nickname in another case, the peer second in a target list or after a channel, a second session of the sender's account, and the reverse direction are refused, naming the peer, while the pair is live, closing, closed, reserved again and recreated; an unrelated pair, a guest, the sender's own second session, a channel and an unknown nickname are not. |
+| `e2ee::downgrade::tests::a_recovery_gated_pair_refuses_plaintext_and_an_application_object_is_left_to_the_plan` | A pending and a conflicting recovery gate keep refusing; an encrypted application object and a command that carries no message are left to the plan, which refuses an application object naming a user. |
+| `e2ee::downgrade::tests::a_refusal_line_names_the_targets_as_supplied` | The refusal line names the command and the targets as supplied. |
+| `e2ee::edge::tests::downgrade::an_edge_refuses_plaintext_to_a_local_member_of_an_encrypted_pair_in_every_state` | Through an edge's projection of route state objects and its local sessions: the same forms are refused, with the exact line, while the pair is live, closing, recovery-gated, closed and recreated; hiding the next incarnation keeps the tombstone refusing; hiding both frees the pair; unrelated pairs, guests and channels are not refused. |
+| `registration::edge_completion_tests::a_coordinator_refusal_of_an_encrypted_pairs_line_is_the_companion_refusal` | An edge renders the coordinator's refusal of a direct line, a target list, a `NOTICE` and a `TAGMSG` as the companion's line with the targets as supplied, and a channel's refusal of a message or a `JOIN` as before. |
+| `channels::tests::refusals::a_refused_direct_line_is_charged_as_its_plan_would_be` | The coordinator's refusal of its own client's line is charged as its plan would be: repeated refused lines are answered with the companion's line until the sender's budget is spent, then with a refusal that is not `E2EE_REQUIRED`, and a refused `NOTICE` past it is silent. |
+
+Single edits that each fail a test: the predicate refusing only a live
+route (the domain, coordinator and edge tests); one account messaging
+itself refused (the domain test); a guest refused (the domain test); the
+edge refusing only a live route, comparing the nickname as typed, reading
+only the first target, or set back whole to the start commit (the edge
+test); the coordinator reading only the first target (the coordinator
+tests); the coordinator refusing a `PRIVMSG` alone (the coordinator tests);
+the edge rendering the coordinator's refusal with the base renderer (the
+rendering test); and the coordinator's own client's refused line left
+uncharged (the charging test). The coordinator's two checks are pinned
+through the daemons by the next commit.
+
 ## Stage 08 evidence (G-07)
 
-The first two commits change `crates/agenc-relay-domain/src/e2ee/route_table.rs`.
+The first three commits change `crates/agenc-relay-domain/src/e2ee/route_table.rs`.
 The bounded model (`crates/agenc-relay-testkit/src/e2ee_model.rs`) binds
 channel routes only and now names no pair in its binding summary; it
 gains no action, since no new phase is reachable only through one, and
@@ -125,9 +236,9 @@ every count of `conformance/stage-eight-model.toml` is unchanged: actions
 `destroying_an_instance_removes_only_its_tombstone` (gate 4) keep their
 names and bodies. The model and the transcript catalog
 (`scripts/run-stage-eight-model.sh`, `scripts/run-stage-eight-transcripts.sh`)
-were run at each of the two commits. The evidence that changed is new
-domain, coordinator and edge tests of companion Sections 9.4, 11.5, 12.5
-and 13.8, with no transcript row; no box changes.
+were run at each of the three commits. The evidence that changed is new
+domain, coordinator and edge tests of companion Sections 9.4, 11.4,
+11.5 and 12.5, with no transcript row; no box changes.
 
 ## Storage (G-08)
 
@@ -144,6 +255,22 @@ start commit to restore.
 
 ## Decisions
 
+- The coordinator decides every plaintext line, its own clients' and every
+  edge's, before planning (companion Section 12.5); an edge's refusal is a
+  cache of the same rule.
+- A line naming a member of an encrypted pair among other targets is
+  refused whole, before any plan, rather than delivered to its other
+  targets: architecture Section 18.2 gives the companion's rules precedence
+  over the per-target rule of Section 14.1 for an encrypted route's
+  targets, and the client can send its other targets separately.
+- A `NOTICE` is answered with the refusal, as companion Sections 11.4 and
+  11.9 name it and an edge already answered it, rather than with the base
+  profile's silence (architecture Section 15.1).
+- A client-only `TAGMSG` to a member of an encrypted pair is refused at the
+  coordinator as an edge already refused it, so no node delivers a
+  plaintext tag between the pair.
+- The refusal names the targets as the requester supplied them, on every
+  capability set, as an edge's refusal did.
 - A store holding an unanchored ReInit successor keeps its refusal at
   startup; the discard now leaves the predecessor every index before it.
 - `EGROUP BIND` refuses a direct binding that names another pair than its
