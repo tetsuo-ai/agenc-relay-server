@@ -214,8 +214,14 @@ pub struct CompanionState {
     pub(crate) mailbox_snapshots: ops::mailbox_snapshot::Store,
     /// Scheduled expiry ownership is independent of candidate snapshot effects.
     pub(crate) mailbox_expiry_armed: Option<u64>,
-    /// Monotonic receipt time used before publishing a prepared mailbox cut.
+    /// Monotonic receipt time used before publishing a prepared mailbox or
+    /// listing cut.
     pub(crate) mailbox_snapshot_now: u64,
+    /// Process-local listing cuts; their cursors never survive
+    /// reconstruction.
+    pub(crate) listing_snapshots: ops::listing_snapshot::Store,
+    /// The armed expiry of the listing cuts, owned apart from their effects.
+    pub(crate) listing_expiry_armed: Option<u64>,
     /// Route entitlements per edge.
     pub entitlements: RouteEntitlements,
     /// Companion origins.
@@ -1146,14 +1152,16 @@ impl CompanionCoordinator {
         self.pending.is_some()
     }
 
-    /// Drops every open assembly and queued request of `peer`, and forgets
-    /// which of its request and payload objects completed. The next link may
+    /// Drops every open assembly and queued request of `peer`, releases the
+    /// listing cuts of its origins, and forgets which of its request and
+    /// payload objects completed. The next link may
     /// carry a request again exactly as first sent (12.5); that copy is
     /// assembled and classified against the replay rows (20.5), so an
     /// executed request returns its stored result and one that never ran
     /// runs at its sequence.
     pub fn link_closed(&mut self, peer: ServerId) {
         self.link_lost(peer);
+        self.state.listing_snapshots.close_home(*peer.as_bytes());
         self.open.retain(|(open_peer, _), _| *open_peer != peer);
         self.queued.remove(&peer);
         let sender = Sender::Peer(*peer.as_bytes());

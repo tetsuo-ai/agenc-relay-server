@@ -399,6 +399,13 @@ impl Fresh<'_> {
                 &mut coordinator.state.mailbox_expiry_armed,
             )?;
         }
+        if let Some(deadline) = outcome.listing_expiry {
+            ops::listing_snapshot::reserve_expiry(
+                view.context.timers_mut(),
+                deadline,
+                &mut coordinator.state.listing_expiry_armed,
+            )?;
+        }
         let base_counts = match &base_plan {
             Some(plan) if plan.resulting_revision().get() == state_generation => Some(
                 view.context

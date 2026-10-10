@@ -808,6 +808,7 @@ fn request_committed(
     lines: Result<Vec<CommittedLine>, E2eeReplyCode>,
 ) {
     schedule_mailbox_expiry(coordinator, context);
+    schedule_listing_expiry(coordinator, context);
     coordinator.counters.requests_committed =
         coordinator.counters.requests_committed.saturating_add(1);
     let Ok(lines) = lines else {
@@ -897,6 +898,52 @@ pub(super) fn mailbox_timer_fired(
         executor.state.mailbox_expiry_armed = None;
     }
     schedule_mailbox_expiry(coordinator, context);
+    true
+}
+
+/// Releases the listing cuts expired by now and keeps the expiry wake armed
+/// for the earliest one left, or cancels it when none is.
+fn schedule_listing_expiry(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+) {
+    let Some(executor) = coordinator.companion_exec.as_mut() else {
+        return;
+    };
+    let snapshots = &mut executor.state.listing_snapshots;
+    snapshots.expire(tick_millis(context.now()));
+    let Some(deadline) = snapshots.next_expiry() else {
+        executor.state.listing_expiry_armed = None;
+        context
+            .timers_mut()
+            .cancel(TimerKind::ListingSnapshotExpiry, TimedId::Global);
+        return;
+    };
+    if crate::e2ee::coordinator::ops::listing_snapshot::reserve_expiry(
+        context.timers_mut(),
+        deadline,
+        &mut executor.state.listing_expiry_armed,
+    )
+    .is_err()
+    {
+        // No cut may outlive its expiry owner.
+        *snapshots = Default::default();
+    }
+}
+
+/// The listing cuts' expiry wake.
+pub(super) fn listing_timer_fired(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    entry: TimerEntry,
+) -> bool {
+    if (entry.kind, entry.id) != (TimerKind::ListingSnapshotExpiry, TimedId::Global) {
+        return false;
+    }
+    if let Some(executor) = coordinator.companion_exec.as_mut() {
+        executor.state.listing_expiry_armed = None;
+    }
+    schedule_listing_expiry(coordinator, context);
     true
 }
 

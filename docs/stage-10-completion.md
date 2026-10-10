@@ -431,6 +431,17 @@ route stores written before these rules and a daemon test of a direct
 conversation recreated across coordinator and edge restarts (B-14 with
 G-08, SDK program, outside master #35), are recorded in [the recreated
 routes record](stage-10-recreated-routes.md).
+The companion listings `EKEY FETCH ROOT-CHAIN`, `BINDING-LOCKS` and
+`CAPABILITIES` and `EGROUP FETCH AUTHORIZATIONS`, `ACKS` and `RECEIPTS`
+paging over one immutable cut each, continued only by that cut's one live
+cursor, which is bound to its requester, request kind, selector and first
+position and refused with `E2EE_OBJECT_NOT_FOUND` once forged, consumed,
+expired or otherwise bound, with every page packed against the batch's
+object, byte and fragment limits together, the cuts bounded by the query
+snapshot budget and released at their last page, their expiry and the end
+of their origin or link, and a daemon test paging a capability set through
+an edge (B-13, SC-003, SDK program, outside master #35), are recorded in
+[the paging record](stage-10-paging.md).
 Further task isolation, generated administrator identity and federated MODE
 repairs are recorded in [the runtime follow-up](stage-10-runtime-followup.md).
 Independent connection scheduling and borrowed storage ciphertext are recorded

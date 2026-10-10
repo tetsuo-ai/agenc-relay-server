@@ -222,3 +222,94 @@ async fn a_due_entry_for_a_peer_holding_no_cut_retires_no_link() -> TestResult {
     );
     Ok(())
 }
+
+fn arm_listing_expiry(transfer: &mut Transfer, deadline: u64) -> TestResult {
+    let mut armed_at = transfer
+        .coordinator
+        .companion_exec
+        .as_ref()
+        .ok_or("installed executor")?
+        .state
+        .listing_expiry_armed;
+    crate::e2ee::coordinator::ops::listing_snapshot::reserve_expiry(
+        transfer.core.context_mut()?.timers_mut(),
+        deadline,
+        &mut armed_at,
+    )
+    .map_err(|code| format!("listing expiry reservation refused: {code:?}"))?;
+    transfer
+        .coordinator
+        .companion_exec
+        .as_mut()
+        .ok_or("installed executor")?
+        .state
+        .listing_expiry_armed = armed_at;
+    Ok(())
+}
+
+/// A due listing cut expiry disarms the owner's reservation and, with no
+/// cut left, cancels the heap entry instead of rearming it.
+#[tokio::test]
+async fn a_due_listing_expiry_releases_its_reservation_through_the_owner() -> TestResult {
+    let mut transfer = Transfer::open(2, 1 << 20).await?;
+    let deadline = transfer.core.context_mut()?.now().get().saturating_add(50);
+    arm_listing_expiry(&mut transfer, deadline)?;
+    transfer
+        .core
+        .context_mut()?
+        .set_monotonic_for_test(deadline);
+    let (handled, entry) = fire(&mut transfer, TimerKind::ListingSnapshotExpiry)?;
+    assert!(handled, "the composed owner declined its own listing timer");
+    assert_eq!(entry.id, TimedId::Global);
+    assert_eq!(
+        transfer
+            .coordinator
+            .companion_exec
+            .as_ref()
+            .and_then(|executor| executor.state.listing_expiry_armed),
+        None
+    );
+    assert!(
+        !armed(
+            transfer.core.context_mut()?.timers_mut(),
+            TimerKind::ListingSnapshotExpiry,
+            TimedId::Global
+        ),
+        "no cut remained yet the owner left an expiry armed"
+    );
+    Ok(())
+}
+
+/// A node with no companion executor still owns the listing timer, and the
+/// owner claims no listing entry addressed to anything but the global wake.
+#[tokio::test]
+async fn the_listing_expiry_wake_is_owned_only_as_the_global_entry() -> TestResult {
+    let mut transfer = Transfer::open(2, 1 << 20).await?;
+    let deadline = transfer.core.context_mut()?.now().get().saturating_add(50);
+    transfer.core.context_mut()?.timers_mut().schedule(
+        MonotonicTick::from_ticks(deadline),
+        TimerKind::ListingSnapshotExpiry,
+        TimedId::Peer(PEER),
+    )?;
+    transfer
+        .core
+        .context_mut()?
+        .set_monotonic_for_test(deadline);
+    let (handled, _) = fire(&mut transfer, TimerKind::ListingSnapshotExpiry)?;
+    assert!(
+        !handled,
+        "the owner claimed a listing entry addressed to a peer"
+    );
+    arm_listing_expiry(&mut transfer, deadline.saturating_add(50))?;
+    let executor = transfer.coordinator.companion_exec.take();
+    assert!(executor.is_some());
+    transfer
+        .core
+        .context_mut()?
+        .set_monotonic_for_test(deadline.saturating_add(50));
+    let violations = transfer.coordinator.counters().violations;
+    let (handled, _) = fire(&mut transfer, TimerKind::ListingSnapshotExpiry)?;
+    assert!(handled);
+    assert_eq!(transfer.coordinator.counters().violations, violations);
+    Ok(())
+}

@@ -7,8 +7,9 @@ use agenc_relay_e2ee::limits::{MAX_BATCH_DECODED_BYTES, MAX_BATCH_FRAGMENTS, MAX
 use agenc_relay_e2ee::wire::fragment::fragment_count;
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 
+use super::cut_backing::{BackingVec, charge, vector};
 use super::{Exec, Fail};
-use crate::budget::{BackingReservationPort, MemoryCharge, MemoryPermit};
+use crate::budget::MemoryPermit;
 use crate::state_core::query_usage::QueryUsageLease;
 use crate::sync::Arc;
 
@@ -29,29 +30,6 @@ struct Row {
     item: Item,
     begin: usize,
     end: usize,
-}
-
-struct BackingVec<T> {
-    values: Vec<T>,
-    _permit: Option<MemoryPermit>,
-    _query: Option<QueryUsageLease>,
-}
-
-impl<T> Default for BackingVec<T> {
-    fn default() -> Self {
-        Self {
-            values: Vec::new(),
-            _permit: None,
-            _query: None,
-        }
-    }
-}
-
-impl<T> std::ops::Deref for BackingVec<T> {
-    type Target = [T];
-    fn deref(&self) -> &[T] {
-        &self.values
-    }
 }
 
 struct Snapshot {
@@ -181,27 +159,6 @@ impl Store {
             .map(|entry| entry.snapshot.expires_at)
             .min()
     }
-}
-
-fn vector<T>(count: usize, port: &BackingReservationPort) -> Result<BackingVec<T>, Fail> {
-    let bytes = count.checked_mul(size_of::<T>()).ok_or_else(limited)?;
-    let permit = port.reserve(bytes).map_err(|_| limited())?;
-    let mut values = Vec::new();
-    values.try_reserve_exact(count).map_err(|_| limited())?;
-    if values.capacity() > count {
-        return Err(limited());
-    }
-    Ok(BackingVec {
-        values,
-        _permit: Some(permit),
-        _query: None,
-    })
-}
-
-fn charge(capacity: usize) -> Result<u64, Fail> {
-    MemoryCharge::allocation(u64::try_from(capacity).map_err(|_| limited())?)
-        .map(|charge| charge.bytes())
-        .map_err(|_| limited())
 }
 
 fn visit(
