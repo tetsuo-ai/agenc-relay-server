@@ -8,6 +8,10 @@
 //! share a lineage, keyed by the lock of its incarnation zero: after an
 //! authorized close, the next incarnation binds naming that close, and a
 //! direct pair is reserved again for it (companion 9.4 and 11.4).
+//!
+//! A pair with any route, live, closing or closed, refuses plaintext between
+//! its accounts ([`RouteTable::direct_plaintext_allowed`]): every node decides
+//! that refusal with this one predicate (companion 11.4 and 12.5).
 
 use std::collections::BTreeMap;
 
@@ -121,6 +125,15 @@ pub struct RouteEntry {
     pub binding_id: [u8; 32],
     /// Binding generation.
     pub binding_generation: u64,
+    /// The coordinator state generation of the route state an edge projects
+    /// this entry from (companion 12.5): every authoritative transition of a
+    /// route carries the generation of its own event, and a route's next
+    /// incarnation binds only after the close of the one before it, which
+    /// never changes again, so a pair's later incarnation always carries the
+    /// later generation. An edge learns no incarnation or binding generation,
+    /// so this orders its projections of one target. Zero in the
+    /// coordinator's own table, which orders by incarnation and generation.
+    pub state_generation: u64,
     /// Lifecycle.
     pub lifecycle: RouteLifecycle,
     /// Recovery gate.
@@ -148,12 +161,14 @@ impl RouteEntry {
     }
 
     /// The order of two entries that compete for one index: the later
-    /// incarnation, then the later binding generation, then a route that
-    /// is not a tombstone.
-    const fn rank(&self) -> (u64, u64, bool) {
+    /// incarnation, then the later binding generation, then, between an
+    /// edge's projections, the later projected state generation, then a
+    /// route that is not a tombstone.
+    const fn rank(&self) -> (u64, u64, u64, bool) {
         (
             self.incarnation,
             self.binding_generation,
+            self.state_generation,
             !matches!(self.lifecycle, RouteLifecycle::Tombstone { .. }),
         )
     }
@@ -229,6 +244,9 @@ pub struct BindingSummary {
     pub channel_instance_id: Option<ChannelInstanceId>,
     /// Concrete direct nonce, for a direct binding.
     pub conversation_nonce: Option<[u8; 32]>,
+    /// The account pair a direct binding's semantic route names, which must
+    /// be the pair its reservation reserved; none for a channel binding.
+    pub direct_pair: Option<DirectPair>,
 }
 
 /// The coordinator's authoritative route table.
@@ -279,11 +297,32 @@ impl RouteTable {
         self.channel_route(channel_id).is_none()
     }
 
-    /// Whether plaintext may pass between two accounts: only when no live
-    /// or tombstoned direct binding exists for the pair.
+    /// Whether plaintext may pass between two accounts: only when no live,
+    /// closing or tombstoned direct binding exists for the pair, whatever
+    /// its recovery gate. A closed binding stays a tombstone that keeps the
+    /// pair encrypted until the next semantic incarnation binds, which keeps
+    /// it again (companion 11.4).
     #[must_use]
     pub fn direct_plaintext_allowed(&self, pair: &DirectPair) -> bool {
         self.direct_route(pair).is_none()
+    }
+
+    /// Whether plaintext may pass from the account `sender` to the account
+    /// `target`: always for a guest on either side or for one account
+    /// messaging itself, and otherwise as [`Self::direct_plaintext_allowed`]
+    /// decides for their pair, so unrelated pairs are unaffected.
+    #[must_use]
+    pub fn plaintext_allowed_between(
+        &self,
+        sender: Option<AccountId>,
+        target: Option<AccountId>,
+    ) -> bool {
+        match (sender, target) {
+            (Some(sender), Some(target)) => DirectPair::new(sender, target)
+                .ok()
+                .is_none_or(|pair| self.direct_plaintext_allowed(&pair)),
+            _ => true,
+        }
     }
 
     /// Every live reservation.
@@ -381,7 +420,10 @@ impl RouteTable {
     /// name the reserved concrete route, the reservation must be live and
     /// owned by `actor`, its semantic lock slot must be free, and its
     /// incarnation must open the route or follow the close of the route's
-    /// newest incarnation.
+    /// newest incarnation. A direct reservation binds only the sender and
+    /// the peer it named (companion 11.5), so a direct binding must name
+    /// that pair as well as the reserved nonce: the concrete route binding
+    /// the reservation signed covers both (companion 9.1 and 9.4).
     pub fn bind(
         &mut self,
         reservation_id: ReservationId,
@@ -399,12 +441,13 @@ impl RouteTable {
             reservation.target,
             summary.channel_instance_id,
             summary.conversation_nonce,
+            summary.direct_pair,
         ) {
-            (RouteTarget::Channel(instance), Some(bound), None) if instance == bound => {
+            (RouteTarget::Channel(instance), Some(bound), None, None) if instance == bound => {
                 RouteTarget::Channel(instance)
             }
-            (RouteTarget::Direct(pair), None, Some(nonce))
-                if reservation.conversation_nonce == Some(nonce) =>
+            (RouteTarget::Direct(pair), None, Some(nonce), Some(named))
+                if reservation.conversation_nonce == Some(nonce) && named == pair =>
             {
                 RouteTarget::Direct(pair)
             }
@@ -422,6 +465,7 @@ impl RouteTable {
             incarnation: summary.incarnation,
             binding_id: summary.binding_id,
             binding_generation: 0,
+            state_generation: 0,
             lifecycle: RouteLifecycle::Active,
             recovery: RecoveryState::Normal,
         };
@@ -631,14 +675,15 @@ impl RouteTable {
     /// the newest route whatever the order of the restore.
     pub fn restore_entry(&mut self, entry: RouteEntry) {
         self.routes.insert(entry.conversation_id, entry);
-        self.take_indexes(&entry);
+        self.take_indexes(&entry, Indexes::ALL);
     }
 
-    // agenc-review: focus owner=domain reviewed=2026-10-09 reason=one rule gives every index to the newest route whatever the read-back order, so a restart indexes what the live path did
-    /// Points each of `entry`'s target, lock and lineage indexes at it
-    /// unless another entry there outranks it: a later incarnation, a later
-    /// binding generation, or a route that is not a tombstone.
-    fn take_indexes(&mut self, entry: &RouteEntry) {
+    // agenc-review: focus owner=domain reviewed=2026-10-09 reason=one rule gives every index to the newest route whatever the read-back order or removal, so a restart indexes what the live path did
+    /// Points each of `entry`'s `selected` target, lock and lineage indexes
+    /// at it unless another entry there outranks it: a later incarnation, a
+    /// later binding generation, a later projected state generation, or a
+    /// route that is not a tombstone.
+    fn take_indexes(&mut self, entry: &RouteEntry, selected: Indexes) {
         let id = entry.conversation_id;
         let routes = &self.routes;
         let takes = |holder: Option<&ConversationId>| {
@@ -649,12 +694,13 @@ impl RouteTable {
                         .is_none_or(|known| entry.rank() >= known.rank())
             })
         };
-        let target = match entry.target {
-            RouteTarget::Channel(channel) => takes(self.by_channel.get(&channel)),
-            RouteTarget::Direct(pair) => takes(self.by_pair.get(&pair)),
-        };
-        let lock = takes(self.locks.get(&entry.lock));
-        let lineage = takes(self.lineages.get(&entry.lineage));
+        let target = selected.target
+            && match entry.target {
+                RouteTarget::Channel(channel) => takes(self.by_channel.get(&channel)),
+                RouteTarget::Direct(pair) => takes(self.by_pair.get(&pair)),
+            };
+        let lock = selected.lock && takes(self.locks.get(&entry.lock));
+        let lineage = selected.lineage && takes(self.lineages.get(&entry.lineage));
         if target {
             match entry.target {
                 RouteTarget::Channel(channel) => {
@@ -673,31 +719,79 @@ impl RouteTable {
         }
     }
 
-    /// Forgets an edge projection whose entitlement ended, including its
-    /// target and lock indexes. This does not authorize removal of an
-    /// authoritative coordinator binding or tombstone.
+    // agenc-review: focus owner=domain reviewed=2026-10-09 reason=removing a route gives every index it held to the newest remaining route with that key by the restore rank, so a pair or lineage still held never falls vacant
+    /// Forgets an edge projection whose entitlement ended, or a route that
+    /// coordinator startup discards, with its target, lock and lineage
+    /// indexes. Each index it held passes to the newest remaining route with
+    /// that key by the rank rule of [`Self::take_indexes`], as a restore
+    /// would have given it, so a pair, channel instance, lock or lineage
+    /// whose other route is still held keeps its index. This does not
+    /// authorize removal of an authoritative coordinator binding or
+    /// tombstone.
     pub fn remove_projection(&mut self, conversation_id: &ConversationId) {
         let Some(entry) = self.routes.remove(conversation_id) else {
             return;
         };
-        match entry.target {
-            RouteTarget::Channel(channel)
-                if self.by_channel.get(&channel) == Some(conversation_id) =>
-            {
-                self.by_channel.remove(&channel);
-            }
-            RouteTarget::Direct(pair) if self.by_pair.get(&pair) == Some(conversation_id) => {
-                self.by_pair.remove(&pair);
-            }
-            RouteTarget::Channel(_) | RouteTarget::Direct(_) => {}
-        }
-        if self.locks.get(&entry.lock) == Some(conversation_id) {
-            self.locks.remove(&entry.lock);
-        }
-        if self.lineages.get(&entry.lineage) == Some(conversation_id) {
-            self.lineages.remove(&entry.lineage);
+        let vacated = Indexes {
+            target: match entry.target {
+                RouteTarget::Channel(channel) => {
+                    vacate(&mut self.by_channel, &channel, conversation_id)
+                }
+                RouteTarget::Direct(pair) => vacate(&mut self.by_pair, &pair, conversation_id),
+            },
+            lock: vacate(&mut self.locks, &entry.lock, conversation_id),
+            lineage: vacate(&mut self.lineages, &entry.lineage, conversation_id),
+        };
+        // Every remaining route is offered the vacated indexes it shares; a
+        // route sharing none takes nothing.
+        let heirs: Vec<(RouteEntry, Indexes)> = self
+            .routes
+            .values()
+            .map(|other| {
+                let shared = Indexes {
+                    target: vacated.target && other.target == entry.target,
+                    lock: vacated.lock && other.lock == entry.lock,
+                    lineage: vacated.lineage && other.lineage == entry.lineage,
+                };
+                (*other, shared)
+            })
+            .collect();
+        for (heir, shared) in heirs {
+            self.take_indexes(&heir, shared);
         }
     }
+}
+
+/// Which of an entry's target, lock and lineage indexes one rank pass may
+/// give it.
+#[derive(Clone, Copy)]
+struct Indexes {
+    target: bool,
+    lock: bool,
+    lineage: bool,
+}
+
+impl Indexes {
+    /// Every index, as a restore takes them.
+    const ALL: Self = Self {
+        target: true,
+        lock: true,
+        lineage: true,
+    };
+}
+
+/// Removes `key` from `index` when it names `conversation_id`, and reports
+/// whether it did.
+fn vacate<K: Ord>(
+    index: &mut BTreeMap<K, ConversationId>,
+    key: &K,
+    conversation_id: &ConversationId,
+) -> bool {
+    let held = index.get(key) == Some(conversation_id);
+    if held {
+        index.remove(key);
+    }
+    held
 }
 
 #[cfg(test)]

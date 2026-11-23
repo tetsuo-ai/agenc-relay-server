@@ -102,6 +102,7 @@ fn retain_direct(harness: &mut Harness) -> TestResult<Vec<u8>> {
         incarnation: 0,
         binding_id: [34; 32],
         binding_generation: 0,
+        state_generation: 0,
         lifecycle: RouteLifecycle::Active,
         recovery: RecoveryState::Normal,
     });

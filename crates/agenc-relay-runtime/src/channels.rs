@@ -457,7 +457,7 @@ impl From<RuntimeError> for SessionCommandError {
 impl RegisteredCommandExecutor {
     /// Executes one registered handoff or owns its deferred crypto continuation.
     // agenc-review: focus owner=runtime reviewed=2026-09-01 reason=registered routing retains one command observation through synchronous crypto and durable completion without copying input data
-    // agenc-review: allow owner=runtime reviewed=2026-08-30 reason=registered routing binds the account deletion coordinator connection session capabilities nickname and owned handoff at one entry boundary
+    // agenc-review: allow owner=runtime reviewed=2026-10-09 reason=registered routing binds the account deletion coordinator connection session capabilities nickname owned handoff and the coordinator's encrypted route table at one entry boundary
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn route_registered(
         &mut self,
@@ -469,6 +469,7 @@ impl RegisteredCommandExecutor {
         current_nickname: &mut Option<String>,
         handoff: RegisteredCommandHandoff,
         observation: CommandObservation,
+        encrypted_routes: Option<&agenc_relay_domain::e2ee::RouteTable>,
     ) -> Result<RouteOutcome, RuntimeError> {
         // The response floor of a concealed target is measured from here:
         // the start of one parsed, admitted command's processing.
@@ -499,6 +500,26 @@ impl RegisteredCommandExecutor {
                 return Err(error);
             }
         };
+        // The coordinator's own clients meet the same refusal of plaintext
+        // between the accounts of an encrypted direct pair as every edge's
+        // (companion 11.4 and 12.5).
+        if encrypted_routes.is_some_and(|routes| {
+            crate::e2ee::downgrade::refused_direct_target(
+                context.domain(),
+                routes,
+                bound.user_id,
+                &command,
+            )
+            .is_some()
+        }) {
+            let refused = refuse_direct_line(context, bound, reply, &command);
+            complete_observation(
+                context,
+                &mut observation,
+                refused.as_ref().map_or(ResultClass::Error, |class| *class),
+            );
+            return refused.map(|_| RouteOutcome::Continue);
+        }
         if matches!(command.view(), CanonicalCommandView::Chathistory(_, _)) {
             let result = self.start_history(
                 context,
@@ -905,6 +926,42 @@ fn complete_observation(
 ) {
     if let Some(observation) = observation.take() {
         context.complete_command_observation(observation, result);
+    }
+}
+
+/// Answers a line refused because one of its nickname targets is a member
+/// of an encrypted direct pair the sender's account belongs to. The line is
+/// charged as its plan would charge it, so the refusal is no cheaper than
+/// the work it replaces (architecture 19.1); it is then refused with the
+/// companion's `E2EE_REQUIRED` line, or with `SERVER_BUSY` when its tokens
+/// are short, as any refused command is.
+fn refuse_direct_line(
+    context: &mut StateCoreContext,
+    bound: BoundSession,
+    reply: ClientReply<'_>,
+    command: &CanonicalCommand,
+) -> Result<ResultClass, RuntimeError> {
+    let charges = context.domain().command_charges(bound.user_id, command);
+    let now = context.now();
+    match charge_command(context, now, &charges, None, command_is_silent(command)) {
+        Ok(()) => {
+            crate::client_render::render_direct_refusal(
+                context,
+                reply.render_input(bound.user_id),
+            )?;
+            Ok(ResultClass::Rejected)
+        }
+        Err(SessionCommandError::Public { error, silent }) => {
+            crate::client_render::render_domain_failure(
+                context,
+                reply.render_input(bound.user_id),
+                error,
+                silent,
+                None,
+            )?;
+            Ok(result_for_domain_error(error))
+        }
+        Err(SessionCommandError::Internal(error)) => Err(error),
     }
 }
 

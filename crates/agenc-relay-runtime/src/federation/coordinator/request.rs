@@ -887,6 +887,29 @@ fn plan_command(
     let Some(bound) = fresh.bound else {
         return Err(Violation::Codec);
     };
+    // The coordinator decides every edge's plaintext between the accounts of
+    // an encrypted direct pair, whichever edges hold the sender and the
+    // target, before anything is planned (companion 11.4 and 12.5).
+    let refused = coordinator.companion_exec.as_ref().is_some_and(|exec| {
+        crate::e2ee::downgrade::refused_direct_target(
+            context.domain(),
+            &exec.state.routes,
+            bound.user_id,
+            &command,
+        )
+        .is_some()
+    });
+    if refused {
+        fresh.command = Some(command);
+        return finish_failed(
+            coordinator,
+            context,
+            link,
+            peer,
+            fresh,
+            DomainError::EncryptedRoute,
+        );
+    }
     let rebuild =
         |domain: &agenc_relay_domain::DomainState| convert::rebuild_command(domain, operation);
     let key_for =

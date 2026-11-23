@@ -52,6 +52,39 @@ pub(crate) fn render_domain_failure(
     )
 }
 
+/// Answers a plaintext line refused because one of its nickname targets is a
+/// member of an encrypted direct pair the sender's account belongs to, with
+/// the companion's `FAIL <command> E2EE_REQUIRED` line that names the targets
+/// as supplied (companion 11.4 and 11.9), on every capability set and for a
+/// `NOTICE` too, as an edge refuses it.
+pub(crate) fn render_direct_refusal(
+    context: &mut StateCoreContext,
+    reply: ReplyInput<'_>,
+) -> Result<(), RuntimeError> {
+    let frame = direct_refusal_frame(context.server_prefix(), reply.request)
+        .ok_or(RuntimeError::InvalidValue)?;
+    publish_failure(context, reply, vec![frame], false)
+}
+
+/// The companion `FAIL <command> E2EE_REQUIRED` line for a `PRIVMSG`,
+/// `NOTICE` or `TAGMSG` with a nickname among its targets, which only the
+/// refusal of an encrypted direct pair's plaintext answers: the base
+/// renderer's `E2EE_REQUIRED` names a channel (architecture 9.5).
+pub(crate) fn direct_refusal_frame(prefix: &str, request: &ParsedMessage) -> Option<WireMessage> {
+    let command = request.command();
+    if !matches!(command, "PRIVMSG" | "NOTICE" | "TAGMSG") {
+        return None;
+    }
+    let targets = request.middle().first()?;
+    if !targets
+        .split(',')
+        .any(|target| !target.starts_with(['#', '&']))
+    {
+        return None;
+    }
+    crate::e2ee::downgrade::refusal_line(prefix, command, targets)
+}
+
 /// Whether a failed request must not answer before the configured
 /// secret-lookup floor: a JOIN, NAMES, TOPIC, or MODE whose every failure
 /// is a missing or concealed target, which must not be told apart by the

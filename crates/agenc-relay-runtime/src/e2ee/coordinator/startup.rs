@@ -2406,6 +2406,9 @@ fn restore_route(
         incarnation: semantic.incarnation,
         binding_id: row.binding_id,
         binding_generation: tbs.binding_generation,
+        // The coordinator orders its own routes by incarnation and binding
+        // generation, as `BIND` and a ReInit activation enter them.
+        state_generation: 0,
         lifecycle: route_lifecycle(row),
         recovery: recovery.0,
     };

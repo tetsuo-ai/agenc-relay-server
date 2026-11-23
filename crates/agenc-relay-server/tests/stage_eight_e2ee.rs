@@ -105,6 +105,8 @@ mod close_authority;
 mod credential_bounds;
 #[path = "stage_eight_e2ee/credential_replacement.rs"]
 mod credential_replacement;
+#[path = "stage_eight_e2ee/direct_plaintext.rs"]
+mod direct_plaintext;
 #[path = "stage_eight_e2ee/encrypted_clients.rs"]
 mod encrypted_clients;
 #[path = "stage_eight_e2ee/link_faults.rs"]

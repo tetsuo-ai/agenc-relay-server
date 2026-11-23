@@ -18,14 +18,14 @@ use super::*;
 const THIRD_DIRECT_GROUP: [u8; 32] = [77; 32];
 
 /// One account's client session and keys.
-struct Party {
-    client: ArcClient,
-    keys: Principal,
-    nickname: &'static str,
-    login: &'static str,
-    account: AccountId,
+pub(super) struct Party {
+    pub(super) client: ArcClient,
+    pub(super) keys: Principal,
+    pub(super) nickname: &'static str,
+    pub(super) login: &'static str,
+    pub(super) account: AccountId,
     /// The account request seed of its session after the edge restart.
-    rejoin_seed: u8,
+    pub(super) rejoin_seed: u8,
 }
 
 /// Requests `EGROUP RESERVE DIRECT` of the pair from `creator` and returns
@@ -40,7 +40,7 @@ fn reserve(creator: &mut Party, peer: &Party) -> TestResult<Vec<String>> {
 }
 
 /// Another reservation of the pair is refused while an incarnation is live.
-fn pair_held(creator: &mut Party, peer: &Party) -> TestResult {
+pub(super) fn pair_held(creator: &mut Party, peer: &Party) -> TestResult {
     let held = reserve(creator, peer)?;
     assert_contains(&held, "FAIL EGROUP E2EE_GROUP_CONFLICT")
 }
@@ -49,7 +49,7 @@ fn pair_held(creator: &mut Party, peer: &Party) -> TestResult {
 /// `predecessor` in `group`. Each root binds only this pair's
 /// incarnations, so its binding lock's sequence is the incarnation and the
 /// lock continues the one `previous` holds.
-fn bind_direct(
+pub(super) fn bind_direct(
     creator: &mut Party,
     peer: &Party,
     (incarnation, predecessor): (u64, [u8; 32]),
@@ -131,7 +131,7 @@ fn bind_direct(
 }
 
 /// One application object each way on `bound` at `epoch`.
-fn exchange(
+pub(super) fn exchange(
     creator: &mut Party,
     peer: &mut Party,
     bound: &BoundConversation,
@@ -160,7 +160,7 @@ fn plaintext_refused(creator: &mut Party, peer: &Party, text: &str) -> TestResul
 /// council members' votes and closes it with both controller roots'
 /// approvals, as the fixed direct policy requires (companion 9.3 and 11.5);
 /// returns the close identifier, which the peer sees broadcast.
-fn close_direct(
+pub(super) fn close_direct(
     creator: &mut Party,
     peer: &mut Party,
     bound: &BoundConversation,

@@ -176,6 +176,63 @@ async fn failed_command_is_rendered_to_its_client() -> TestResult {
     Ok(())
 }
 
+/// The coordinator refuses a line naming a member of an encrypted direct
+/// pair the sender's account belongs to; its client meets the companion's
+/// refusal an edge itself sends, with the targets as supplied, a NOTICE
+/// included (companion 11.4 and 11.9). A channel's refusal, of a message or
+/// a JOIN, keeps the base renderer's line.
+#[tokio::test]
+async fn a_coordinator_refusal_of_an_encrypted_pairs_line_is_the_companion_refusal() -> TestResult {
+    let mut harness = Harness::new(Role::Edge)?;
+    let sink = edge_client(&mut harness, 1, "asker")?;
+    for (line, command, targets) in [
+        ("PRIVMSG bob :hello", "PRIVMSG", "bob"),
+        ("NOTICE carol,BoB :hello", "NOTICE", "carol,BoB"),
+        ("TAGMSG bob", "TAGMSG", "bob"),
+        ("PRIVMSG #room,bob :hello", "PRIVMSG", "#room,bob"),
+    ] {
+        let before = sink.lines().len();
+        complete(
+            &mut harness,
+            EdgeCompletion::CommandFailed {
+                generation: ConnectionGeneration::new(1),
+                message: Box::new(parsed(line)?),
+                error: DomainError::EncryptedRoute,
+            },
+        )?;
+        let lines = sink.lines();
+        assert_eq!(lines.len(), before + 1, "{line}: {lines:?}");
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(
+                format!(
+                    ":server.example FAIL {command} E2EE_REQUIRED {targets} :plaintext is forbidden for the target"
+                )
+                .as_str()
+            ),
+            "{line}"
+        );
+    }
+    for line in ["PRIVMSG #room :hello", "JOIN #room"] {
+        let before = sink.lines().len();
+        complete(
+            &mut harness,
+            EdgeCompletion::CommandFailed {
+                generation: ConnectionGeneration::new(1),
+                message: Box::new(parsed(line)?),
+                error: DomainError::EncryptedRoute,
+            },
+        )?;
+        let lines = sink.lines();
+        let channel = lines.get(before).ok_or("the channel refusal")?;
+        assert!(
+            !channel.contains("plaintext is forbidden"),
+            "{line}: {channel}"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn failed_command_for_a_vanished_connection_is_dropped() -> TestResult {
     let mut harness = Harness::new(Role::Edge)?;

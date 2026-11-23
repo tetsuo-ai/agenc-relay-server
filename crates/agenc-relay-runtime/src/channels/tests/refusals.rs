@@ -558,3 +558,86 @@ async fn federated_key_work_needs_a_key_and_submits_each_job_once() -> TestResul
     ));
     Ok(())
 }
+
+/// The coordinator answers its own client's line naming a member of an
+/// encrypted direct pair with the companion's refusal only after charging
+/// the line as its plan would (architecture 19.1): repeated refused lines
+/// exhaust the sender's message budget and are then `SERVER_BUSY`, and a
+/// refused `NOTICE` past it stays silent.
+#[tokio::test]
+async fn a_refused_direct_line_is_charged_as_its_plan_would_be() -> TestResult {
+    let mut fixture = StateCoreFixture::new(vec![41; 4096])?;
+    let context = fixture.context_mut()?;
+    let alice = seed_account(context, 61, 1)?;
+    let bob = seed_account(context, 62, 1)?;
+    let identity = seed_session(context, 63, "alice", Some(alice))?;
+    seed_session(context, 64, "bob", Some(bob))?;
+    let actor = bound(identity);
+    let capabilities = CapabilityState::default();
+    let sink = bind_live_session(context, 12, identity, CapabilityState::default(), true)?;
+    let line = |text: &str,
+                kind: PostRegistrationCommandKind|
+     -> TestResult<(ParsedMessage, RegisteredCommandKind)> {
+        Ok((parsed(text)?, RegisteredCommandKind::Public(kind)))
+    };
+    let (privmsg, privmsg_kind) = line("PRIVMSG bob :hello", PostRegistrationCommandKind::Privmsg)?;
+    let (notice, notice_kind) = line("NOTICE bob :hello", PostRegistrationCommandKind::Notice)?;
+    let privmsg_reply = ClientReply {
+        generation: ConnectionGeneration::new(12),
+        capabilities: &capabilities,
+        request: RetryCommand {
+            kind: privmsg_kind,
+            message: &privmsg,
+        },
+    };
+    let ConvertedCommand::Ready(command) =
+        convert_registered_command(context, actor, privmsg_reply, privmsg_kind, &privmsg)?
+    else {
+        return Err("the PRIVMSG converts".into());
+    };
+    let mut last = ResultClass::Rejected;
+    let mut refusals = 0_usize;
+    for _ in 0..64_u16 {
+        let before = sink.lines().len();
+        last = refuse_direct_line(context, actor, privmsg_reply, &command)?;
+        let lines = sink.lines();
+        assert_eq!(lines.len(), before + 1);
+        let answer = lines.last().ok_or("an answer")?;
+        if last == ResultClass::Busy {
+            assert!(!answer.contains("E2EE_REQUIRED"), "{answer}");
+            break;
+        }
+        assert_eq!(last, ResultClass::Rejected);
+        assert!(
+            answer.ends_with(
+                " FAIL PRIVMSG E2EE_REQUIRED bob :plaintext is forbidden for the target"
+            ),
+            "{answer}"
+        );
+        refusals += 1;
+    }
+    assert_eq!(last, ResultClass::Busy);
+    assert!(refusals > 0 && refusals < 64, "{refusals}");
+    // Past the budget a refused NOTICE is silent, as every refused NOTICE
+    // short of tokens is.
+    let notice_reply = ClientReply {
+        generation: ConnectionGeneration::new(12),
+        capabilities: &capabilities,
+        request: RetryCommand {
+            kind: notice_kind,
+            message: &notice,
+        },
+    };
+    let ConvertedCommand::Ready(command) =
+        convert_registered_command(context, actor, notice_reply, notice_kind, &notice)?
+    else {
+        return Err("the NOTICE converts".into());
+    };
+    let before = sink.lines().len();
+    assert_eq!(
+        refuse_direct_line(context, actor, notice_reply, &command)?,
+        ResultClass::Busy
+    );
+    assert_eq!(sink.lines().len(), before);
+    Ok(())
+}
