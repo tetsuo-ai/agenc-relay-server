@@ -14,9 +14,11 @@ pair's next incarnation binds, which refuses it in turn: the coordinator
 decides every line, from its own clients and from every edge, with the route
 table's one predicate, and an edge refuses earlier what its own projection
 shows. The fourth drives these rules through the production daemons, on one
-edge, across two edges and from the coordinator's own listener. No
-specification, profile hash, registry entry, named limit, reply code, wire
-object, table, key, row kind, field or storage generation changed.
+edge, across two edges and from the coordinator's own listener. The fifth,
+written on 2026-11-23 after the topic was merged with `main` at #197, has a
+removal copy only the routes it offers an index. No specification, profile
+hash, registry entry, named limit, reply code, wire object, table, key, row
+kind, field or storage generation changed.
 
 ## A pair's routes stay ordered and indexed (first commit)
 
@@ -248,9 +250,62 @@ coordinator's refusal with the base renderer (the cross-edge test); and the
 edge's rule set back to the start commit with both of the coordinator's
 checks removed (both tests).
 
+## A removal copies only the routes it offers an index (fifth commit)
+
+`RouteTable::remove_projection` offered each index a removed route vacated
+to every remaining route: it copied the whole table into a list and ran the
+rank rule on every entry, though only a route that shares a vacated index
+can take one. The rule and every index a removal leaves are unchanged; what
+a removal reads and copies is not:
+
+- A route that held none of its indexes, a projection that another outranks
+  under every key, leaves none to give, and its removal returns without
+  reading the table.
+- Otherwise the table is read once, in its own order, and only a route that
+  shares a vacated index is copied and offered it. A route that shares none
+  is passed over, where before it was copied and took nothing.
+
+One removal, in a table whose routes share no key, as the median of three
+runs of a release build on the development host, beside one copy of the
+whole table:
+
+| Routes in the table | Removal before | Removal after | One copy of the table |
+| --- | --- | --- | --- |
+| 1,000 | 0.0083 ms | 0.0034 ms | 0.072 ms |
+| 10,000 | 0.101 ms | 0.043 ms | 0.94 ms |
+| 100,000 | 3.96 ms | 2.25 ms | 19 ms |
+| 1,000,000 | 81.5 ms | 29.6 ms | 196 ms |
+
+What stays open: a removal still reads the table once when the removed
+route held an index. An edge already pays more than that for every event:
+`E2eeEdge::begin_projection` copies the route table, with the edge's
+conversations, route objects and channel names, before it applies each
+ordinary companion event and each barrier (`apply_event`,
+`prepare_barrier`), so the last column is the route table's part of every
+event's cost, and a removal adds less than a sixth of it, at every size
+measured, to an event that hides a route. A second index naming every route
+under each of its keys would end the read, and every one of those copies
+would then carry it; it is left until an edge no longer copies its
+projection for every event.
+
+| Test | What it pins |
+| --- | --- |
+| `e2ee::route_table::tests::a_removal_leaves_the_table_a_restore_of_the_remaining_routes_gives` | Over one table holding three projections of a pair, a ReInit predecessor and its successor, a route that holds its lock and lineage but not its instance beside an older incarnation that shares only that lineage, a route that holds its instance and lineage but not its lock, and two routes that share no key, removing each route in turn leaves exactly the table a restore of the others gives, in either order. |
+
+Single edits that each fail a test: the removal returning unless the index
+of the concrete route was vacated (the new test); a set of indexes counted
+as empty when it names only the lineage (the new test and the removal test
+of the first commit); only a route that shares the concrete route offered an
+index (the same two); and the routes that share an index passed over in
+place of the others (the same two). The release coverage policy re-spans
+`d50-route-table-remove-projection` over the function as it now stands (10
+of 10 branches, where it had 8); the other seven regions of the file keep
+their spans.
+
 ## Stage 08 evidence (G-07)
 
-The first three commits change `crates/agenc-relay-domain/src/e2ee/route_table.rs`.
+The first three commits and the fifth change
+`crates/agenc-relay-domain/src/e2ee/route_table.rs`.
 The bounded model (`crates/agenc-relay-testkit/src/e2ee_model.rs`) binds
 channel routes only and now names no pair in its binding summary; it
 gains no action, since no new phase is reachable only through one, and
@@ -260,9 +315,10 @@ every count of `conformance/stage-eight-model.toml` is unchanged: actions
 `destroying_an_instance_removes_only_its_tombstone` (gate 4) keep their
 names and bodies. The model and the transcript catalog
 (`scripts/run-stage-eight-model.sh`, `scripts/run-stage-eight-transcripts.sh`)
-were run at each of the four commits. The evidence that changed is new
-domain, coordinator, edge and daemon tests of companion Sections 9.4, 11.4,
-11.5 and 12.5, with no transcript row; no box changes.
+were run at each of the first four commits, and the model, the Stage 08
+check and every test of the workspace at the fifth. The evidence that
+changed is new domain, coordinator, edge and daemon tests of companion
+Sections 9.4, 11.4, 11.5 and 12.5, with no transcript row; no box changes.
 
 ## Storage (G-08)
 
@@ -297,6 +353,9 @@ start commit to restore.
   capability set, as an edge's refusal did.
 - A store holding an unanchored ReInit successor keeps its refusal at
   startup; the discard now leaves the predecessor every index before it.
+- A removal keeps its one read of the route table. A second index would
+  end it and be carried by every copy an edge makes of the table, which it
+  makes for every event, so the index waits for that copy to go.
 - `EGROUP BIND` refuses a direct binding that names another pair than its
   reservation with `E2EE_BINDING_AUTH_INVALID`, the code it gives every
   other binding that does not fit its reservation.

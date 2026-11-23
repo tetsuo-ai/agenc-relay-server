@@ -1245,3 +1245,95 @@ fn removing_a_route_gives_its_indexes_to_the_newest_remaining_route() -> TestRes
     }
     Ok(())
 }
+
+/// A removal leaves the table that a restore of the remaining routes gives,
+/// whichever route goes: each index the removed route held passes to the
+/// newest route that shared it, a route that held no index changes none, and
+/// a route that shares no key with the removed one is passed over and keeps
+/// every index it held.
+#[test]
+fn a_removal_leaves_the_table_a_restore_of_the_remaining_routes_gives() -> TestResult {
+    let pair = DirectPair::new(account(1), account(2))?;
+    let other_pair = DirectPair::new(account(1), account(3))?;
+    let route =
+        |seed: u8, target: RouteTarget, (lock, lineage): (u8, u8), generation: u64| RouteEntry {
+            conversation_id: ConversationId([seed; 32]),
+            target,
+            lock: SemanticLockId([lock; 32]),
+            lineage: SemanticLockId([lineage; 32]),
+            incarnation: 0,
+            binding_id: [seed; 32],
+            binding_generation: 0,
+            state_generation: generation,
+            lifecycle: RouteLifecycle::Tombstone {
+                close_id: [seed; 32],
+            },
+            recovery: RecoveryState::Normal,
+        };
+    // Every rank differs, so no restore order decides an index.
+    let entries = [
+        // Three projections of one pair, each under its own lock.
+        route(1, RouteTarget::Direct(pair), (101, 101), 4),
+        route(2, RouteTarget::Direct(pair), (102, 102), 8),
+        route(3, RouteTarget::Direct(pair), (103, 103), 12),
+        // A ReInit predecessor and its successor: one instance, one lock.
+        route(4, RouteTarget::Channel(instance(1)), (110, 110), 20),
+        route(5, RouteTarget::Channel(instance(1)), (110, 110), 24),
+        // A route that holds its lock and its lineage but not its instance,
+        // which a newer route of another lineage holds, and an older
+        // incarnation that shares only that lineage.
+        route(6, RouteTarget::Channel(instance(2)), (120, 125), 30),
+        route(7, RouteTarget::Channel(instance(2)), (121, 126), 40),
+        route(8, RouteTarget::Channel(instance(3)), (122, 125), 6),
+        // Two routes that share no key with any other.
+        route(9, RouteTarget::Direct(other_pair), (130, 130), 50),
+        route(10, RouteTarget::Channel(instance(4)), (140, 140), 2),
+        // A route that holds its instance and its lineage but not its lock,
+        // which a newer route on another instance holds.
+        route(11, RouteTarget::Channel(instance(5)), (150, 151), 10),
+        route(12, RouteTarget::Channel(instance(6)), (150, 152), 14),
+    ];
+    let restored = |without: Option<ConversationId>, reversed: bool| {
+        let mut kept: Vec<RouteEntry> = entries
+            .into_iter()
+            .filter(|entry| Some(entry.conversation_id) != without)
+            .collect();
+        if reversed {
+            kept.reverse();
+        }
+        let mut table = RouteTable::new();
+        for entry in kept {
+            table.restore_entry(entry);
+        }
+        table
+    };
+    assert_eq!(restored(None, false), restored(None, true));
+    for removed in entries {
+        let mut table = restored(None, false);
+        table.remove_projection(&removed.conversation_id);
+        for reversed in [false, true] {
+            assert_eq!(
+                table,
+                restored(Some(removed.conversation_id), reversed),
+                "{:?}",
+                removed.conversation_id
+            );
+        }
+    }
+    // The route that held its lock and lineage but not its instance gave the
+    // lineage to the older incarnation, and the instance stayed where it was.
+    let mut table = restored(None, false);
+    table.remove_projection(&ConversationId([6; 32]));
+    assert_eq!(
+        table.lineages.get(&SemanticLockId([125; 32])),
+        Some(&ConversationId([8; 32]))
+    );
+    assert_eq!(
+        table
+            .channel_route(&instance(2))
+            .map(|held| held.conversation_id),
+        Some(ConversationId([7; 32]))
+    );
+    assert_eq!(table.locks.get(&SemanticLockId([120; 32])), None);
+    Ok(())
+}

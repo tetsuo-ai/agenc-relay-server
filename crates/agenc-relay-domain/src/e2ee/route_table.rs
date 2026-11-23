@@ -719,15 +719,17 @@ impl RouteTable {
         }
     }
 
-    // agenc-review: focus owner=domain reviewed=2026-10-09 reason=removing a route gives every index it held to the newest remaining route with that key by the restore rank, so a pair or lineage still held never falls vacant
+    // agenc-review: focus owner=domain reviewed=2026-11-23 reason=removing a route gives every index it held to the newest remaining route with that key by the restore rank, so a pair or lineage still held never falls vacant, and copies only the routes it offers an index
     /// Forgets an edge projection whose entitlement ended, or a route that
     /// coordinator startup discards, with its target, lock and lineage
     /// indexes. Each index it held passes to the newest remaining route with
     /// that key by the rank rule of [`Self::take_indexes`], as a restore
     /// would have given it, so a pair, channel instance, lock or lineage
-    /// whose other route is still held keeps its index. This does not
-    /// authorize removal of an authoritative coordinator binding or
-    /// tombstone.
+    /// whose other route is still held keeps its index. A route that held no
+    /// index leaves none to give, and the table is not read; otherwise it is
+    /// read once, and only a route that shares a vacated index is copied and
+    /// offered it. This does not authorize removal of an authoritative
+    /// coordinator binding or tombstone.
     pub fn remove_projection(&mut self, conversation_id: &ConversationId) {
         let Some(entry) = self.routes.remove(conversation_id) else {
             return;
@@ -742,18 +744,21 @@ impl RouteTable {
             lock: vacate(&mut self.locks, &entry.lock, conversation_id),
             lineage: vacate(&mut self.lineages, &entry.lineage, conversation_id),
         };
-        // Every remaining route is offered the vacated indexes it shares; a
-        // route sharing none takes nothing.
+        if !vacated.any() {
+            return;
+        }
+        // Each remaining route that shares a vacated index is offered it,
+        // in the table's order; a route that shares none is passed over.
         let heirs: Vec<(RouteEntry, Indexes)> = self
             .routes
             .values()
-            .map(|other| {
+            .filter_map(|other| {
                 let shared = Indexes {
                     target: vacated.target && other.target == entry.target,
                     lock: vacated.lock && other.lock == entry.lock,
                     lineage: vacated.lineage && other.lineage == entry.lineage,
                 };
-                (*other, shared)
+                shared.any().then_some((*other, shared))
             })
             .collect();
         for (heir, shared) in heirs {
@@ -778,6 +783,11 @@ impl Indexes {
         lock: true,
         lineage: true,
     };
+
+    /// Whether this names at least one index.
+    const fn any(self) -> bool {
+        self.target | self.lock | self.lineage
+    }
 }
 
 /// Removes `key` from `index` when it names `conversation_id`, and reports
