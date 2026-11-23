@@ -2614,7 +2614,7 @@ recorded here so a later reviewer does not have to rediscover them.
   through the experimental HPKE feature and that no production crate graph
   contains, and RUSTSEC-2026-0330 and RUSTSEC-2026-0331 against libcrux-kem
   0.0.9, which Cargo.lock lists only as an optional hpke-rs dependency that
-  no workspace crate enables (SDK program, outside master #35); the daemon's own view of their framing is what is compared,
+  no workspace crate enables (SDK program, outside master #35); `.cargo/audit.toml`, `deny.toml` and `fuzz/deny.toml` also except RUSTSEC-2026-0387 against crypto-bigint 0.5.5, which has no patched release in its series and none of whose code the daemon links, since its only production dependents are the ristretto255-only opaque-ke 4.0.1 and voprf 0.5.0, until a stable opaque-ke release uses elliptic-curve 0.14 and the test clients' curve crates move (recorded in `conformance/dependency-patch-evidence-2026-11-23.md`, 2026-11-23, SDK program, outside master #35); the daemon's own view of their framing is what is compared,
   and any deviation between the libraries is recorded in
   `conformance/e2ee-interop-matrix.toml` rather than hidden.
 - Completed local submissions retain a bounded reply for 30 minutes, scoped

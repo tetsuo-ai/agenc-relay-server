@@ -9,7 +9,9 @@ all-features = true
 yanked = "deny"
 unmaintained = "all"
 unsound = "all"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 has no patched release in its series and is resolved only through elliptic-curve 0.13.8: in production under the ristretto255-only opaque-ke 4.0.1 and voprf 0.5.0, which link none of its code, and otherwise in test-only MLS clients; see .cargo/audit.toml" },
+]
 
 [bans]
 multiple-versions = "deny"

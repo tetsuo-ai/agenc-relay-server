@@ -61,12 +61,12 @@ openmls_rust_crypto = { version = "=0.6.0", default-features = false }
 opaque-sha2 = { package = "sha2", version = "=0.10.9", default-features = false }
 precis-profiles = { version = "=0.1.13", default-features = false }
 redb = { version = "=4.2.0", default-features = false, features = ["std"] }
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process", "mm"] }
-rustls = { version = "=0.23.45", default-features = false, features = ["std", "aws_lc_rs", "prefer-post-quantum"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "process", "mm"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws_lc_rs", "prefer-post-quantum"] }
 sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
 subtle = { version = "=2.6.1", default-features = false }
 tls_codec = { version = "=0.5.0", default-features = false, features = ["std", "mls"] }
-tokio = { version = "=1.53.1", default-features = false, features = ["rt-multi-thread", "net", "io-util", "time", "signal", "sync", "macros"] }
+tokio = { version = "=1.53.3", default-features = false, features = ["rt-multi-thread", "net", "io-util", "time", "signal", "sync", "macros"] }
 toml = { version = "=1.1.4", default-features = false, features = ["parse", "serde", "std"] }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 
