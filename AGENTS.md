@@ -11,7 +11,7 @@ Unit tests live beside modules; integration tests live in each crate's `tests/`.
 Use the pinned Rust 1.98.0 toolchain. Run commands from the repository root:
 
 - `cargo build --workspace --all-features --locked`: build all crates and optional features.
-- `cargo fmt --all --check`: check formatting.
+- `cargo fmt --check`: check formatting.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`: enforce lint policy.
 - `cargo test --workspace --all-features --locked`: run workspace tests.
 - `cargo test -p agenc-relay-client-wire --locked`: test one owning crate.

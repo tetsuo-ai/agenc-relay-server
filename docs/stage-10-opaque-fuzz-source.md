@@ -94,3 +94,22 @@ made, a separately rooted consumer must repeat the root `[patch]`.
 - The redb fork stays a root and fuzz `[patch]` as before.
 
 No Stage 04 or Stage 10 task changes state.
+
+## Explicit dependency follow-up
+
+The accepted Architecture Section 28.8 now specifies `cargo fmt --check`.
+The workspace edge selects `vendor/opaque-ke-4.0.1` directly and excludes it
+from workspace membership. The fuzz auth dependency follows that same edge.
+The redb overrides remain in both workspaces. Both lockfiles and the reviewed
+OPAQUE tree remain byte-for-byte identical.
+
+The workspace and Stage 04 checkers pin the explicit path, workspace
+exclusion, and reviewed tree digest. The Stage 04 checker requires both lock
+files to contain one local OPAQUE package and refuses a registry override.
+The Stage 09 and Stage 10 command pins use the accepted formatting scope.
+
+Run `python3 scripts/check-opaque-consumer.py --git <server-git-url> --rev
+<full-server-commit>` to build and exercise the shared registration API
+from a fresh workspace with no Cargo patch. The check verifies the
+consumer-owned lock and Cargo metadata resolve exactly one OPAQUE package
+from the same Git revision as auth. It also rehashes the vendored checkout.

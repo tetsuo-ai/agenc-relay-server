@@ -45,7 +45,7 @@ argv = ["python3", "scripts/check-ci.py", "self-test"]
 argv = ["python3", "scripts/check-rust-components.py", "self-test"]
 
 [[gate.stage-zero-implementation.command]]
-argv = ["cargo", "fmt", "--all", "--check"]
+argv = ["cargo", "fmt", "--check"]
 
 [[gate.stage-zero-implementation.command]]
 argv = ["cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked"]
