@@ -82,6 +82,7 @@ dependencies = [
  "agenc-relay-federation-wire",
  "agenc-relay-types",
  "base64",
+ "zeroize",
 ]
 
 [[package]]
@@ -159,6 +160,7 @@ version = "1.0.0-rc.3"
 dependencies = [
  "agenc-relay-admin",
  "agenc-relay-auth",
+ "agenc-relay-client-support",
  "agenc-relay-client-wire",
  "agenc-relay-config",
  "agenc-relay-crypto",

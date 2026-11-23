@@ -12,6 +12,7 @@ history = ["agenc-relay-domain/history", "agenc-relay-federation-wire/history", 
 wss = ["agenc-relay-client-wire/wss", "agenc-relay-config/wss", "agenc-relay-crypto/wss"]
 
 [dependencies]
+agenc-relay-client-support.workspace = true
 agenc-relay-admin.workspace = true
 agenc-relay-auth.workspace = true
 agenc-relay-client-wire.workspace = true

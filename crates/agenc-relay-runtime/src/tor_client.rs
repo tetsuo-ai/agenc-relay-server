@@ -6,13 +6,17 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use agenc_relay_client_support::socks::{
+    ConnectReplyTail, ISOLATION_GREETING, IsolationCredentials, MAX_DOMAIN_REPLY_TAIL_BYTES,
+    SocksError, check_authentication_reply, check_connect_reply, check_method_selection,
+    domain_reply_tail_length, hostname_request,
+};
 use agenc_relay_config::{GroupPolicy, OnboardingDescriptor, SocksEndpoint};
 use agenc_relay_types::{AccountId, EntropySource, NetworkId};
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
-use zeroize::Zeroizing;
 
 use crate::sync::Arc;
 use crate::tls::config::{
@@ -20,14 +24,6 @@ use crate::tls::config::{
 };
 use crate::tls::{CLIENT_ALPN, ClientTlsStream, TrustStore};
 
-const SOCKS_VERSION: u8 = 5;
-const SOCKS_USERNAME_PASSWORD: u8 = 2;
-const SOCKS_CONNECT: u8 = 1;
-const SOCKS_HOSTNAME: u8 = 3;
-const USERNAME_PASSWORD_VERSION: u8 = 1;
-const ISOLATION_CREDENTIAL_BYTES: usize = 32;
-const MAX_SOCKS_HOSTNAME_BYTES: usize = 255;
-const MAX_SOCKS_REPLY_DOMAIN_BYTES: usize = 255;
 const MAX_TOR_CLIENT_CONTEXTS: usize = 256;
 const MAX_CREDENTIAL_DRAWS: usize = 4;
 const MAX_TOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -122,27 +118,15 @@ impl fmt::Display for TorConnectError {
 
 impl std::error::Error for TorConnectError {}
 
-struct IsolationCredentials {
-    username: Zeroizing<[u8; ISOLATION_CREDENTIAL_BYTES]>,
-    password: Zeroizing<[u8; ISOLATION_CREDENTIAL_BYTES]>,
-}
-
-impl IsolationCredentials {
-    fn draw(entropy: &mut impl EntropySource) -> Result<Self, TorConnectError> {
-        let mut username = Zeroizing::new([0_u8; ISOLATION_CREDENTIAL_BYTES]);
-        let mut password = Zeroizing::new([0_u8; ISOLATION_CREDENTIAL_BYTES]);
-        entropy
-            .fill_exact(username.as_mut())
-            .map_err(|_| TorConnectError::EntropyUnavailable)?;
-        entropy
-            .fill_exact(password.as_mut())
-            .map_err(|_| TorConnectError::EntropyUnavailable)?;
-        Ok(Self { username, password })
-    }
-
-    fn matches(&self, other: &Self) -> bool {
-        self.username.as_ref() == other.username.as_ref()
-            && self.password.as_ref() == other.password.as_ref()
+impl From<SocksError> for TorConnectError {
+    fn from(error: SocksError) -> Self {
+        match error {
+            SocksError::EntropyUnavailable => Self::EntropyUnavailable,
+            SocksError::ResourceUnavailable => Self::ResourceUnavailable,
+            SocksError::InvalidReply => Self::InvalidProxyReply,
+            SocksError::AuthenticationRefused => Self::AuthenticationRefused,
+            SocksError::TargetRefused => Self::TargetRefused,
+        }
     }
 }
 
@@ -417,41 +401,18 @@ async fn negotiate_isolation(
     stream: &mut ProxyStream,
     credentials: &IsolationCredentials,
 ) -> Result<(), TorConnectError> {
-    write_proxy(stream, &[SOCKS_VERSION, 1, SOCKS_USERNAME_PASSWORD]).await?;
+    write_proxy(stream, &ISOLATION_GREETING).await?;
     let mut selection = [0_u8; 2];
     read_proxy(stream, &mut selection).await?;
-    let [version, method] = selection;
-    if version != SOCKS_VERSION {
-        return Err(TorConnectError::InvalidProxyReply);
-    }
-    if method != SOCKS_USERNAME_PASSWORD {
-        return Err(TorConnectError::AuthenticationRefused);
-    }
+    check_method_selection(selection)?;
 
-    let mut request = Zeroizing::new(Vec::new());
-    request
-        .try_reserve_exact(3 + (2 * ISOLATION_CREDENTIAL_BYTES))
-        .map_err(|_| TorConnectError::ResourceUnavailable)?;
-    request.push(USERNAME_PASSWORD_VERSION);
-    request.push(
-        u8::try_from(ISOLATION_CREDENTIAL_BYTES).map_err(|_| TorConnectError::InvalidProxyReply)?,
-    );
-    request.extend_from_slice(credentials.username.as_ref());
-    request.push(
-        u8::try_from(ISOLATION_CREDENTIAL_BYTES).map_err(|_| TorConnectError::InvalidProxyReply)?,
-    );
-    request.extend_from_slice(credentials.password.as_ref());
-    write_proxy(stream, request.as_ref()).await?;
+    let request = credentials.authentication_request()?;
+    write_proxy(stream, request.as_bytes()).await?;
+    drop(request);
 
     let mut reply = [0_u8; 2];
     read_proxy(stream, &mut reply).await?;
-    let [version, status] = reply;
-    if version != USERNAME_PASSWORD_VERSION {
-        return Err(TorConnectError::InvalidProxyReply);
-    }
-    if status != 0 {
-        return Err(TorConnectError::AuthenticationRefused);
-    }
+    check_authentication_reply(reply)?;
     Ok(())
 }
 
@@ -460,29 +421,7 @@ async fn request_hostname(
     hostname: &str,
     port: u16,
 ) -> Result<(), TorConnectError> {
-    let hostname_bytes = hostname.as_bytes();
-    if hostname_bytes.is_empty()
-        || hostname_bytes.len() > MAX_SOCKS_HOSTNAME_BYTES
-        || !hostname_bytes.is_ascii()
-        || port == 0
-    {
-        return Err(TorConnectError::InvalidProxyReply);
-    }
-    let hostname_length =
-        u8::try_from(hostname_bytes.len()).map_err(|_| TorConnectError::InvalidProxyReply)?;
-    let mut request = Vec::new();
-    request
-        .try_reserve_exact(7 + hostname_bytes.len())
-        .map_err(|_| TorConnectError::ResourceUnavailable)?;
-    request.extend_from_slice(&[
-        SOCKS_VERSION,
-        SOCKS_CONNECT,
-        0,
-        SOCKS_HOSTNAME,
-        hostname_length,
-    ]);
-    request.extend_from_slice(hostname_bytes);
-    request.extend_from_slice(&port.to_be_bytes());
+    let request = hostname_request(hostname, port)?;
     write_proxy(stream, &request).await?;
     read_connect_reply(stream).await
 }
@@ -490,18 +429,10 @@ async fn request_hostname(
 async fn read_connect_reply(stream: &mut ProxyStream) -> Result<(), TorConnectError> {
     let mut header = [0_u8; 4];
     read_proxy(stream, &mut header).await?;
-    let [version, reply, reserved, address_type] = header;
-    if version != SOCKS_VERSION || reserved != 0 || reply > 8 {
-        return Err(TorConnectError::InvalidProxyReply);
-    }
-    if reply != 0 {
-        return Err(TorConnectError::TargetRefused);
-    }
-    match address_type {
-        1 => read_reply_tail::<6>(stream).await,
-        4 => read_reply_tail::<18>(stream).await,
-        SOCKS_HOSTNAME => read_domain_reply_tail(stream).await,
-        _ => Err(TorConnectError::InvalidProxyReply),
+    match check_connect_reply(header)? {
+        ConnectReplyTail::Ipv4 => read_reply_tail::<6>(stream).await,
+        ConnectReplyTail::Ipv6 => read_reply_tail::<18>(stream).await,
+        ConnectReplyTail::Domain => read_domain_reply_tail(stream).await,
     }
 }
 
@@ -516,14 +447,8 @@ async fn read_domain_reply_tail(stream: &mut ProxyStream) -> Result<(), TorConne
     let mut encoded_length = [0_u8; 1];
     read_proxy(stream, &mut encoded_length).await?;
     let [encoded_length] = encoded_length;
-    let domain_length = usize::from(encoded_length);
-    if domain_length == 0 || domain_length > MAX_SOCKS_REPLY_DOMAIN_BYTES {
-        return Err(TorConnectError::InvalidProxyReply);
-    }
-    let tail_length = domain_length
-        .checked_add(2)
-        .ok_or(TorConnectError::InvalidProxyReply)?;
-    let mut tail = [0_u8; MAX_SOCKS_REPLY_DOMAIN_BYTES + 2];
+    let tail_length = domain_reply_tail_length(encoded_length)?;
+    let mut tail = [0_u8; MAX_DOMAIN_REPLY_TAIL_BYTES];
     let body = tail
         .get_mut(..tail_length)
         .ok_or(TorConnectError::InvalidProxyReply)?;

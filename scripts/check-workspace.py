@@ -79,6 +79,7 @@ EXPECTED_EDGES = {
         "agenc-relay-domain",
     },
     "agenc-relay-runtime": {
+        "agenc-relay-client-support",
         "agenc-relay-types",
         "agenc-relay-client-wire",
         "agenc-relay-federation-wire",
@@ -210,7 +211,7 @@ LATER_STAGE_DEPENDENCIES = {
 DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
 EXPECTED_EXTERNAL_EDGES = {
     "agenc-relay-types": {"base64", "precis-profiles", "subtle", "zeroize"},
-    "agenc-relay-client-support": {"base64"},
+    "agenc-relay-client-support": {"base64", "zeroize"},
     "agenc-relay-client-wire": {"base64", "zeroize"},
     "agenc-relay-federation-wire": {"base64", "sha2", "tls_codec", "zeroize"},
     "agenc-relay-e2ee": {"sha2"},
