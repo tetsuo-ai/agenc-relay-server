@@ -15,7 +15,7 @@ def main() -> None:
     root = Path(__file__).resolve().parent.parent
     candidate, directory, attempt, target = context(root)
     for name, argv in (
-        ("format", ["cargo", "fmt", "--all", "--check"]),
+        ("format", ["cargo", "fmt", "--check"]),
         ("source", ["python3", "scripts/check-source.py", "check"]),
         ("workspace", ["python3", "scripts/check-workspace.py", "check"]),
         ("requirements", ["python3", "scripts/requirements.py", "check"]),

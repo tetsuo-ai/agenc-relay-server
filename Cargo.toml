@@ -16,6 +16,7 @@ members = [
     "crates/agenc-relay-transport",
     "crates/agenc-relay-types",
 ]
+exclude = ["vendor/opaque-ke-4.0.1"]
 resolver = "3"
 
 [workspace.package]
@@ -54,7 +55,7 @@ hkdf = { version = "=0.13.0", default-features = false }
 hmac = { version = "=0.13.0", default-features = false, features = ["zeroize"] }
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "chacha", "x25519", "hkdfsha2"] }
 loom = { version = "=0.7.2", default-features = false }
-opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255", "argon2", "std"] }
+opaque-ke = { version = "=4.0.1", path = "vendor/opaque-ke-4.0.1", default-features = false, features = ["ristretto255", "argon2", "std"] }
 # Test-only MLS clients for the Stage 08 cross-implementation gate; no
 # production crate may depend on them (scripts/check-workspace.py).
 mls-rs = { version = "=0.56.0", default-features = false, features = ["std", "rayon", "rfc_compliant", "tree_index", "fast_serialize"] }
@@ -97,5 +98,4 @@ unimplemented = "deny"
 unwrap_used = "deny"
 
 [patch.crates-io]
-opaque-ke = { path = "vendor/opaque-ke-4.0.1" }
 redb = { path = "vendor/redb-4.2.0" }

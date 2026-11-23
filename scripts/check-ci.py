@@ -73,7 +73,7 @@ REQUIRED_STAGE_ZERO = (
     ("python3", "scripts/check-ci.py", "check"),
     ("python3", "scripts/check-ci.py", "self-test"),
     ("python3", "scripts/check-rust-components.py", "self-test"),
-    ("cargo", "fmt", "--all", "--check"),
+    ("cargo", "fmt", "--check"),
     ("cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked"),
     (
         "cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked",
