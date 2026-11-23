@@ -146,7 +146,7 @@ EXTERNAL_DEPENDENCIES = {
     "redb": ("=4.2.0", {"std"}),
     "loom": ("=0.7.2", set()),
     "rustix": ("=1.1.6", {"fs", "mm", "process", "std"}),
-    "rustls": ("=0.23.45", {"aws_lc_rs", "prefer-post-quantum", "std"}),
+    "rustls": ("=0.23.46", {"aws_lc_rs", "prefer-post-quantum", "std"}),
     "sha2": ("=0.11.0", {"zeroize"}),
     "subtle": ("=2.6.1", set()),
     "tls_codec": ("=0.5.0", {"mls", "std"}),
@@ -183,7 +183,7 @@ DIRECT_CHECKSUMS = {
     "precis-profiles": "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674",
     "redb": "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36",
     "rustix": "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa",
-    "rustls": "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634",
+    "rustls": "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf",
     "sha2": "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4",
     "subtle": "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292",
     "tls_codec": "18cc98286004cea38f717e2b03d990fc774fbfd38a82720de40e5c94365067c8",
@@ -194,8 +194,15 @@ DIRECT_CHECKSUMS = {
 # The source ledger is part of the frozen specification manifest. Preserve
 # its initial evidence when security maintenance under Architecture §24.4
 # advances a current pin. The lock and stage inventories check the new pin.
-INITIAL_SOURCE_PINS = {
-    "tokio": ("1.53.1", "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"),
+INITIAL_DEPENDENCY_PINS = {
+    "rustls": (
+        "0.23.45",
+        "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634",
+    ),
+    "tokio": (
+        "1.53.1",
+        "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed",
+    ),
 }
 EXTERNAL_PACKAGE_ALIASES = {"opaque-sha2": "sha2"}
 # Dependencies reviewed after the initial ledger; each stage records its
@@ -629,12 +636,13 @@ def validate_direct_dependency_evidence(root: Path) -> None:
         )
     }
     expected_records = {
-        name: INITIAL_SOURCE_PINS.get(name, (version.removeprefix("="), DIRECT_CHECKSUMS[name]))
+        name: (version.removeprefix("="), DIRECT_CHECKSUMS[name])
         for name, (version, _features) in EXTERNAL_DEPENDENCIES.items()
         if name not in LATER_STAGE_DEPENDENCIES
     }
+    expected_records.update(INITIAL_DEPENDENCY_PINS)
     if records != expected_records:
-        raise WorkspaceError("root dependency pins and frozen crates.io checksum evidence disagree")
+        raise WorkspaceError("frozen crates.io checksum evidence differs from the initial dependency pins")
     stage_five = load_toml(root / "conformance/stage-five-dependencies.toml")
     expected_stage_five = {
         "schema_version": 1,
@@ -687,13 +695,13 @@ def validate_direct_dependency_evidence(root: Path) -> None:
             },
             {
                 "name": "rustls",
-                "version": "0.23.45",
+                "version": "0.23.46",
                 "checksum": DIRECT_CHECKSUMS["rustls"],
                 "default_features": False,
                 "features": ["aws_lc_rs", "prefer-post-quantum", "std"],
                 "scope": "production",
                 "purpose": "TLS 1.3 only client, onion, and administrative listeners on the explicit aws-lc provider with the hybrid key-exchange order",
-                "reviewed_on": "2026-08-29",
+                "reviewed_on": "2026-11-23",
             },
             {
                 "name": "tokio",
