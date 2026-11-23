@@ -180,7 +180,7 @@ EXPECTED_DEPENDENCIES = (
     ("sha2", "sha2", "0.11.0", "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4", ["zeroize"]),
     ("subtle", "subtle", "2.6.1", "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292", []),
     ("tls_codec", "tls_codec", "0.5.0", "18cc98286004cea38f717e2b03d990fc774fbfd38a82720de40e5c94365067c8", ["std", "mls"]),
-    ("tokio", "tokio", "1.53.1", "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed", ["rt-multi-thread", "net", "io-util", "time", "signal", "sync", "macros"]),
+    ("tokio", "tokio", "1.53.3", "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e", ["rt-multi-thread", "net", "io-util", "time", "signal", "sync", "macros"]),
     ("zeroize", "zeroize", "1.9.0", "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e", ["alloc"]),
 )
 EXPECTED_DUPLICATE_GENERATIONS = {

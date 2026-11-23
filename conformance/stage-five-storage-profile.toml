@@ -32,7 +32,7 @@ retained_manifests = 1000000
 retained_manifest_bytes = 4294967296
 
 [filesystem]
-dependency = "rustix 1.1.4"
+dependency = "rustix 1.1.6"
 state_directory_mode = "0700"
 file_mode = "0600"
 guard_publish = "create-exclusive temporary, file sync, rename, directory sync, read-back"
