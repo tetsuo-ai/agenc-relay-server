@@ -72,6 +72,11 @@ decision = "accept"
 note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
 
 [[workspace]]
+name = "agenc-relay-transport"
+decision = "accept"
+note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."
+
+[[workspace]]
 name = "agenc-relay-types"
 decision = "accept"
 note = "Path package inside this repository, identified by the candidate source hash; it has no download location and declares the workspace license MIT OR Apache-2.0."

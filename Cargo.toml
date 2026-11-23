@@ -13,6 +13,7 @@ members = [
     "crates/agenc-relay-runtime",
     "crates/agenc-relay-storage",
     "crates/agenc-relay-testkit",
+    "crates/agenc-relay-transport",
     "crates/agenc-relay-types",
 ]
 resolver = "3"
@@ -37,6 +38,7 @@ agenc-relay-federation-wire = { version = "=1.0.0-rc.3", path = "crates/agenc-re
 agenc-relay-runtime = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-runtime" }
 agenc-relay-storage = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-storage" }
 agenc-relay-testkit = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-testkit" }
+agenc-relay-transport = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-transport" }
 agenc-relay-types = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-types" }
 
 # These exact profiles are frozen by Architecture section 24.4. Crate manifests

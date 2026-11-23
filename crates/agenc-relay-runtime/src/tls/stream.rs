@@ -23,6 +23,8 @@ use rustls::{NamedGroup, ServerConfig, ServerConnection};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+pub use agenc_relay_transport::CLOSE_NOTIFY_GRACE;
+
 use super::config::TLS_PLAINTEXT_BUFFER_LIMIT_BYTES;
 use crate::RuntimeError;
 use crate::sync::Arc;
@@ -33,8 +35,6 @@ pub const ACCEPT_TO_TLS_DEADLINE: Duration = Duration::from_secs(10);
 pub const TLS_TO_REGISTRATION_DEADLINE: Duration = Duration::from_secs(30);
 /// Graceful write stall before the writer closes (spec line 522).
 pub const WRITE_STALL_BUDGET: Duration = Duration::from_secs(30);
-/// TLS close-notify grace at shutdown (spec line 523).
-pub const CLOSE_NOTIFY_GRACE: Duration = Duration::from_secs(1);
 /// Default TLS handshakes in progress (spec line 524).
 pub const DEFAULT_HANDSHAKES_IN_PROGRESS: usize = 1_024;
 /// Hard maximum TLS handshakes in progress (spec line 524).
@@ -72,6 +72,19 @@ impl fmt::Display for TlsHandshakeError {
 }
 
 impl Error for TlsHandshakeError {}
+
+impl From<agenc_relay_transport::TlsHandshakeError> for TlsHandshakeError {
+    fn from(error: agenc_relay_transport::TlsHandshakeError) -> Self {
+        use agenc_relay_transport::TlsHandshakeError as ClientError;
+        match error {
+            ClientError::Io => Self::Io,
+            ClientError::Protocol => Self::Protocol,
+            ClientError::PeerClosed => Self::PeerClosed,
+            ClientError::AlpnMissing => Self::AlpnMissing,
+            ClientError::AlpnMismatch => Self::AlpnMismatch,
+        }
+    }
+}
 
 /// The global handshake semaphore (spec lines 524-526).
 ///

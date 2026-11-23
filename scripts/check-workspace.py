@@ -33,6 +33,7 @@ CRATE_NAMES = {
     "agenc-relay-runtime",
     "agenc-relay-storage",
     "agenc-relay-testkit",
+    "agenc-relay-transport",
     "agenc-relay-types",
 }
 EXPECTED_FEATURES = {'agenc-relay-server': {'default': [],
@@ -78,7 +79,9 @@ EXPECTED_EDGES = {
         "agenc-relay-crypto",
         "agenc-relay-domain",
     },
+    "agenc-relay-transport": set(),
     "agenc-relay-runtime": {
+        "agenc-relay-transport",
         "agenc-relay-client-support",
         "agenc-relay-types",
         "agenc-relay-client-wire",
@@ -210,6 +213,7 @@ LATER_STAGE_DEPENDENCIES = {
 }
 DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
 EXPECTED_EXTERNAL_EDGES = {
+    "agenc-relay-transport": {"rustls", "subtle", "tokio"},
     "agenc-relay-types": {"base64", "precis-profiles", "subtle", "zeroize"},
     "agenc-relay-client-support": {"base64", "zeroize"},
     "agenc-relay-client-wire": {"base64", "zeroize"},
