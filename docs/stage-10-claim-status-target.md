@@ -97,6 +97,49 @@ of the first claim. The SDK rehearsal's patch 0004, which made empty
 results durable, is not adopted; the retention of claim records is the
 owner's decision.
 
+## SC-002 follow-up: retire expired successful claims
+
+The coordinator's existing request-maintenance worker now examines a bounded
+page of claim mappings and retires at most one successful `claim/v1/` mapping
+per pass. It uses the worker's trusted clock and stages the mapping delete
+with its object-owner update. It publishes both only after the exact storage
+receipt. The existing object collector continues to own physical deletion.
+
+A fresh successful claim now persists the directory's complete retention
+deadline, including the claimed package's lifetime. Older rows recorded only
+the claim timeout. A legacy mapping also waits for the retained KeyPackage's
+signed lifetime to end. If the package or its lifetime cannot be recovered,
+the worker keeps the mapping.
+
+This change adds no persistent format, wire production, or quota. It does
+not persist `EMPTY PACKAGE` outcomes. The edge's session command rate limit
+does not bound retained negative rows, and the object ledger's byte quota
+does not account for a negative mapping with no package body. Durable EMPTY
+replay still needs a durable admission bound.
+
+### Focused verification
+
+The coordinator tests publish and claim a signed package through the existing
+handler fixture. They check identical replay from the reloaded live mapping,
+preservation one second before the deadline, the joint mapping and ownership
+write at expiry, and the absence of the mapping after applying those writes
+and restarting. The legacy case keeps a row whose signed package remains
+live past the recorded timeout.
+
+```sh
+cargo test --locked --offline -p agenc-relay-runtime --lib e2ee::coordinator::tests::claims
+cargo test --locked --offline -p agenc-relay-runtime --lib federation::coordinator::tests::startup_payloads::request_expiry
+cargo test --locked --offline -p agenc-relay-domain --lib e2ee::directory::tests
+```
+
+All three groups passed on Linux with Rust 1.98.0, with 3, 12, and 8 tests
+respectively.
+
+The separate Stage 09 fuzz audit on baseline `ba3a59e8` failed on
+RUSTSEC-2026-0385, RUSTSEC-2026-0386, RUSTSEC-2026-0387, and RUSTSEC-2026-0486.
+The retirement branch ran focused functional checks and does not carry a new
+Stage 09 qualification result.
+
 ## Limitations
 
 - The daemon evidence restarts the coordinator only, with the client

@@ -692,9 +692,9 @@ pub fn claim_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
                 outcome: agenc_relay_storage::e2ee_records::ClaimOutcome::Claimed,
                 key_package_ref: key_package_ref.clone(),
                 object_id: Some(*object_id),
-                retain_until: exec.now.saturating_add(
-                    agenc_relay_domain::e2ee::limits::KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS,
-                ),
+                retain_until: directory
+                    .claim_retained_until(&claimant, &operation_id)
+                    .ok_or_else(|| Fail::from(E2eeReplyCode::InvalidFragment))?,
             }
             .encode()
             .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,

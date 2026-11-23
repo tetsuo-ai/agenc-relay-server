@@ -6,6 +6,11 @@
 //! claimant asks and after the coordinator restarts.
 
 use super::*;
+use crate::e2ee::coordinator::request_expiry::Prepared;
+use crate::state_core::durable::AccountServiceDurableWrite as Write;
+use agenc_relay_domain::e2ee::limits::KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS;
+use agenc_relay_storage::TableId;
+use agenc_relay_storage::e2ee_records::PackageRow;
 
 /// A second device of the harness principal, the one that claims.
 const SIBLING: u8 = DEVICE + 1;
@@ -90,5 +95,103 @@ fn claim_status_names_the_claim_target_from_another_device_and_after_a_restart()
     let unknown = ok(reloaded.run(Op::ClaimStatus, &[99; 16], None)?)?;
     assert_eq!(unknown.result, ResultBody::Empty(EmptyKind::Package));
     assert!(unknown.responses.is_empty());
+    Ok(())
+}
+
+#[test]
+fn request_maintenance_retires_an_expired_mapping_and_its_owner_together() -> TestResult {
+    let mut harness = Harness::with_devices(&[DEVICE, SIBLING])?;
+    let package = stocked_then_sibling(&mut harness)?;
+    let claim = ok(harness.run(
+        Op::ClaimPackage,
+        &claim_params(&harness, 1, OPERATION),
+        None,
+    )?)?;
+    let claimant = account_id_digest(&NETWORK, &harness.account)?;
+    let key = PackageRow::claim_key(&claimant, &OPERATION)?;
+    let object = object_id(&package);
+    let deadline = harness.now + KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS;
+    let mut reloaded = harness.reloaded()?;
+    let status = ok(reloaded.run(Op::ClaimStatus, &OPERATION, None)?)?;
+    assert_same_answer(&status, &claim, "reloaded live claim");
+    let capture = |harness: &Harness, now| {
+        Prepared::capture(
+            &harness.coordinator,
+            Default::default(),
+            now,
+            &harness.backing,
+        )
+    };
+    assert!(capture(&reloaded, deadline - 1)?.is_empty());
+    let expired = capture(&reloaded, deadline)?;
+    let mut writes = expired.writes(STATE_GENERATION)?;
+    assert!(matches!(
+        writes.as_slice(),
+        [Write::Delete { table: TableId::E2eeState, key: removed }] if *removed == key
+    ));
+    let staged = reloaded
+        .coordinator
+        .stage_owners(&mut writes, deadline, false, STATE_GENERATION)
+        .map_err(|failure| format!("owner retirement: {failure:?}"))?;
+    assert_eq!(writes.len(), 2, "the owner change shares the delete batch");
+    let status = ok(reloaded.run(Op::ClaimStatus, &OPERATION, None)?)?;
+    assert_same_answer(&status, &claim, "pre-commit claims still replay");
+    expired.apply(&mut reloaded.coordinator)?;
+    staged.apply(&mut reloaded.coordinator.state);
+    for write in &writes {
+        reloaded.apply_logical_write(write)?;
+    }
+    let owner = reloaded
+        .coordinator
+        .state
+        .owners
+        .account(&object)
+        .ok_or("owner")?;
+    assert!(owner.owners.is_empty());
+    assert_eq!(owner.retired_at, Some(deadline));
+    assert!(reloaded.coordinator.state.objects.contains_key(&object));
+
+    let mut restarted = reloaded.reloaded()?;
+    let status = ok(restarted.run(Op::ClaimStatus, &OPERATION, None)?)?;
+    assert_eq!(status.result, ResultBody::Empty(EmptyKind::Package));
+    assert!(status.responses.is_empty());
+    let owner = restarted
+        .coordinator
+        .state
+        .owners
+        .account(&object)
+        .ok_or("reloaded owner")?;
+    assert!(owner.owners.is_empty());
+    assert_eq!(owner.retired_at, Some(deadline));
+    Ok(())
+}
+
+#[test]
+fn claim_retirement_honors_the_signed_lifetime_of_an_old_row() -> TestResult {
+    let mut harness = Harness::with_devices(&[DEVICE, SIBLING])?;
+    stocked_then_sibling(&mut harness)?;
+    let _ = ok(harness.run(
+        Op::ClaimPackage,
+        &claim_params(&harness, 1, OPERATION),
+        None,
+    )?)?;
+    let claimant = account_id_digest(&NETWORK, &harness.account)?;
+    let directory = &mut harness.coordinator.state.directory;
+    let (parameters, outcome) = directory
+        .stored_claim(&claimant, &OPERATION)
+        .ok_or("claim")?;
+    // Model an older row whose recorded timeout preceded the signed end.
+    let early = LEAF_INTERVAL.1 - 1;
+    directory.restore_claim(claimant, OPERATION, parameters, outcome.clone(), early);
+    let capture = |now| {
+        Prepared::capture(
+            &harness.coordinator,
+            Default::default(),
+            now,
+            &harness.backing,
+        )
+    };
+    assert!(capture(early)?.is_empty());
+    assert!(!capture(LEAF_INTERVAL.1)?.is_empty());
     Ok(())
 }

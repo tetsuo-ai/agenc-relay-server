@@ -1,4 +1,4 @@
-//! Completed replay rows retire only behind an independent durable origin sequence floor.
+//! Trusted maintenance for completed request replays and claimed-package mappings.
 #![forbid(unsafe_code)]
 
 use super::{
@@ -13,12 +13,18 @@ use agenc_relay_storage::e2ee_records::origin::OriginSequenceRow;
 use agenc_relay_storage::e2ee_records::{ReplayKey, ReplayRow};
 use std::ops::Bound::{Excluded, Unbounded};
 
+mod claims;
+use claims::{Claim, ClaimKey};
+
 pub(crate) const MAX_EXPIRY_ENTRIES: usize = 128;
 const MAX_RESULT_BYTES: usize = 8192;
 const MAX_RESPONSES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Cursor(Option<ReplayKey>);
+pub(crate) struct Cursor {
+    replay: Option<ReplayKey>,
+    claim: Option<ClaimKey>,
+}
 
 struct Change {
     key: ReplayKey,
@@ -28,6 +34,7 @@ struct Change {
 
 pub(crate) struct Prepared {
     changes: Vec<Change>,
+    claim: Option<Claim>,
     next: Cursor,
     _backing: MemoryPermit,
 }
@@ -44,10 +51,11 @@ impl Prepared {
             .map_err(|_| CompanionFault::Ceiling)?;
         let mut prepared = Self {
             changes: Vec::with_capacity(MAX_EXPIRY_ENTRIES),
+            claim: None,
             next: cursor,
             _backing: metadata,
         };
-        let start = cursor.0.map_or(Unbounded, Excluded);
+        let start = cursor.replay.map_or(Unbounded, Excluded);
         let mut scanned = 0;
         for (key, row) in executor
             .state
@@ -56,7 +64,7 @@ impl Prepared {
             .take(MAX_EXPIRY_ENTRIES)
         {
             scanned += 1;
-            prepared.next = Cursor(Some(*key));
+            prepared.next.replay = Some(*key);
             if row.result_object_id.is_none() || row.retain_until == 0 || row.retain_until > now {
                 continue;
             }
@@ -79,13 +87,19 @@ impl Prepared {
             });
         }
         if scanned < MAX_EXPIRY_ENTRIES {
-            prepared.next = Cursor::default();
+            prepared.next.replay = None;
         }
+        prepared.claim = Claim::capture(&executor.state, &mut prepared.next.claim, now, backing)?;
         Ok(prepared)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.changes.is_empty() && self.claim.is_none()
+    }
+
+    /// Backing for the claim owner's updated record and staging copies.
+    pub(crate) fn claim_output_backing(&self) -> usize {
+        self.claim.as_ref().map_or(0, Claim::output_backing)
     }
     pub(crate) fn next_cursor(&self) -> Cursor {
         self.next
@@ -95,10 +109,15 @@ impl Prepared {
     }
 
     pub(crate) fn writes(&self, _revision: u64) -> Result<Vec<Write>, crate::RuntimeError> {
-        self.changes
+        let mut writes = self
+            .changes
             .iter()
             .map(|change| Write::delete(TableId::E2eeState, ReplayRow::key(&change.key)?))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(claim) = &self.claim {
+            writes.push(claim.write()?);
+        }
+        Ok(writes)
     }
 
     pub(crate) fn apply(&self, executor: &mut CompanionCoordinator) -> Result<(), CompanionFault> {
@@ -106,6 +125,10 @@ impl Prepared {
             .changes
             .iter()
             .all(|change| change.matches(&executor.state))
+            || self
+                .claim
+                .as_ref()
+                .is_some_and(|claim| !claim.matches(&executor.state))
         {
             return Err(CompanionFault::Storage);
         }
@@ -124,6 +147,9 @@ impl Prepared {
             if let Some(id) = change.row.result_object_id {
                 retire_result(&mut executor.state, &id);
             }
+        }
+        if let Some(claim) = &self.claim {
+            claim.remove(&mut executor.state);
         }
         Ok(())
     }

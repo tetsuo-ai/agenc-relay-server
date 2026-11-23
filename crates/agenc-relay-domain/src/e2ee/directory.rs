@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::Bound::{Excluded, Unbounded};
 
 use super::limits::{
     ATTACH_CHALLENGE_TIMEOUT_SECONDS, KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS,
@@ -637,6 +638,32 @@ impl Directory {
         self.claims
             .get(&(*claimant_digest, *operation_id))
             .map(|record| (record.parameters, &record.outcome))
+    }
+
+    /// The deadline of the claim mapping. A caller persisting the result
+    /// writes this value, including any longer published package lifetime.
+    #[must_use]
+    pub fn claim_retained_until(&self, claimant: &Id, operation: &Id16) -> Option<u64> {
+        self.claims
+            .get(&(*claimant, *operation))
+            .map(|record| record.retain_until)
+    }
+
+    /// Visits claim mappings after a maintenance cursor, in key order. The
+    /// caller limits how many entries it examines in one pass.
+    pub fn claims_after(
+        &self,
+        after: Option<(Id, Id16)>,
+    ) -> impl Iterator<Item = ((Id, Id16), u64, &ClaimOutcome)> {
+        let start = after.map_or(Unbounded, Excluded);
+        self.claims
+            .range((start, Unbounded))
+            .map(|(key, record)| (*key, record.retain_until, &record.outcome))
+    }
+
+    /// Removes a claim after its durable deletion has committed.
+    pub fn forget_claim(&mut self, claimant: &Id, operation: &Id16) {
+        self.claims.remove(&(*claimant, *operation));
     }
 
     /// Published packages of one device.
