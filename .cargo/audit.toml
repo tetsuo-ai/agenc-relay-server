@@ -17,4 +17,21 @@
 # nothing, and `cargo deny check`, which scans the resolved all-features
 # graph, passes). The fixed 0.0.10 needs hpke-rs 0.8, which openmls_rust_crypto
 # 0.6.0 does not accept. Remove these entries when that dependency moves.
-ignore = ["RUSTSEC-2026-0173", "RUSTSEC-2026-0330", "RUSTSEC-2026-0331"]
+#
+# RUSTSEC-2026-0387: crypto-bigint 0.5.5 has timing variability in
+# operations meant to be constant-time, fixed only from 0.7.6, with no patch
+# release in the 0.5 series. Its one dependent is elliptic-curve 0.13.8,
+# whose only production dependents are the reviewed opaque-ke 4.0.1 and its
+# voprf 0.5.0, both built for ristretto255 alone, whose arithmetic is
+# curve25519-dalek's. They take from elliptic-curve only the hash expansion
+# of hash2curve, which uses no big integer, so the daemon links none of
+# crypto-bigint's code (`nm -C target/debug/arcd | grep -c crypto_bigint`
+# prints 0, and the only elliptic_curve symbols are of
+# hash2curve::hash2field::expand_msg and error). The Stage 08 test clients
+# reach it through p256, p384 and k256 and are never shipped. No stable
+# opaque-ke release uses elliptic-curve 0.14 (5.0.0-pre.0 is the newest), and
+# openmls_rust_crypto 0.6.0 and mls-rs-crypto-rustcrypto 0.22.1 hold the 0.13
+# series of those curves. Remove this entry when they move; deny.toml and
+# fuzz/deny.toml carry the same exception for `cargo deny`, which scans the
+# resolved graph.
+ignore = ["RUSTSEC-2026-0173", "RUSTSEC-2026-0330", "RUSTSEC-2026-0331", "RUSTSEC-2026-0387"]
