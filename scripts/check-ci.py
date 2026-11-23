@@ -179,7 +179,7 @@ REQUIRED_STAGE_SIX = (
     ("python3", "scripts/requirements.py", "check-stage-six"),
     ("python3", "scripts/check-stage-six.py", "check"),
     ("python3", "scripts/check-stage-six.py", "self-test"),
-    ("cargo", "nextest", "run", "-p", "agenc-relay-config", "--all-features", "--locked"),
+    ("cargo", "nextest", "run", "-p", "agenc-relay-client-support", "-p", "agenc-relay-config", "--all-features", "--locked"),
     ("cargo", "nextest", "run", "-p", "agenc-relay-admin", "--all-features", "--locked"),
     ("cargo", "nextest", "run", "-p", "agenc-relay-runtime", "--all-features", "--locked"),
     (

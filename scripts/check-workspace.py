@@ -23,6 +23,7 @@ CRATE_NAMES = {
     "agenc-relay-server",
     "agenc-relay-admin",
     "agenc-relay-auth",
+    "agenc-relay-client-support",
     "agenc-relay-client-wire",
     "agenc-relay-config",
     "agenc-relay-crypto",
@@ -70,7 +71,8 @@ EXPECTED_EDGES = {
         "agenc-relay-domain",
         "agenc-relay-e2ee",
     },
-    "agenc-relay-config": {"agenc-relay-types"},
+    "agenc-relay-client-support": {"agenc-relay-federation-wire", "agenc-relay-types"},
+    "agenc-relay-config": {"agenc-relay-client-support", "agenc-relay-types"},
     "agenc-relay-admin": {
         "agenc-relay-types",
         "agenc-relay-crypto",
@@ -208,6 +210,7 @@ LATER_STAGE_DEPENDENCIES = {
 DEPENDENCY_TABLE_NAMES = {"dependencies", "dev-dependencies", "build-dependencies"}
 EXPECTED_EXTERNAL_EDGES = {
     "agenc-relay-types": {"base64", "precis-profiles", "subtle", "zeroize"},
+    "agenc-relay-client-support": {"base64"},
     "agenc-relay-client-wire": {"base64", "zeroize"},
     "agenc-relay-federation-wire": {"base64", "sha2", "tls_codec", "zeroize"},
     "agenc-relay-e2ee": {"sha2"},
@@ -406,8 +409,8 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
 
     members = workspace.get("members")
     expected_members = {f"crates/{name}" for name in CRATE_NAMES}
-    if not isinstance(members, list) or set(members) != expected_members or len(members) != 13:
-        raise WorkspaceError("workspace members do not name the exact 13-crate graph")
+    if not isinstance(members, list) or set(members) != expected_members or len(members) != len(CRATE_NAMES):
+        raise WorkspaceError("workspace members differ from the reviewed crate graph")
 
     dependencies = workspace.get("dependencies")
     if not isinstance(dependencies, dict):
