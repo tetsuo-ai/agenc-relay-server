@@ -59,6 +59,7 @@ impl RouteTable {
             incarnation: old.incarnation,
             binding_id: summary.binding_id,
             binding_generation: summary.binding_generation,
+            state_generation: 0,
             lifecycle: RouteLifecycle::Active,
             recovery: RecoveryState::Normal,
         };
@@ -100,7 +101,7 @@ impl RouteTable {
         {
             return Err(RouteConflict::NotSuccessor);
         }
-        self.take_indexes(&new);
+        self.take_indexes(&new, Indexes::ALL);
         Ok(())
     }
 }

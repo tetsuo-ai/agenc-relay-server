@@ -1279,7 +1279,10 @@ fn route_entry(state: &ArcFederationRouteState) -> Result<(RouteEntry, Conversat
     };
     Ok((
         // An edge projects routes and binds none, so its copy keys each
-        // projected lock as its own lineage.
+        // projected lock as its own lineage. The route state names no
+        // incarnation or binding generation; its state generation orders the
+        // projections of one pair, since a pair's next incarnation binds
+        // only after the close of the one before it (companion 9.4 and 12.5).
         RouteEntry {
             conversation_id: ConversationId(state.conversation_id),
             target,
@@ -1288,6 +1291,7 @@ fn route_entry(state: &ArcFederationRouteState) -> Result<(RouteEntry, Conversat
             incarnation: 0,
             binding_id: state.binding_id,
             binding_generation: 0,
+            state_generation: state.state_generation,
             lifecycle,
             recovery: RecoveryState::Normal,
         },

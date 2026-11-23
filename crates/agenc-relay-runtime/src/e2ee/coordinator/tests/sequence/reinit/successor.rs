@@ -16,6 +16,7 @@ mod recreated;
 mod retention;
 mod row_mismatch;
 mod target_mismatch;
+mod unanchored;
 
 use super::*;
 use crate::e2ee::coordinator::ConversationState;
