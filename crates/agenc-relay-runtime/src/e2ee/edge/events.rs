@@ -190,7 +190,23 @@ impl E2eeEdge {
         data: bool,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         let kind = if data {
-            ArcWireObjectKind::ApplicationMls
+            let open = self
+                .events_in
+                .get(&position.event_id)
+                .ok_or(E2eeReplyCode::InvalidFragment)?;
+            if open.position != position || open.payload_object_id != Some(object_id) {
+                self.events_in.remove(&position.event_id);
+                return Err(E2eeReplyCode::InvalidFragment.into());
+            }
+            match open.event.event_kind {
+                ArcFederationEventKind::ChannelApplication
+                | ArcFederationEventKind::DirectApplication => ArcWireObjectKind::ApplicationMls,
+                ArcFederationEventKind::CandidateEvent => ArcWireObjectKind::CommitMls,
+                ArcFederationEventKind::CommitAckEvent => ArcWireObjectKind::CommitAck,
+                ArcFederationEventKind::ReinitAckEvent => ArcWireObjectKind::ReinitAck,
+                ArcFederationEventKind::RouteStateChanged => ArcWireObjectKind::FederationState,
+                _ => return Err(E2eeReplyCode::InvalidFragment.into()),
+            }
         } else {
             ArcWireObjectKind::FederationEvent
         };
@@ -236,7 +252,7 @@ impl E2eeEdge {
         kind: ArcWireObjectKind,
         fragment: &FragmentTag,
         context: &StateCoreContext,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
+    ) -> Result<Option<crate::e2ee::spool::CompanionBytes>, Refusal> {
         let command = CarrierCommand::Federation(kind);
         let mut route = [0; 32];
         if let Some(head) = route.get_mut(..16) {
@@ -258,10 +274,15 @@ impl E2eeEdge {
             ..QuotaScopes::default()
         };
         let now = context.now().get() / 1_000;
-        match self
-            .assembler
-            .ingest(key, scopes, command.limit(), fragment, now)
-        {
+        match crate::e2ee::spool::ingest_control(
+            &mut self.assembler,
+            self.spool.as_ref(),
+            self.ingress_link.clone(),
+            key,
+            scopes,
+            fragment,
+            now,
+        ) {
             Ok(Ingest::Complete(bytes)) => Ok(Some(bytes)),
             Ok(Ingest::Incomplete | Ingest::Duplicate | Ingest::Recent) => Ok(None),
             Err(error) => Err(error.reply_code().into()),
@@ -275,7 +296,7 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         open: OpenEvent,
-        payload: Option<Vec<u8>>,
+        payload: Option<crate::e2ee::spool::CompanionBytes>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         let event = &open.event;
         let header_ok = event.network_id == self.config.network_id
@@ -300,7 +321,7 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         open: OpenEvent,
-        payload: Option<Vec<u8>>,
+        payload: Option<crate::e2ee::spool::CompanionBytes>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         self.adopt_barrier_cursor(edge);
         if self.delivery.generation != open.position.delivery_generation {
@@ -313,10 +334,8 @@ impl E2eeEdge {
             return Err(E2eeReplyCode::Syncing.into());
         }
         if self.holds_events(context) || !self.queued.is_empty() {
-            self.queued.push_back((
-                CompanionFrame::Ack(open.position),
-                payload.unwrap_or_default(),
-            ));
+            self.queued
+                .push_back((CompanionFrame::Ack(open.position), payload));
             let _ = self.events_in.insert(open.position.event_id, open);
             return Ok(Vec::new());
         }
@@ -429,7 +448,7 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         open: OpenEvent,
-        payload: Option<Vec<u8>>,
+        payload: Option<crate::e2ee::spool::CompanionBytes>,
         mutation_id: [u8; 16],
     ) -> Result<Vec<ClientOutput>, Refusal> {
         let event_bytes = ArcWireObject::new(
@@ -469,7 +488,7 @@ impl E2eeEdge {
         };
         edge.note_companion_delivery(self.delivery.generation, self.delivery.cursor);
         let part_index = part.part_index;
-        if !edge.companion_barrier_part(context, part, payload.clone()) {
+        if !edge.companion_barrier_part_ref(context, part, payload.as_deref()) {
             return Err(E2eeReplyCode::Syncing.into());
         }
         self.barrier_parts
@@ -671,7 +690,7 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         open: OpenEvent,
-        payload: Option<Vec<u8>>,
+        payload: Option<crate::e2ee::spool::CompanionBytes>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         self.begin_projection(None)?;
         let result = self.apply_event_projection(context, edge, open, payload);
@@ -686,7 +705,7 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         open: OpenEvent,
-        payload: Option<Vec<u8>>,
+        payload: Option<crate::e2ee::spool::CompanionBytes>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         let event = &open.event;
         let conversation = optional::<32>(event.conversation_id.as_slice());
@@ -1187,7 +1206,6 @@ impl E2eeEdge {
             let Some(open) = self.events_in.remove(&position.event_id) else {
                 continue;
             };
-            let payload = (!payload.is_empty()).then_some(payload);
             match self.apply_event(context, edge, open, payload) {
                 Ok(more) => outputs.extend(more),
                 Err(_) => {

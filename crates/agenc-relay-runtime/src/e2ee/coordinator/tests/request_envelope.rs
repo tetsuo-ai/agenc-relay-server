@@ -35,7 +35,7 @@ fn complete_with(harness: &Harness, edit: RequestEdit) -> TestResult<CompleteReq
     edit(&mut request, &mut correlation);
     Ok(CompleteRequest {
         correlation,
-        request: wire(ArcWireObjectKind::FederationRequest, &request)?,
+        request: wire(ArcWireObjectKind::FederationRequest, &request)?.into(),
         payload: None,
         refusal: None,
     })

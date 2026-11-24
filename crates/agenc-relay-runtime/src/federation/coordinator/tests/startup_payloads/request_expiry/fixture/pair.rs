@@ -48,7 +48,7 @@ pub(super) fn create(
             operation_sequence: request.operation_sequence,
             request_id: request.request_id,
         },
-        request: request_bytes,
+        request: request_bytes.into(),
         payload: None,
         refusal: None,
     };

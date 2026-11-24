@@ -143,7 +143,7 @@ impl E2eeEdge {
         self.barrier_parts
             .entry(part.identity.mutation_id)
             .or_default()
-            .insert(part.part_index, (open, payload));
+            .insert(part.part_index, (open, payload.map(Into::into)));
         Ok(())
     }
 }

@@ -574,8 +574,10 @@ async fn a_barrier_completion_reaches_its_requesting_connection_only_as_its_labe
                 let early = deliver_result(&mut edge, &mut fixture, case)?;
                 assert!(early.is_empty(), "{:?}: no completion yet", case.event);
             }
-            edge.barrier_parts
-                .insert(MUTATION, BTreeMap::from([(1, (open, ack.clone()))]));
+            edge.barrier_parts.insert(
+                MUTATION,
+                BTreeMap::from([(1, (open, ack.clone().map(Into::into)))]),
+            );
             let (_, mut outputs) = edge
                 .prepare_barrier(fixture.context_mut()?, &base_edge(), MUTATION)
                 .map_err(|code| code.to_string())?;

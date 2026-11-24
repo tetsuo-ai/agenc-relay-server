@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use agenc_relay_crypto::OsEntropy;
 use rustix::fs::{
@@ -110,6 +111,7 @@ pub struct FilesystemCapacity {
 pub struct StateDirectory {
     directory: File,
     writer_lock: File,
+    spool_allocations: Arc<Mutex<()>>,
     construction_sibling: PathBuf,
     tuple: FilesystemTuple,
     faults: StorageFaultInjector,
@@ -120,6 +122,7 @@ pub struct StateDirectory {
 #[derive(Debug)]
 pub struct CompanionSpoolDirectory {
     directory: File,
+    allocations: Arc<Mutex<()>>,
     reserve_bytes: u64,
     reserve_percent: u8,
 }
@@ -128,6 +131,13 @@ impl CompanionSpoolDirectory {
     /// Allocates an unnamed file on the original qualified directory. The
     /// kernel closes and unlinks it on cancellation or process death.
     pub fn allocate(&self, length: u64) -> Result<File, StorageError> {
+        // All allocators delegated by this writer share the capacity sample and
+        // fallocate cut. The next sample must see the preceding extent.
+        let _allocation = self
+            .allocations
+            .lock()
+            .map_err(|_| StorageError::Unavailable)?;
+        let charged_length = length.checked_add(4095).ok_or(StorageError::Overflow)? / 4096 * 4096;
         let fd = openat(
             &self.directory,
             ".",
@@ -140,15 +150,17 @@ impl CompanionSpoolDirectory {
         let required = capacity
             .reserve_bytes
             .checked_add(MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH)
-            .and_then(|v| v.checked_add(length))
+            .and_then(|v| v.checked_add(charged_length))
             .ok_or(StorageError::Overflow)?;
         if capacity.available_bytes < required {
             return Err(StorageError::FilesystemRejected(
                 FilesystemCause::InsufficientCapacity,
             ));
         }
-        rustix::fs::fallocate(&fd, rustix::fs::FallocateFlags::empty(), 0, length)
-            .map_err(rustix_rejected)?;
+        if length != 0 {
+            rustix::fs::fallocate(&fd, rustix::fs::FallocateFlags::empty(), 0, length)
+                .map_err(rustix_rejected)?;
+        }
         Ok(File::from(fd))
     }
 }
@@ -489,6 +501,7 @@ impl StateDirectory {
         }
         Ok(CompanionSpoolDirectory {
             directory: self.directory.try_clone().map_err(io_rejected)?,
+            allocations: Arc::clone(&self.spool_allocations),
             reserve_bytes,
             reserve_percent,
         })
@@ -558,6 +571,7 @@ impl StateDirectory {
         Ok(Self {
             directory: File::from(directory_fd),
             writer_lock,
+            spool_allocations: Arc::default(),
             construction_sibling,
             tuple,
             faults,

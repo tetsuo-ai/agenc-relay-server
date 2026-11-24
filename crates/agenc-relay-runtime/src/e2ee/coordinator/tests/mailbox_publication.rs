@@ -89,7 +89,8 @@ fn other_request(source: &mut Harness) -> TestResult<crate::e2ee::coordinator::C
     complete.request = crate::e2ee::coordinator::tests::wire(
         agenc_relay_e2ee::object::ArcWireObjectKind::FederationRequest,
         &request,
-    )?;
+    )?
+    .into();
     Ok(complete)
 }
 

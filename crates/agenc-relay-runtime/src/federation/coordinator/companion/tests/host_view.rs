@@ -482,7 +482,7 @@ fn request() -> CompleteRequest {
             operation_sequence: 0,
             request_id: [61; 16],
         },
-        request: vec![1],
+        request: vec![1].into(),
         payload: None,
         refusal: None,
     }

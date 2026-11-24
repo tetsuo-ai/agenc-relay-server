@@ -331,7 +331,7 @@ impl Harness {
                 operation_sequence: self.sequence,
                 request_id,
             },
-            request: wire(ArcWireObjectKind::FederationRequest, &request)?,
+            request: wire(ArcWireObjectKind::FederationRequest, &request)?.into(),
             payload: payload.map(|bytes| bytes.to_vec().into()),
             refusal: None,
         })

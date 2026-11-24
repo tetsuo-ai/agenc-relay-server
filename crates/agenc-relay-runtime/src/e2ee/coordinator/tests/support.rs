@@ -1029,13 +1029,7 @@ impl crate::e2ee::coordinator::CompanionCoordinator {
         let fragments = agenc_relay_e2ee::wire::fragment::fragment_object(bytes)
             .map_err(|_| CompanionFault::Protocol)?;
         for fragment in fragments {
-            let _progress = self.ingest(
-                key.clone(),
-                peer,
-                agenc_relay_e2ee::wire::carrier::CarrierCommand::DeliverWelcome,
-                &fragment,
-                now_millis,
-            )?;
+            let _progress = self.ingest(key.clone(), peer, &fragment, now_millis)?;
         }
         Ok(())
     }

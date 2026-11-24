@@ -40,6 +40,14 @@ impl From<Vec<u8>> for CompanionBytes {
     }
 }
 
+impl PartialEq for CompanionBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for CompanionBytes {}
+
 impl AsRef<[u8]> for CompanionBytes {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref().as_ref()
@@ -120,6 +128,49 @@ pub(crate) struct Admission {
     pub(crate) carrier: CarrierCommand,
     pub(crate) scopes: QuotaScopes,
     pub(crate) authenticated_spool: bool,
+}
+
+/// Small descriptors, events and synchronization records share the same
+/// process and peer ingress budget as large controls on this physical link.
+pub(crate) fn ingest_control(
+    assembler: &mut E2eeAssembler,
+    resources: Option<&SpoolResources>,
+    link: Option<Arc<Semaphore>>,
+    key: AssemblyKey,
+    scopes: QuotaScopes,
+    tag: &FragmentTag,
+    now: u64,
+) -> Result<Ingest<CompanionBytes>, AssemblyError> {
+    let carrier = key.command;
+    let result = if let Some(resources) = resources {
+        resources.ingest(
+            assembler,
+            Admission {
+                key,
+                scopes,
+                carrier,
+                authenticated_spool: false,
+            },
+            tag,
+            now,
+            link,
+        )
+    } else {
+        assembler.ingest_backed(
+            key,
+            scopes,
+            carrier.limit(),
+            tag,
+            now,
+            AssemblyBacking::Memory(&|_| Ok(Box::new(()))),
+        )
+    }?;
+    Ok(match result {
+        Ingest::Complete(bytes) => Ingest::Complete(bytes.into()),
+        Ingest::Incomplete => Ingest::Incomplete,
+        Ingest::Duplicate => Ingest::Duplicate,
+        Ingest::Recent => Ingest::Recent,
+    })
 }
 
 impl SpoolResources {

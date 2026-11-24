@@ -229,7 +229,7 @@ type AppliedPosition = (u64, u64, [u8; 16]);
 
 /// The companion parts of one open barrier by part index, each with its
 /// payload when the event named one.
-type BarrierParts = BTreeMap<u16, (events::OpenEvent, Option<Vec<u8>>)>;
+type BarrierParts = BTreeMap<u16, (events::OpenEvent, Option<super::spool::CompanionBytes>)>;
 
 /// The edge E2EE router.
 pub struct E2eeEdge {
@@ -275,7 +275,7 @@ pub struct E2eeEdge {
     witness_recovery: witness_recovery::WitnessRecovery,
     witness_resolution: Option<witness_resolution::OpenResolution>,
     witness_request_wake: Option<crate::state_core::timers::TimerEntry>,
-    queued: VecDeque<(CompanionFrame, Vec<u8>)>,
+    queued: VecDeque<(CompanionFrame, Option<super::spool::CompanionBytes>)>,
     events_in: BTreeMap<[u8; 16], events::OpenEvent>,
     /// The delivery generation, sequence and Event ID of the event this
     /// edge applied last, with its object identifier: an exact duplicate at

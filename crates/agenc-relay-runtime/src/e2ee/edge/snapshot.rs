@@ -381,10 +381,15 @@ impl E2eeEdge {
         // A route state object is far below one fragment, so an object is
         // complete with its first fragment; the assembler still owns any
         // multi-fragment carrier.
-        match self
-            .assembler
-            .ingest(key, scopes, command.limit(), &fragment, now / 1_000)
-        {
+        match crate::e2ee::spool::ingest_control(
+            &mut self.assembler,
+            self.spool.as_ref(),
+            self.ingress_link.clone(),
+            key,
+            scopes,
+            &fragment,
+            now / 1_000,
+        ) {
             Ok(Ingest::Complete(bytes)) => self.retain_entry(edge, conversation_id, bytes),
             Ok(Ingest::Incomplete | Ingest::Duplicate | Ingest::Recent) => Ok(()),
             Err(error) => Err(error.reply_code().into()),
@@ -400,7 +405,7 @@ impl E2eeEdge {
         &mut self,
         edge: &EdgeFederation,
         conversation_id: [u8; 32],
-        bytes: Vec<u8>,
+        bytes: crate::e2ee::spool::CompanionBytes,
     ) -> Result<(), Refusal> {
         let object_id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
         let (state, entry, conversation) = self.decode_route(&bytes)?;
@@ -469,7 +474,7 @@ impl E2eeEdge {
         snapshot
             .pending
             .route_objects
-            .insert(conversation_id, bytes);
+            .insert(conversation_id, bytes.to_vec());
         Ok(())
     }
 

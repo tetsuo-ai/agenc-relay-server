@@ -7,7 +7,7 @@
 //! with the sequencer key, stores opaque objects under their IDs, dispenses
 //! one-use KeyPackages, runs device mailboxes, and projects route state.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use agenc_relay_crypto::{Ed25519SecretKey, SemanticHashDomain, SignatureDomain, sign_canonical};
 use agenc_relay_domain::e2ee::RouteTable;
@@ -473,7 +473,7 @@ pub struct QueuedCompanion {
     /// Correlation.
     pub correlation: Correlation,
     /// The request object.
-    pub request: Vec<u8>,
+    pub request: super::spool::CompanionBytes,
     /// The payload object, if any.
     pub payload: Option<super::spool::CompanionBytes>,
     /// The refusal the request is answered with, if any.
@@ -485,7 +485,7 @@ pub struct CompleteRequest {
     /// Correlation.
     pub correlation: Correlation,
     /// Request bytes.
-    pub request: Vec<u8>,
+    pub request: super::spool::CompanionBytes,
     /// Payload bytes.
     pub payload: Option<super::spool::CompanionBytes>,
     /// Set when the request is refused rather than run: a fresh request is
@@ -497,7 +497,7 @@ pub struct CompleteRequest {
 /// What one fragment did to its assembly.
 enum Ingested {
     /// The object is complete.
-    Complete(Vec<u8>),
+    Complete(super::spool::CompanionBytes),
     /// More fragments are needed, or this one repeated.
     Pending,
     /// The object completed recently; the prior outcome applies.
@@ -506,10 +506,12 @@ enum Ingested {
 
 /// An EREQUEST whose EPAYLOAD has not arrived.
 struct OpenRequest {
+    descriptor: AssemblyKey,
+    first_payload_deadline: Option<u64>,
     large_control: Option<(CarrierCommand, [u8; 32])>,
     correlation: Correlation,
-    request: Vec<u8>,
-    payload_object_id: Option<[u8; 32]>,
+    request: super::spool::CompanionBytes,
+    payload_object_id: [u8; 32],
     refusal: Option<E2eeReplyCode>,
 }
 
@@ -920,7 +922,6 @@ impl CompanionCoordinator {
         &mut self,
         key: AssemblyKey,
         peer: ServerId,
-        command: CarrierCommand,
         fragment: &agenc_relay_e2ee::wire::fragment::FragmentTag,
         now_millis: u64,
     ) -> Result<Ingested, CompanionFault> {
@@ -930,10 +931,16 @@ impl CompanionCoordinator {
         };
         let now = now_millis / 1_000;
         self.expire_assemblies(now);
-        match self
-            .assembler
-            .ingest(key, scopes, command.limit(), fragment, now)
-        {
+        let link = self.peers.get(&peer).and_then(|peer| peer.ingress.clone());
+        match super::spool::ingest_control(
+            &mut self.assembler,
+            self.spool.as_ref(),
+            link,
+            key,
+            scopes,
+            fragment,
+            now,
+        ) {
             Ok(Ingest::Complete(bytes)) => Ok(Ingested::Complete(bytes)),
             Ok(Ingest::Incomplete | Ingest::Duplicate) => Ok(Ingested::Pending),
             Ok(Ingest::Recent) => Ok(Ingested::Recent),
@@ -948,7 +955,20 @@ impl CompanionCoordinator {
     fn expire_assemblies(&mut self, now: u64) {
         if now > self.recent_expired_at {
             self.recent_expired_at = now;
-            let _discarded = self.assembler.expire(now);
+            let expired: BTreeSet<_> = self.assembler.expire(now).into_iter().collect();
+            self.open.retain(|_, open| {
+                let mut payload = open.descriptor.clone();
+                payload.object_id = agenc_relay_e2ee::ObjectId::from_bytes(open.payload_object_id);
+                let waiting_expired = open
+                    .first_payload_deadline
+                    .is_some_and(|until| now >= until);
+                if waiting_expired || expired.contains(&payload) {
+                    self.assembler.forget(&open.descriptor);
+                    false
+                } else {
+                    true
+                }
+            });
         }
     }
 
@@ -993,39 +1013,48 @@ impl CompanionCoordinator {
         };
         let command = CarrierCommand::Federation(ArcWireObjectKind::FederationRequest);
         let key = Self::assembly_key(peer, &correlation, command, object_id);
-        let bytes = match self.ingest(key.clone(), peer, command, &fragment, now_millis)? {
+        let bytes = match self.ingest(key.clone(), peer, &fragment, now_millis)? {
             Ingested::Complete(bytes) => bytes,
             Ingested::Pending => return Ok(Vec::new()),
             Ingested::Recent => return self.replay_recent(peer, &correlation, object_id, reserve),
         };
         let decoded = request::decode_request(&bytes).map_err(|_| CompanionFault::Protocol)?;
-        let payload_object_id = decoded.payload_object_id.exactly::<32>().ok();
+        let refusal = self.refusal_for(&key);
+        if decoded.payload_object_id.as_slice().is_empty() {
+            return Ok(vec![sync::Action::Execute(CompleteRequest {
+                correlation,
+                request: bytes,
+                payload: None,
+                refusal,
+            })]);
+        }
+        let payload_object_id = decoded
+            .payload_object_id
+            .exactly::<32>()
+            .map_err(|_| CompanionFault::Protocol)?;
+        // A peer only occupies its own bounded descriptor waits.
+        let waiting = self
+            .open
+            .range((peer, [0; 16])..=(peer, [u8::MAX; 16]))
+            .count();
+        if waiting >= MAX_QUEUED_COMPANION_REQUESTS {
+            return Err(CompanionFault::Ceiling);
+        }
+        let large_control = request::large_control(&decoded, &self.network_id, &correlation);
+        let carrier = large_control.map_or(CarrierCommand::DeliverWelcome, |(carrier, _)| carrier);
+        let (absolute, idle) = carrier.limit().deadline.seconds();
+        let until = (now_millis / 1_000).saturating_add(idle.min(absolute));
         let open = OpenRequest {
-            large_control: request::large_control(&decoded, &self.network_id, &correlation),
+            descriptor: key,
+            first_payload_deadline: Some(until),
+            large_control,
             correlation,
             request: bytes,
             payload_object_id,
-            refusal: self.refusal_for(&key),
+            refusal,
         };
-        if open.payload_object_id.is_some() {
-            // Each peer has its own payload waits: one peer's never refuse
-            // another's.
-            let waiting = self
-                .open
-                .range((peer, [0; 16])..=(peer, [u8::MAX; 16]))
-                .count();
-            if waiting >= MAX_QUEUED_COMPANION_REQUESTS {
-                return Err(CompanionFault::Ceiling);
-            }
-            self.open.insert((peer, correlation.request_id), open);
-            return Ok(Vec::new());
-        }
-        Ok(vec![sync::Action::Execute(CompleteRequest {
-            correlation: open.correlation,
-            request: open.request,
-            payload: None,
-            refusal: open.refusal,
-        })])
+        self.open.insert((peer, correlation.request_id), open);
+        Ok(Vec::new())
     }
 
     /// The stored answer of a request object the assembler already saw;
@@ -1099,12 +1128,14 @@ impl CompanionCoordinator {
             peer_server_id: *peer.as_bytes(),
             ..correlation
         };
+        let now = now_millis / 1_000;
+        self.expire_assemblies(now);
         let open = self
             .open
             .get(&(peer, correlation.request_id))
             .filter(|open| open.correlation == correlation)
             .ok_or(CompanionFault::Protocol)?;
-        if open.payload_object_id != Some(object_id) {
+        if open.payload_object_id != object_id {
             return Err(CompanionFault::Protocol);
         }
         let large_control = open.large_control;
@@ -1114,8 +1145,6 @@ impl CompanionCoordinator {
             CarrierCommand::Federation(ArcWireObjectKind::FederationRequest),
             object_id,
         );
-        let now = now_millis / 1_000;
-        self.expire_assemblies(now);
         let peer_scope = QuotaScopes {
             peer: Some(*peer.as_bytes()),
             ..QuotaScopes::default()
@@ -1176,7 +1205,15 @@ impl CompanionCoordinator {
                 super::spool::CompanionBytes::from(object),
                 self.refusal_for(&key),
             ),
-            Ingest::Duplicate | Ingest::Incomplete => return Ok(Vec::new()),
+            Ingest::Duplicate | Ingest::Incomplete => {
+                let open = self
+                    .open
+                    .get_mut(&(peer, correlation.request_id))
+                    .ok_or(CompanionFault::Protocol)?;
+                // The assembler now owns the payload's absolute and idle deadlines.
+                open.first_payload_deadline = None;
+                return Ok(Vec::new());
+            }
             Ingest::Recent => {
                 let bytes = self
                     .state

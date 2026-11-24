@@ -22,12 +22,16 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> TestResult<Self> {
+        Self::with_reserve(0)
+    }
+
+    fn with_reserve(percent: u8) -> TestResult<Self> {
         let directory = TestDirectory::create()?;
         let qualification = signed_test_qualification(StateDirectory::probe(&directory.0)?)?;
         let state = StateDirectory::open(&directory.0, &[qualification])?;
         let process = Arc::new(MemoryBudget::new(16 * 1024 * 1024));
         let resources = SpoolResources {
-            directory: Arc::new(state.companion_spool_directory(0, 0)?),
+            directory: Arc::new(state.companion_spool_directory(0, percent)?),
             disk: CompanionDisk::new(8 * 1024 * 1024)?,
             memory: BackingReservationPort::new(Arc::clone(&process)),
         };
@@ -146,6 +150,20 @@ fn unsupported_controls_and_refused_headers_return_every_resource() -> TestResul
     fixture.returned();
     assert!(matches!(fixture.ingest(later, true)?, Ingest::Incomplete));
     assert_eq!(fixture.assembler.expire(u64::MAX).len(), 1);
+    fixture.returned();
+    Ok(())
+}
+
+#[test]
+fn the_filesystem_reserve_refuses_before_writing_and_releases_every_charge() -> TestResult {
+    let mut fixture = Fixture::with_reserve(100)?;
+    let bytes = welcome_envelope(MAX)?;
+    let fragments = fragment_object(&bytes)?;
+    let first = fragments.first().ok_or("missing fragment")?;
+    assert!(matches!(
+        fixture.ingest(first, true),
+        Err(AssemblyError::ReassemblyLimit)
+    ));
     fixture.returned();
     Ok(())
 }

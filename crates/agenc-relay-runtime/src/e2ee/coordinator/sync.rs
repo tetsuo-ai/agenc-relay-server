@@ -375,7 +375,7 @@ impl CompanionCoordinator {
             scope: None,
             object_id: agenc_relay_e2ee::ObjectId::from_bytes(descriptor.object_id),
         };
-        let bytes = match self.ingest(key.clone(), peer, command, &fragment, now_millis)? {
+        let bytes = match self.ingest(key.clone(), peer, &fragment, now_millis)? {
             super::Ingested::Complete(bytes) => bytes,
             super::Ingested::Pending => return Ok(Vec::new()),
             super::Ingested::Recent => return self.redeclared(peer, &descriptor),

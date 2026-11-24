@@ -344,12 +344,22 @@ fn a_stale_partial_object_releases_its_peers_quota() -> TestResult {
         .map_err(|fault| format!("{fault:?}"))?;
     assert_eq!(sync.harness.coordinator.assembler.open_count(), 0);
     assert_eq!(quotas(&sync), (0, 0));
+    // The same source may retry its descriptor and payload after expiry.
+    submit_partial(
+        &mut sync,
+        home(),
+        0,
+        &payload,
+        NOW_MILLIS + deadline * 1_000,
+    )?;
+    assert_eq!(sync.harness.coordinator.assembler.open_count(), 1);
     Ok(())
 }
 
 /// Delivers the request fragments of one request at `count` that names a
 /// payload, from `peer`, without its payload: the request waits for it.
 fn open_payload_wait(sync: &mut Sync, peer: ServerId, count: u64) -> Result<(), CompanionFault> {
+    let now_millis = NOW_MILLIS.max(sync.harness.coordinator.recent_expired_at * 1000);
     let payload = count.to_be_bytes();
     let (correlation, bytes) =
         request(count, Some(&payload)).map_err(|_| CompanionFault::Protocol)?;
@@ -362,7 +372,7 @@ fn open_payload_wait(sync: &mut Sync, peer: ServerId, count: u64) -> Result<(), 
                 object_id: object_id(&bytes),
                 fragment,
             },
-            NOW_MILLIS,
+            now_millis,
             &sync.host,
             &mut sync.entropy,
         )?;
@@ -392,5 +402,24 @@ fn payload_waits_are_bounded_per_peer() -> TestResult {
     for count in 0..ceiling {
         open_payload_wait(&mut sync, other, count).map_err(|f| format!("{f:?}"))?;
     }
+    Ok(())
+}
+
+#[test]
+fn a_descriptor_waiting_for_fragment_zero_releases_its_bytes_and_can_retry() -> TestResult {
+    let mut sync = Sync::new()?;
+    open_payload_wait(&mut sync, home(), 4).map_err(|f| format!("{f:?}"))?;
+    let coordinator = &mut sync.harness.coordinator;
+    assert_eq!(coordinator.open.len(), 1);
+    assert!(coordinator.assembler.quotas().reserved_bytes() > 0);
+    let (absolute, idle) = CarrierCommand::DeliverWelcome.limit().deadline.seconds();
+    let deadline = NOW_MILLIS / 1000 + absolute.min(idle);
+    coordinator.expire_assemblies(deadline - 1);
+    assert_eq!(coordinator.open.len(), 1);
+    coordinator.expire_assemblies(deadline);
+    assert!(coordinator.open.is_empty());
+    assert_eq!(coordinator.assembler.quotas().reserved_bytes(), 0);
+    open_payload_wait(&mut sync, home(), 4).map_err(|f| format!("{f:?}"))?;
+    assert_eq!(sync.harness.coordinator.open.len(), 1);
     Ok(())
 }

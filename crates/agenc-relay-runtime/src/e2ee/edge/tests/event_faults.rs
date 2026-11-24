@@ -29,7 +29,11 @@ fn notice(payload: Option<[u8; 32]>) -> TestResult<ArcFederationEvent> {
         coordinator_state_generation: 5,
         delivery_sequence: POSITION.delivery_sequence,
         event_id: POSITION.event_id,
-        event_kind: ArcFederationEventKind::RequestCompleted,
+        event_kind: if payload.is_some() {
+            ArcFederationEventKind::ChannelApplication
+        } else {
+            ArcFederationEventKind::RequestCompleted
+        },
         cross_profile_mutation_id: Opaque::new(Vec::new())?,
         cross_profile_part_index: 0,
         cross_profile_part_count: 0,
@@ -108,7 +112,7 @@ fn a_payload_must_follow_the_exact_event_that_named_it() -> TestResult {
     let payload = ArcWireObject::new(ArcWireObjectKind::ApplicationMls, vec![12; 32])?.encode()?;
     // A payload for an event nobody opened.
     assert!(deliver(&mut edge, &mut fixture, &payload, true)?);
-    // An event that names another payload keeps waiting; the wrong payload is refused.
+    // A mismatched payload refuses and releases the named wait.
     let event = notice(Some([99; 32]))?;
     let bytes = event_bytes(&event)?;
     assert!(!deliver(&mut edge, &mut fixture, &bytes, false)?);

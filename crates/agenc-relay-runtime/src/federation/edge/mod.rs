@@ -657,6 +657,15 @@ impl EdgeFederation {
         part: agenc_relay_storage::e2ee_records::barrier::BarrierPart,
         payload: Option<Vec<u8>>,
     ) -> bool {
+        self.companion_barrier_part_ref(context, part, payload.as_deref())
+    }
+
+    pub(crate) fn companion_barrier_part_ref(
+        &mut self,
+        context: &mut StateCoreContext,
+        part: agenc_relay_storage::e2ee_records::barrier::BarrierPart,
+        payload: Option<&[u8]>,
+    ) -> bool {
         match barrier::companion_part(self, context, part, payload) {
             Ok(()) => true,
             Err(violation) => {
