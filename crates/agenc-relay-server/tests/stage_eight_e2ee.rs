@@ -4413,6 +4413,26 @@ mod real_clients {
             .ok_or_else(|| failure(format!("no EKEY CLAIMED line in {reply:?}")))
     }
 
+    /// A multi-megabyte object crosses federation before the first batch
+    /// line. Bound both the fragment count and the time at the configured rate.
+    fn object_reply(client: &mut ArcClient, label: &str, bytes: usize) -> TestResult<Vec<String>> {
+        let limit = TRANSCRIPT_LINES + bytes.div_ceil(e2ee::limits::MAX_FRAGMENT_RAW);
+        if limit <= 2 * TRANSCRIPT_LINES {
+            return labeled_reply_within(client, label, limit, REPLY_DEADLINE);
+        }
+        let transfer = u64::try_from(bytes)?.div_ceil(u64::from(E2EE_INGRESS_BYTES_PER_SECOND));
+        let timeout = REPLY_DEADLINE + Duration::from_secs(transfer);
+        let previous = client.reader.get_ref().sock.read_timeout()?;
+        client
+            .reader
+            .get_ref()
+            .sock
+            .set_read_timeout(Some(timeout))?;
+        let response = labeled_reply_within(client, label, limit, timeout);
+        client.reader.get_ref().sock.set_read_timeout(previous)?;
+        response
+    }
+
     /// Encodes the complete recipient mailbox carrier for native Welcome bytes.
     pub(super) fn welcome_object(
         target: &Principal,
@@ -4486,25 +4506,7 @@ mod real_clients {
 
         let label = target.label();
         receiver.send(&format!("@label={label} EKEY FETCH MAILBOX WELCOME *"))?;
-        let limit = TRANSCRIPT_LINES + object.len().div_ceil(e2ee::limits::MAX_FRAGMENT_RAW);
-        let page = if limit > 2 * TRANSCRIPT_LINES {
-            // A whole authenticated mailbox object crosses federation before
-            // the first client batch line. Include one transfer at the configured byte rate.
-            let seconds =
-                u64::try_from(object.len())?.div_ceil(u64::from(E2EE_INGRESS_BYTES_PER_SECOND));
-            let timeout = REPLY_DEADLINE + Duration::from_secs(seconds);
-            let previous = receiver.reader.get_ref().sock.read_timeout()?;
-            receiver
-                .reader
-                .get_ref()
-                .sock
-                .set_read_timeout(Some(timeout))?;
-            let response = labeled_reply_within(receiver, &label, limit, timeout);
-            receiver.reader.get_ref().sock.set_read_timeout(previous)?;
-            response?
-        } else {
-            labeled_reply_within(receiver, &label, limit, REPLY_DEADLINE)?
-        };
+        let page = object_reply(receiver, &label, object.len())?;
         assert_contains(&page, " EKEY MAILBOX ")?;
         let token = hash_at(&page, "MAILBOX", 3)?;
         let fetched = fragments_object(&page)?;
@@ -4512,6 +4514,20 @@ mod real_clients {
             return Err(failure(
                 "mailbox fetch did not reproduce the delivered Welcome",
             ));
+        }
+        if welcome.len() == e2ee::limits::MAX_EMBEDDED_MLS_WELCOME_BYTES {
+            let label = target.label();
+            receiver.send(&format!(
+                "@label={label} EGROUP FETCH OBJECT {} {}",
+                base64url_encode(&bound.conversation),
+                base64url_encode(&object_id)
+            ))?;
+            let answer = object_reply(receiver, &label, object.len())?;
+            if fragments_object(&answer)? != object {
+                return Err(failure(
+                    "registered recipient object query returned different bytes",
+                ));
+            }
         }
         let label = target.label();
         receiver.send(&format!(
