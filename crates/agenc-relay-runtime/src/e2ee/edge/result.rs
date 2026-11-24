@@ -353,13 +353,12 @@ impl E2eeEdge {
             if pending.result_object_id.is_some() {
                 return Ok(());
             }
-            if let Some(completion) = decoded.completion_event_id {
-                if self.covered.remove(&completion) {
-                    pending.completion_seen = true;
-                } else {
-                    self.by_completion
-                        .insert(completion, correlation.request_id);
+            if let Some(event) = pending.early_completion {
+                if decoded.completion_event_id != Some(event) {
+                    return Err(E2eeReplyCode::InvalidFragment.into());
                 }
+                pending.completion_seen = true;
+                pending.early_completion = None;
             }
             pending.result = Some(decoded);
             pending.result_object_id = Some(object_id);
@@ -371,23 +370,6 @@ impl E2eeEdge {
         Ok(())
     }
 
-    /// A completion event arrived for `request_id`, or for a request whose
-    /// result has not arrived yet.
-    pub(super) fn completion_arrived(&mut self, event_id: [u8; 16]) -> Option<[u8; 16]> {
-        match self.by_completion.remove(&event_id) {
-            Some(request_id) => {
-                if let Some(pending) = self.pending.get_mut(&request_id) {
-                    pending.completion_seen = true;
-                }
-                Some(request_id)
-            }
-            None => {
-                self.covered.insert(event_id);
-                None
-            }
-        }
-    }
-
     /// Renders the answer once the result, every response, and the
     /// completion are present; the pending entry is retired afterwards.
     pub(super) fn render_ready(
@@ -395,72 +377,72 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         request_id: [u8; 16],
     ) -> Result<Vec<ClientOutput>, Refusal> {
-        let ready = self.pending.get(&request_id).is_some_and(|pending| {
-            pending.result.as_ref().is_some_and(|result| {
-                let complete = result
-                    .descriptors
-                    .iter()
-                    .all(|descriptor| pending.responses.contains_key(&descriptor.response_index));
-                let covered = result.completion_event_id.is_none() || pending.completion_seen;
-                complete && covered && !pending.rendered
-            })
-        });
-        if !ready {
+        let Some(pending) = self.pending.get(&request_id) else {
+            return Ok(Vec::new());
+        };
+        let Some(result) = pending.result.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if pending.rendered
+            || !complete_descriptors(pending, result)
+            || (result.completion_event_id.is_some() && !pending.completion_seen)
+        {
             return Ok(Vec::new());
         }
+        let (answer, output) = self.prepare_answer(context, pending, result)?;
         let Some(mut pending) = self.pending.remove(&request_id) else {
             return Ok(Vec::new());
         };
-        let Some(result) = pending.result.clone() else {
-            return Ok(Vec::new());
-        };
-        let generation = pending.generation;
-        // Object-carrying submissions retain their scalar or live echo for
-        // retries. Large result objects come from already-authorized queries
-        // with neither a submission replay entry nor an open event barrier.
+        self.release_answer(context, &mut pending, answer, output)
+    }
+
+    /// A query with object bodies can hold a committed completion, just as a
+    /// scalar answer can. The shared response allocations stay with this cursor.
+    pub(super) fn prepare_answer(
+        &self,
+        context: &mut StateCoreContext,
+        pending: &PendingRequest,
+        result: &DecodedResult,
+    ) -> Result<(super::completion::PreparedAnswer, Option<ClientOutput>), Refusal> {
         let total = result
             .descriptors
             .iter()
-            .try_fold(0_usize, |total, d| total.checked_add(d.total_size as usize))
+            .try_fold(0_usize, |sum, d| sum.checked_add(d.total_size as usize))
             .ok_or(E2eeReplyCode::ObjectTooLarge)?;
         if total > agenc_relay_e2ee::limits::MAX_FRAGMENT_RAW
             && pending.reply_key.is_none()
-            && result.completion_event_id.is_none()
+            && !matches!(result.value, ResultValue::Failed { .. })
+            && result.kind != ArcFederationResultKind::AcceptedEvent
         {
-            let mut responses = std::mem::take(&mut pending.responses);
-            let batch =
-                self.client_batch(context, &pending, &result, |index| responses.remove(&index))?;
-            // This query has no object-submission slot. Record its normal
-            // completion with no retry-body allocation.
-            let _retries = self.publish_reply(context, &mut pending, &[])?;
-            return Ok(vec![ClientOutput {
-                generation,
-                frames: Vec::new(),
-                batch: Some(Box::new(batch)),
-            }]);
+            let batch = self.client_batch(context, pending, result, |i| {
+                pending.responses.get(&i).cloned()
+            })?;
+            return Ok((
+                super::completion::PreparedAnswer::Stream(Box::new(batch)),
+                None,
+            ));
         }
-        let lines = self.render_answer(context, &pending, &result)?;
-        let mut retry_outputs = self.publish_reply(context, &mut pending, &lines)?;
+        let lines = self.render_answer(context, pending, result)?;
         let frames = lines
             .iter()
             .map(|line| WireMessage::extension_line(line))
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<_, _>>()
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-        retry_outputs.insert(
-            0,
-            ClientOutput {
-                generation,
-                frames,
-                batch: None,
-            },
-        );
-        Ok(retry_outputs)
+        let output = ClientOutput {
+            generation: pending.generation,
+            frames,
+            batch: None,
+        };
+        Ok((
+            super::completion::PreparedAnswer::Frames(lines),
+            Some(output),
+        ))
     }
 
     /// The lines of one answer: a failure, a scalar success, or an object
     /// batch; an accepted event renders through its echo instead.
     pub(super) fn render_answer(
-        &mut self,
+        &self,
         context: &mut StateCoreContext,
         pending: &PendingRequest,
         result: &DecodedResult,
@@ -504,7 +486,7 @@ impl E2eeEdge {
     /// fragments (a mailbox child before each), and the close.
     // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one batch is opened, filled in descriptor order with its metadata children, and closed as one unit
     fn render_batch(
-        &mut self,
+        &self,
         context: &mut StateCoreContext,
         pending: &PendingRequest,
         result: &DecodedResult,
@@ -520,7 +502,7 @@ impl E2eeEdge {
     }
 
     fn client_batch(
-        &mut self,
+        &self,
         context: &mut StateCoreContext,
         pending: &PendingRequest,
         result: &DecodedResult,
@@ -589,6 +571,13 @@ impl E2eeEdge {
         )?;
         Ok(batch)
     }
+}
+
+pub(super) fn complete_descriptors(pending: &PendingRequest, result: &DecodedResult) -> bool {
+    result
+        .descriptors
+        .iter()
+        .all(|d| pending.responses.contains_key(&d.response_index))
 }
 
 /// Each authenticated source retains its own original storage permit. This

@@ -166,7 +166,7 @@ fn receive(
 }
 
 /// The completion event of the request, applied after its result.
-fn completion_event() -> TestResult<ArcFederationEvent> {
+pub(super) fn completion_event() -> TestResult<ArcFederationEvent> {
     Ok(ArcFederationEvent {
         profile_version: 1,
         network_id: [1; 32],
@@ -231,7 +231,10 @@ fn a_result_whose_completion_was_applied_renders_its_own_kind() -> TestResult {
     for case in &CASES {
         let mut edge = edge();
         edge.pending.insert(REQUEST, submission(case, None)?);
-        edge.covered.insert(COMPLETION);
+        edge.pending
+            .get_mut(&REQUEST)
+            .ok_or("pending")?
+            .early_completion = Some(COMPLETION);
         let outputs = receive(&mut edge, &mut fixture, &result_object(case)?)?;
         assert_only_line(&outputs, case, LABEL)?;
     }
@@ -271,7 +274,10 @@ fn a_retried_submission_replays_its_own_kind() -> TestResult {
         let request = submission(case, Some(key))?;
         let command = request.command.clone();
         edge.pending.insert(REQUEST, request);
-        edge.covered.insert(COMPLETION);
+        edge.pending
+            .get_mut(&REQUEST)
+            .ok_or("pending")?
+            .early_completion = Some(COMPLETION);
         receive(&mut edge, &mut fixture, &result_object(case)?)?;
         let replay = edge
             .replies
@@ -286,7 +292,7 @@ fn a_retried_submission_replays_its_own_kind() -> TestResult {
 #[test]
 fn a_tuple_under_a_kind_that_does_not_own_it_is_refused() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
-    let mut edge = edge();
+    let edge = edge();
     let request = submission(&CASES[0], None)?;
     for (kind, value) in [
         (K::Aborted, ResultValue::Triple(IDS[0], IDS[1], IDS[2])),
@@ -339,7 +345,7 @@ fn only_an_aborted_tuple_names_an_aborted_batch_child() -> TestResult {
         (K::ReinitActivated, false),
         (K::ReinitAborted, false),
     ] {
-        let mut edge = edge();
+        let edge = edge();
         let mut request = submission(&CASES[1], None)?;
         request.responses.insert(0, object.clone().into());
         let result = DecodedResult {

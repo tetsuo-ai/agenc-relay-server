@@ -28,7 +28,7 @@ mod witness_failure;
 mod witness_recovery;
 mod witness_resolution;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use agenc_relay_client_wire::{CapabilityState, WireMessage};
 use agenc_relay_domain::e2ee::RouteTable;
@@ -177,6 +177,8 @@ pub(crate) struct PendingRequest {
     /// Exact result envelope identity, retained to reject conflicting duplicates.
     pub(super) result_object_id: Option<[u8; 32]>,
     pub(crate) responses: BTreeMap<u16, super::spool::CompanionBytes>,
+    /// The single committed, request-correlated home event before its result.
+    pub(super) early_completion: Option<[u8; 16]>,
     pub(crate) completion_seen: bool,
     pub(crate) rendered: bool,
 }
@@ -252,8 +254,6 @@ pub struct E2eeEdge {
     /// keep their places in the outstanding bounds until a frame of their
     /// result arrives, the deletion is acknowledged or the link ends.
     closed_requests: BTreeMap<[u8; 16], ([u8; 16], [u8; 24])>,
-    by_completion: BTreeMap<[u8; 16], [u8; 16]>,
-    covered: BTreeSet<[u8; 16]>,
     assembler: E2eeAssembler,
     ingress: BTreeMap<ConnectionGeneration, Ingress>,
     /// The object each connection last retried: its fragment zero was
@@ -351,8 +351,6 @@ impl E2eeEdge {
             origins: BTreeMap::new(),
             pending: BTreeMap::new(),
             closed_requests: BTreeMap::new(),
-            by_completion: BTreeMap::new(),
-            covered: BTreeSet::new(),
             // Each connection holds its own share of the recent-object
             // cache: one connection past it never refuses another's
             // submissions (companion 16).

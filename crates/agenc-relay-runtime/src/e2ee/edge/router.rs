@@ -630,6 +630,7 @@ impl E2eeEdge {
                 result: None,
                 result_object_id: None,
                 responses: std::collections::BTreeMap::new(),
+                early_completion: None,
                 completion_seen: false,
                 rendered: false,
             },

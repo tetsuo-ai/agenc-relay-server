@@ -283,6 +283,7 @@ fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
             descriptors: Vec::new(),
         }),
         responses: BTreeMap::new(),
+        early_completion: None,
         completion_seen: false,
         rendered: false,
     }
