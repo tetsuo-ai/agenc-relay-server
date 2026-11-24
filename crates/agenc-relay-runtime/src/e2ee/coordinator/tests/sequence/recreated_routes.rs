@@ -411,6 +411,8 @@ fn next_channel(harness: &Harness, incarnation: u64, predecessor: [u8; 32]) -> T
 #[test]
 fn a_closed_channel_route_binds_its_next_incarnation_on_a_fresh_instance() -> TestResult {
     let (mut harness, first, close_id) = closed_channel()?;
+    let first_policy = wire(ArcWireObjectKind::Policy, &harness.initial_policy)?;
+    let policy_id = *agenc_relay_e2ee::ObjectId::compute(&first_policy).as_bytes();
     let closed = route_of(&harness, first)?;
     assert_eq!(closed.lifecycle, RouteLifecycle::Tombstone { close_id });
     // The closed instance keeps its tombstone and takes no reservation.
@@ -424,6 +426,19 @@ fn a_closed_channel_route_binds_its_next_incarnation_on_a_fresh_instance() -> Te
     let reservation = ok_reservation(reserve_channel(&mut harness, SECOND_INSTANCE)?)?;
     let next = next_channel(&harness, 1, close_id)?;
     bind_and_publish(&mut harness, reservation, &next)?;
+    // The same requester belongs to both channel instances. The old policy remains
+    // readable under its original conversation after restart.
+    let previous = ok(harness.run(Op::FetchObject, &[first, policy_id].concat(), None)?)?;
+    assert!(matches!(previous.responses.as_slice(), [response] if response.bytes == first_policy));
+    let current = ok(harness.run(
+        Op::FetchObject,
+        &[next.conversation, policy_id].concat(),
+        None,
+    )?)?;
+    assert_eq!(
+        current.result,
+        ResultBody::Empty(agenc_relay_domain::e2ee::projection::EmptyKind::Objects)
+    );
     let second = route_of(&harness, next.conversation)?;
     assert_eq!(second.incarnation, 1);
     assert_eq!(second.lineage, closed.lock);

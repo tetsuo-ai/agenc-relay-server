@@ -104,8 +104,11 @@ fn digest(exec: &Exec<'_>, account: &[u8; 24]) -> Result<[u8; 32], Fail> {
         .map_err(|_| E2eeReplyCode::InvalidFragment.into())
 }
 
-/// Whether the requester's account is bound to `conversation_id`.
-fn sender_bound(exec: &Exec<'_>, conversation_id: &[u8; 32]) -> Result<(), Fail> {
+/// The named route if this requester currently belongs to the channel or fixed Direct pair.
+pub(super) fn member_route<'a>(
+    exec: &Exec<'a>,
+    conversation_id: &[u8; 32],
+) -> Result<&'a agenc_relay_domain::e2ee::RouteEntry, Fail> {
     let account = exec.account_id()?;
     let route = exec
         .coordinator
@@ -121,7 +124,13 @@ fn sender_bound(exec: &Exec<'_>, conversation_id: &[u8; 32]) -> Result<(), Fail>
                 .is_some_and(|(a, b)| a == account || b == account)
         }
     };
-    if !bound || !route.accepts_traffic() {
+    bound
+        .then_some(route)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, conversation_id))
+}
+
+fn sender_bound(exec: &Exec<'_>, conversation_id: &[u8; 32]) -> Result<(), Fail> {
+    if !member_route(exec, conversation_id)?.accepts_traffic() {
         return Err(Fail::with(E2eeReplyCode::RouteInvalid, conversation_id));
     }
     Ok(())

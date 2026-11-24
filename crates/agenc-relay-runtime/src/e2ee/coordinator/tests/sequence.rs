@@ -1390,8 +1390,11 @@ fn published_policies_follow_the_binding_chain() -> TestResult {
         .concat();
         let outcome = ok(harness.run(Op::FetchObject, &fetch, None)?)?;
         assert_eq!(outcome.result, ResultBody::ObjectPage);
-        assert_eq!(outcome.responses.len(), 1);
-        assert_eq!(outcome.responses[0].bytes, bytes);
+        assert!(matches!(outcome.responses.as_slice(), [response] if response.bytes == bytes));
+        harness.channel_member = false;
+        let parted = ok(harness.run(Op::FetchObject, &fetch, None)?)?;
+        assert_eq!(parted.result, ResultBody::Empty(EmptyKind::Objects));
+        harness.channel_member = true;
     }
     Ok(())
 }
