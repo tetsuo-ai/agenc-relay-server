@@ -759,7 +759,8 @@ async fn a_payload_that_is_no_object_of_its_kind_is_refused_at_ingress() -> Test
 #[tokio::test]
 async fn a_closed_connections_requests_count_against_the_outstanding_bounds() -> TestResult {
     let generation = ConnectionGeneration::new(1);
-    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    // Generate a fresh request ID outside the closed requests installed below.
+    let mut core = StateCoreFixture::new(vec![0xfa; 4_096])?;
     let mut base = base_edge();
     let mut edge = active_edge(generation)?;
     let capabilities = capabilities()?;
