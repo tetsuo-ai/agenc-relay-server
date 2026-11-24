@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1101
-reviewed_source_sha256 = "39e2c703afebc2638659417ff782fc467ad2d73aa9255c8d2966149bea0c9fbb"
+reviewed_source_sha256 = "b3e90cd05c8807ecacd6a47fd0a65cfd28b1b6ac02ab435af76f956fc2d39cea"
 deferred = []
 
 [[region]]
@@ -258,3 +258,27 @@ end_line = 249
 span_sha256 = "6cf230d596ec2b3e96884e749f6767173282fea561c35dc2d10031c594cb46ac"
 metric = "branches"
 reason = "Connection input publication checks generation, consumer lifetime and independent queue capacity before publishing one ready entry."
+
+[[region]]
+id = "retained-policy-conversation-authority"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/ops/policy.rs"
+item = "readable"
+source_sha256 = "271156f48744dd98dd8000c86c08f75ab98726a5c2af9354d429eb3c2ffa8e5c"
+start_line = 96
+end_line = 107
+span_sha256 = "d83ce511a23415fe309f22208e77abec5643fe824b7475e75ed204602fa4cafa"
+metric = "branches"
+reason = "A registered policy read requires route membership and the exact retained envelope of that conversation."
+
+[[region]]
+id = "retained-route-account-membership"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/ops/route.rs"
+item = "member_route"
+source_sha256 = "93f694df2142b6f2a5bc40b352dff6e6e9f2cffd68b88530e2856dc965833e0b"
+start_line = 119
+end_line = 129
+span_sha256 = "6817aca6d024a6ca787fca7c66dca6a5f23fa00996827dcf8c71ad5a8f06ef78"
+metric = "branches"
+reason = "Channel membership and both sides of the fixed Direct pair govern participant reads."

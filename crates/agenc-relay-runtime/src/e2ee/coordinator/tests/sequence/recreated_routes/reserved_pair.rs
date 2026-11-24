@@ -103,3 +103,50 @@ fn a_direct_reservation_binds_no_other_pair_under_its_nonce() -> TestResult {
     assert!(routes.direct_plaintext_allowed(&other_pair));
     Ok(())
 }
+
+#[test]
+fn direct_policy_views_follow_the_two_fixed_accounts() -> TestResult {
+    let mut h = Harness::new()?;
+    h.publish_identity_and_roster()?;
+    h.attach()?;
+    let peer = direct_peer(&mut h)?;
+    let _other = other_peer(&mut h)?;
+    let peer_account = peer.root.tbs.account_id.as_slice().try_into()?;
+    let (grant, nonce) = ok_reservation(reserve_direct(&mut h, &peer_account)?)?;
+    let group = direct_group(&h, &peer, (0, [0; 32]), nonce, DIRECT_GROUP)?;
+    bind_and_publish(&mut h, grant, &group)?;
+    let bytes = wire(
+        ArcWireObjectKind::Policy,
+        group.policies.first().ok_or("initial policy")?,
+    )?;
+    let request = [
+        group.conversation,
+        *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes(),
+    ]
+    .concat();
+    for (actor, device, allowed) in [
+        (h.account, DEVICE, true),
+        (peer_account, PEER_DEVICE, true),
+        (account_bytes(12)?, OTHER_DEVICE, false),
+    ] {
+        let origin = h
+            .coordinator
+            .state
+            .origins
+            .get_mut(&origin_key())
+            .ok_or("origin")?;
+        origin.account_id = Some(actor);
+        origin.account_digest = Some(agenc_relay_e2ee::ids::account_id_digest(&NETWORK, &actor)?);
+        if actor != h.account {
+            origin.device = None;
+            h.attach_as(device)?;
+        }
+        let outcome = ok(h.run(Op::FetchObject, &request, None)?)?;
+        if allowed {
+            assert!(matches!(outcome.responses.as_slice(), [page] if page.bytes == bytes));
+        } else {
+            assert_eq!(outcome.result, ResultBody::Empty(EmptyKind::Objects));
+        }
+    }
+    Ok(())
+}
