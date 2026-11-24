@@ -1154,7 +1154,9 @@ class DependencyDecisionTests(unittest.TestCase):
         decisions = self.decisions()
         libraries = [self.LIBC, self.LIBGCC]
         summary = check_dependency_decisions(self.sbom(decisions), decisions, libraries)
-        self.assertEqual(len(summary["workspace"]), 13)
+        self.assertCountEqual(
+            summary["workspace"], [entry["name"] for entry in decisions["workspace"]]
+        )
         self.assertEqual(summary["patched"], ["opaque-ke 4.0.1"])
         self.assertEqual(len(summary["native"]), 2)
         cases = [
