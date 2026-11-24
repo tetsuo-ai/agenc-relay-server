@@ -1190,7 +1190,7 @@ fn replay_rows_answer_exact_duplicates_and_refuse_conflicts() -> TestResult {
     state.objects.insert([2; 32], vec![9, 9]);
     assert_eq!(
         request::classify(&state, HOME, &decoded),
-        Classified::Replay(vec![1, 2, 3], vec![vec![9, 9]])
+        Classified::Replay(&[1, 2, 3], vec![&[9, 9]])
     );
     assert_eq!(
         request::classify(&state, HOME, &conflicting),

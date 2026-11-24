@@ -612,6 +612,25 @@ impl EdgeFederation {
         true
     }
 
+    /// Queues an ordered companion transfer in a single writer slot.
+    pub(crate) fn send_companion_transfer(
+        &mut self,
+        context: &mut StateCoreContext,
+        transfer: &std::sync::Arc<crate::e2ee::outbound::Transfer>,
+        backing: crate::budget::MemoryPermit,
+    ) -> bool {
+        let Some(live) = self.live.as_ref() else {
+            return false;
+        };
+        match live.handle.try_send_transfer(transfer, backing) {
+            Ok(()) => true,
+            Err(refusal) => {
+                self.send_failed(context, SendFailure::from(refusal));
+                false
+            }
+        }
+    }
+
     /// Closes the link after a companion violation.
     pub fn fail_companion_link(&mut self, context: &mut StateCoreContext) {
         self.fail_link(context, Violation::Companion(CompanionViolation::Request));

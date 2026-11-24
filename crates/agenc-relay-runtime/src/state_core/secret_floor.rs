@@ -21,7 +21,8 @@ use agenc_relay_client_wire::{MAX_COMMAND_BYTES, WireMessage};
 use agenc_relay_types::MonotonicTick;
 
 use crate::budget::MemoryPermit;
-use crate::connection::sink::ConnectionGeneration;
+use crate::connection::sink::{ClientQueueDemand, ConnectionGeneration, SinkReserveError};
+use crate::e2ee::edge::{ClientBatch, ClientOutput};
 
 /// Floored responses are one per connection, so the hard client ceiling
 /// bounds the owner (architecture 28.7).
@@ -32,8 +33,13 @@ const MAX_HOLDS: usize = 524_288;
 /// the order the server produced.
 struct Hold {
     deadline: MonotonicTick,
-    groups: Vec<Vec<WireMessage>>,
+    groups: Vec<HeldOutput>,
     _permit: MemoryPermit,
+}
+
+enum HeldOutput {
+    Frames(Vec<WireMessage>),
+    Companion(Box<ClientBatch>),
 }
 
 /// Frame groups one connection may queue behind its floored response. A
@@ -99,7 +105,7 @@ impl SecretFloor {
             generation,
             Hold {
                 deadline,
-                groups: vec![frames],
+                groups: vec![HeldOutput::Frames(frames)],
                 _permit: permit,
             },
         );
@@ -114,7 +120,7 @@ impl SecretFloor {
         &mut self,
         generation: ConnectionGeneration,
         now: MonotonicTick,
-    ) -> Option<Vec<Vec<WireMessage>>> {
+    ) -> Option<Vec<HeldOutput>> {
         let due = self
             .holds
             .get(&generation)
@@ -131,14 +137,17 @@ impl SecretFloor {
         generation: ConnectionGeneration,
         frames: Vec<WireMessage>,
     ) -> Result<(), Vec<WireMessage>> {
-        let Some(hold) = self.holds.get_mut(&generation) else {
+        let Some(hold) = self.room(generation) else {
             return Err(frames);
         };
-        if hold.groups.len() >= MAX_QUEUED_GROUPS || hold.groups.try_reserve(1).is_err() {
-            return Err(frames);
-        }
-        hold.groups.push(frames);
+        hold.groups.push(HeldOutput::Frames(frames));
         Ok(())
+    }
+
+    fn room(&mut self, generation: ConnectionGeneration) -> Option<&mut Hold> {
+        let hold = self.holds.get_mut(&generation)?;
+        (hold.groups.len() < MAX_QUEUED_GROUPS && hold.groups.try_reserve(1).is_ok())
+            .then_some(hold)
     }
 
     /// Drops the response of a closed connection and its charge.
@@ -211,8 +220,13 @@ impl super::StateCoreContext {
         let Some(groups) = self.secret_floor.take_due(generation, now) else {
             return false;
         };
-        for frames in groups {
-            let _sent = self.send_to(generation, frames);
+        for group in groups {
+            match group {
+                HeldOutput::Frames(frames) => {
+                    let _sent = self.send_to(generation, frames);
+                }
+                HeldOutput::Companion(batch) => self.send_companion_batch_now(generation, batch),
+            }
         }
         true
     }
@@ -225,6 +239,65 @@ impl super::StateCoreContext {
         frames: Vec<WireMessage>,
     ) -> Result<(), Vec<WireMessage>> {
         self.secret_floor.queue_behind(generation, frames)
+    }
+
+    /// Publishes ordinary replies and single-window bulk batches in the same
+    /// order, including behind a pending privacy response floor.
+    pub(crate) fn send_companion_output(&mut self, output: ClientOutput) {
+        let generation = output.generation;
+        let Some(batch) = output.batch else {
+            let _sent = self.send_to(generation, output.frames);
+            return;
+        };
+        if self.secret_floor.pending(generation) {
+            if let Some(hold) = self.secret_floor.room(generation) {
+                hold.groups.push(HeldOutput::Companion(batch));
+            } else if let Some(sink) = self.sessions.sink_for_generation(generation) {
+                sink.begin_slow_consumer_close();
+                self.sessions.mark_sink_gone(generation);
+            }
+        } else {
+            self.send_companion_batch_now(generation, batch);
+        }
+    }
+
+    fn send_companion_batch_now(
+        &mut self,
+        generation: ConnectionGeneration,
+        batch: Box<ClientBatch>,
+    ) {
+        let Some(sink) = self.sessions.sink_for_generation(generation) else {
+            return;
+        };
+        let send = (|| {
+            let demand =
+                ClientQueueDemand::new(vec![batch.window()]).map_err(|_| SinkReserveError::Full)?;
+            let tentative = sink.try_reserve(demand)?;
+            let charge = tentative.backing_charge();
+            let backing = if charge == 0 {
+                None
+            } else {
+                Some(
+                    self.reserve_kept_output(charge)
+                        .ok()
+                        .and_then(|mut held| held.split_exact(charge))
+                        .ok_or(SinkReserveError::Full)?,
+                )
+            };
+            let reservation = sink
+                .prepare(tentative, backing)
+                .map_err(|error| match error {
+                    crate::connection::QueueAllocationError::Closed => SinkReserveError::Closed,
+                    _ => SinkReserveError::Full,
+                })?;
+            sink.commit_companion(reservation, batch)
+        })();
+        if let Err(refusal) = send {
+            if refusal == SinkReserveError::Full {
+                sink.begin_slow_consumer_close();
+            }
+            self.sessions.mark_sink_gone(generation);
+        }
     }
 
     /// Drops the retained response of a closed or replaced connection.

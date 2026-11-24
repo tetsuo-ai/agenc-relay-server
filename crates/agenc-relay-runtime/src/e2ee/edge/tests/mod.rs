@@ -268,7 +268,7 @@ fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
         request_object_id: [7; 32],
         sequence,
         origin_generation: 0,
-        frames: Vec::new(),
+        transfer: None,
         result_object_id: None,
         result: answered.then(|| super::result::DecodedResult {
             request_object_id: [7; 32],
