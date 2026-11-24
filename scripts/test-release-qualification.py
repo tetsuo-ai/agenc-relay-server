@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -659,13 +660,30 @@ class WorkerGroupTests(unittest.TestCase):
     def test_group_runs_workers_together_and_charges_their_cpu(self) -> None:
         from release_qualification.workers import execute_group
 
-        script = "import time\nend=time.monotonic()+0.5\nwhile time.monotonic()<end: pass\nprint('done')"
-        commands = [([sys.executable, "-c", script], self.root / f"worker-{index}.log") for index in range(3)]
-        results = execute_group(commands, self.root, dict(os.environ), 10)
+        # A rendezvous proves the workers overlap even when the runner has one
+        # available CPU. Each child then accrues its own measured CPU time.
+        workers = 3
+        script = textwrap.dedent("""\
+            import sys
+            import time
+            from pathlib import Path
+
+            Path(f"worker-{sys.argv[1]}.ready").touch()
+            while len(list(Path(".").glob("worker-*.ready"))) < int(sys.argv[2]):
+                time.sleep(0.01)
+            end = time.process_time_ns() + 400_000_000
+            while time.process_time_ns() < end:
+                pass
+            print("done")
+            """)
+        commands = [([sys.executable, "-c", script, str(index), str(workers)], self.root / f"worker-{index}.log")
+                    for index in range(workers)]
+        results = execute_group(commands, self.root, dict(os.environ), 30)
         self.assertEqual([result["exit_code"] for result in results], [0, 0, 0])
         self.assertTrue(all(result["failure"] is None for result in results))
-        self.assertLess(results[0]["elapsed_ns"], 1_400_000_000)
-        self.assertGreater(sum(result["cpu_user_ns"] + result["cpu_system_ns"] for result in results), 1_000_000_000)
+        cpu_times = [result["cpu_user_ns"] + result["cpu_system_ns"] for result in results]
+        self.assertTrue(all(charged >= 390_000_000 for charged in cpu_times))
+        self.assertGreater(sum(cpu_times), 1_000_000_000)
         self.assertEqual((self.root / "worker-1.log").read_bytes(), b"done\n")
 
     def test_first_failing_worker_stops_the_group_and_every_child_is_joined(self) -> None:

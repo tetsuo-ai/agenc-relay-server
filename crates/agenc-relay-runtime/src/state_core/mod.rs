@@ -5231,6 +5231,7 @@ mod tests {
             (1, "JOIN #room"),
             (1, "WAIT 366 "),
             (1, "QUIT :done"),
+            (1, "WAIT ERROR :done"),
         ];
         let sinks = vec![FrameSink::new(ConnectionGeneration::new(1), true)];
         let (exit, (_open, sinks, outcomes, stopped)) =
