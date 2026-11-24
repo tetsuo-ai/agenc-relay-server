@@ -863,7 +863,7 @@ impl E2eeEdge {
             direct
                 .ok_or(E2eeReplyCode::InvalidFragment)?
                 .iter()
-                .filter_map(|sink| sink.recipient(self, context))
+                .filter_map(|sink| sink.recipient(self, edge, context))
                 .collect()
         } else {
             self.recipients(context, edge, conversation)
@@ -1168,7 +1168,7 @@ impl E2eeEdge {
                 self.acknowledge_applied(context, edge, position);
                 outputs.extend(rendered);
                 if let Some(proof) = direct {
-                    outputs.retain(|output| proof.permits(output, self, context));
+                    outputs.retain(|output| proof.permits(output, self, edge, context));
                 }
             }
             Some(PendingCommit::SnapshotPage { cursor }) => {

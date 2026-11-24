@@ -7,11 +7,15 @@ use super::router::{Refusal, RequestSource, Resolved, settled};
 use super::{ClientOutput, E2eeEdge, LocalOrigin, ResultValue};
 use crate::budget::MemoryPermit;
 use crate::connection::ConnectionGeneration;
-use crate::federation::edge::EdgeFederation;
+use crate::federation::edge::{BaseOriginFacts, EdgeFederation};
 use crate::state_core::StateCoreContext;
 use agenc_relay_e2ee::wire::command::{ClientCommand, EkeyCommand};
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 use agenc_relay_types::UserId;
+
+#[cfg(test)]
+#[path = "tests/direct_delivery.rs"]
+mod tests;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct Sink {
@@ -21,46 +25,92 @@ pub(super) struct Sink {
     user: UserId,
     account: [u8; 24],
     attachment: ([u8; 16], u64),
-    verified: bool,
+    // None until this event's probe is answered or the captured endpoint is gone.
+    verified: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OriginStatus {
+    Gone,
+    AwaitingAck,
+    Ready,
 }
 
 impl Sink {
-    fn capture(connection: ConnectionGeneration, origin: &LocalOrigin) -> Option<Self> {
-        if !settled(origin) {
+    fn capture(
+        connection: ConnectionGeneration,
+        origin: &LocalOrigin,
+        base: &BaseOriginFacts,
+    ) -> Option<Self> {
+        let user = origin.user_id?;
+        let account = origin.account?;
+        let attachment = origin.device?;
+        if origin.origin_id != base.origin_id
+            || base.session.map(|(_, user)| user) != Some(*user.as_bytes())
+            || base.account.map(|(account, _)| account) != Some(account)
+            || origin.device_principal != Some((Some(user), Some(account)))
+        {
             return None;
         }
+        // Before the base ACK, its held generation can still describe the
+        // previous device. The first new declaration can carry this device.
+        let origin_generation = match origin.predates_device {
+            Some(previous) if previous >= base.generation => previous.checked_add(1)?,
+            _ => base.generation,
+        };
         Some(Self {
             connection,
             origin_id: origin.origin_id,
-            origin_generation: origin.acked?,
-            user: origin.user_id?,
-            account: origin.account?,
-            attachment: origin.device?,
-            verified: false,
+            origin_generation,
+            user,
+            account,
+            attachment,
+            verified: None,
         })
     }
 
-    fn still_bound(&self, router: &E2eeEdge, context: &StateCoreContext) -> bool {
-        context.sessions().generation_for_user(self.user) == Some(self.connection)
-            && router
-                .origins
-                .get(&self.connection)
-                .and_then(|origin| Self::capture(self.connection, origin))
-                .is_some_and(|current| {
-                    current
-                        == Self {
-                            verified: false,
-                            ..*self
-                        }
-                })
+    fn status(
+        &self,
+        router: &E2eeEdge,
+        edge: &EdgeFederation,
+        context: &StateCoreContext,
+    ) -> OriginStatus {
+        if context.sessions().generation_for_user(self.user) != Some(self.connection) {
+            return OriginStatus::Gone;
+        }
+        let Some(origin) = router.origins.get(&self.connection) else {
+            return OriginStatus::Gone;
+        };
+        let Some(base) = edge.origin_facts(self.connection) else {
+            return OriginStatus::Gone;
+        };
+        self.origin_status(origin, &base)
+    }
+
+    fn origin_status(&self, origin: &LocalOrigin, base: &BaseOriginFacts) -> OriginStatus {
+        if Self::capture(self.connection, origin, base)
+            != Some(Self {
+                verified: None,
+                ..*self
+            })
+        {
+            return OriginStatus::Gone;
+        }
+        if settled(origin) && origin.acked == Some(self.origin_generation) {
+            OriginStatus::Ready
+        } else {
+            OriginStatus::AwaitingAck
+        }
     }
 
     pub(super) fn recipient(
         &self,
         router: &E2eeEdge,
+        edge: &EdgeFederation,
         context: &StateCoreContext,
     ) -> Option<(ConnectionGeneration, UserId)> {
-        (self.verified && self.still_bound(router, context)).then_some((self.connection, self.user))
+        (self.verified == Some(true) && self.status(router, edge, context) == OriginStatus::Ready)
+            .then_some((self.connection, self.user))
     }
 }
 
@@ -74,13 +124,14 @@ impl VerifiedSinks {
         &self,
         output: &ClientOutput,
         router: &E2eeEdge,
+        edge: &EdgeFederation,
         context: &StateCoreContext,
     ) -> bool {
         self.sinks
             .binary_search_by_key(&output.generation, |sink| sink.connection)
             .ok()
             .and_then(|index| self.sinks.get(index))
-            .and_then(|sink| sink.recipient(router, context))
+            .and_then(|sink| sink.recipient(router, edge, context))
             .is_some()
     }
 }
@@ -90,8 +141,14 @@ pub(super) struct Delivery {
     payload: Option<Vec<u8>>,
     sinks: Vec<Sink>,
     index: usize,
-    awaiting: Option<[u8; 16]>,
+    awaiting: Option<([u8; 16], usize)>,
     _backing: MemoryPermit,
+}
+
+enum NextSink {
+    Probe(usize, ConnectionGeneration, [u8; 24]),
+    AwaitingAck,
+    Complete,
 }
 
 impl Delivery {
@@ -99,26 +156,52 @@ impl Delivery {
         self.open.position.delivery_sequence
     }
 
-    fn observe(&mut self, id: [u8; 16], value: &ResultValue) -> Result<(), Refusal> {
-        if self.awaiting != Some(id) {
-            return Ok(());
+    /// Visit each unchecked endpoint once per pass. A pending declaration
+    /// cannot prevent another ready endpoint from issuing WHOAMI. The vector
+    /// stays in connection order for the commit's publication check.
+    fn next_sink(
+        &mut self,
+        router: &E2eeEdge,
+        edge: &EdgeFederation,
+        context: &StateCoreContext,
+    ) -> Result<NextSink, Refusal> {
+        let count = self.sinks.len();
+        let mut next = NextSink::Complete;
+        for _ in 0..count {
+            let index = self.index;
+            self.index = if index + 1 == count { 0 } else { index + 1 };
+            let sink = self.sinks.get_mut(index).ok_or(E2eeReplyCode::Syncing)?;
+            if sink.verified.is_some() {
+                continue;
+            }
+            match sink.status(router, edge, context) {
+                OriginStatus::Gone => sink.verified = Some(false),
+                OriginStatus::AwaitingAck => next = NextSink::AwaitingAck,
+                OriginStatus::Ready => {
+                    return Ok(NextSink::Probe(index, sink.connection, sink.account));
+                }
+            }
         }
-        let sink = self
-            .sinks
-            .get_mut(self.index)
-            .ok_or(E2eeReplyCode::Syncing)?;
-        match value {
+        Ok(next)
+    }
+
+    fn observe(&mut self, id: [u8; 16], value: &ResultValue) -> Result<(), Refusal> {
+        let Some((_, index)) = self.awaiting.filter(|(request, _)| *request == id) else {
+            return Ok(());
+        };
+        let sink = self.sinks.get_mut(index).ok_or(E2eeReplyCode::Syncing)?;
+        sink.verified = Some(match value {
             ResultValue::Account(account, generation) => {
-                sink.verified = *account == sink.account
-                    && *generation == sink.attachment.1
-                    && *generation != 0;
+                *account == sink.account && *generation == sink.attachment.1 && *generation != 0
             }
             ResultValue::Failed { code, .. }
                 if code == E2eeReplyCode::AccountRequired.token()
-                    || code == E2eeReplyCode::DeviceRequired.token() => {}
+                    || code == E2eeReplyCode::DeviceRequired.token() =>
+            {
+                false
+            }
             _ => return Err(E2eeReplyCode::Syncing.into()),
-        }
-        self.index += 1;
+        });
         self.awaiting = None;
         Ok(())
     }
@@ -145,7 +228,7 @@ impl E2eeEdge {
                 if account != accounts.0 && account != accounts.1 {
                     return None;
                 }
-                Sink::capture(*id, origin)
+                Sink::capture(*id, origin, &edge.origin_facts(*id)?)
             })
         };
         let count = eligible().count();
@@ -210,23 +293,26 @@ impl E2eeEdge {
         let Some(mut delivery) = self.direct_delivery.take() else {
             return Ok(Vec::new());
         };
-        while let Some(sink) = delivery.sinks.get(delivery.index) {
-            if !sink.still_bound(self, context) {
-                delivery.index += 1;
-                continue;
+        match delivery.next_sink(self, edge, context)? {
+            NextSink::Probe(index, connection, account) => {
+                let id = self.send_request(
+                    context,
+                    edge,
+                    connection,
+                    account,
+                    RequestSource::Attachment,
+                    Resolved::Command(ClientCommand::Ekey(EkeyCommand::Whoami)),
+                    None,
+                )?;
+                delivery.awaiting = Some((id, index));
+                self.direct_delivery = Some(delivery);
+                return Ok(Vec::new());
             }
-            let id = self.send_request(
-                context,
-                edge,
-                sink.connection,
-                sink.account,
-                RequestSource::Attachment,
-                Resolved::Command(ClientCommand::Ekey(EkeyCommand::Whoami)),
-                None,
-            )?;
-            delivery.awaiting = Some(id);
-            self.direct_delivery = Some(delivery);
-            return Ok(Vec::new());
+            NextSink::AwaitingAck => {
+                self.direct_delivery = Some(delivery);
+                return Ok(Vec::new());
+            }
+            NextSink::Complete => {}
         }
         self.project_ordinary(
             context,

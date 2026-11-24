@@ -117,8 +117,8 @@ pub(crate) struct LocalOrigin {
     pub(crate) declared: Option<u64>,
     /// The generation the coordinator acknowledged.
     pub(crate) acked: Option<u64>,
-    /// The acknowledged generation whose declaration predates the attached
-    /// device; requests wait until a later generation is acknowledged.
+    /// The last declared generation that predates the attached device.
+    /// Requests wait until a later declaration is acknowledged.
     pub(crate) predates_device: Option<u64>,
     /// The next companion operation sequence.
     pub(crate) next_sequence: u64,

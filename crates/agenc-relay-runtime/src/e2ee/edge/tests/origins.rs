@@ -154,6 +154,61 @@ async fn reconnect_replays_the_exact_companion_origin_declaration() -> TestResul
 }
 
 #[tokio::test]
+async fn replacing_a_device_while_the_previous_declaration_is_in_flight_waits_for_its_own_ack()
+-> TestResult {
+    let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
+    let (mut base, mut queue) = transport(fixture.context_mut()?);
+    let mut edge = companion();
+    let connection = ConnectionGeneration::new(1);
+    base.connection_opened(fixture.context_mut()?, connection);
+    let authenticated = |generation| BaseOriginFacts {
+        session: Some(([20; 16], [21; 16])),
+        account: Some(([b'a'; 24], 1)),
+        ..facts(generation)
+    };
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        connection,
+        &authenticated(0),
+        0,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let _initial = next_declaration(&mut queue).await?;
+    edge.acknowledge_origin([9; 16], 0);
+    edge.device_attached(fixture.context_mut()?, &mut base, connection, [12; 16], 1);
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        connection,
+        &authenticated(1),
+        1,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let _first_device = next_declaration(&mut queue).await?;
+    // A different device can have the same per-device session generation.
+    edge.device_attached(fixture.context_mut()?, &mut base, connection, [13; 16], 1);
+    edge.acknowledge_origin([9; 16], 1);
+    let current = edge.origins.get(&connection).ok_or("origin")?;
+    assert_eq!(current.predates_device, Some(1));
+    assert!(!super::super::router::settled(current));
+    edge.declare_origin(
+        fixture.context_mut()?,
+        &mut base,
+        connection,
+        &authenticated(2),
+        2,
+    )
+    .map_err(|error| error.code.to_string())?;
+    let _second_device = next_declaration(&mut queue).await?;
+    edge.acknowledge_origin([9; 16], 2);
+    assert!(super::super::router::settled(
+        edge.origins.get(&connection).ok_or("origin")?
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn requests_wait_for_the_declaration_that_carries_a_new_attachment() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
     let (mut base, mut queue) = transport(fixture.context_mut()?);
