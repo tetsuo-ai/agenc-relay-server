@@ -57,6 +57,7 @@ const BACKUP_RECORD_LENGTH_PREFIX_BYTES: u64 = 8;
 /// Bounded state reconstructed before the storage owner accepts requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecoveredStorageState {
+    pub(crate) companion_disk_bytes: u64,
     table_record_counts: [u64; 27],
     state_generation: u64,
     account_service_response_count: u64,
@@ -919,6 +920,7 @@ struct TrackedStateReconstruction {
 }
 
 pub(crate) struct StorageEngine {
+    pub(crate) companion_disk: Option<crate::CompanionDisk>,
     store: RedbStore,
     state_directory: EngineStateDirectory,
     master_key: StorageMasterKey,
@@ -1137,6 +1139,7 @@ impl StorageEngine {
         let store = config.state_directory.open_store(limits.redb_cache_bytes)?;
         let authenticated = authenticate_open_state(&config, &store, limits)?;
         let engine = Self {
+            companion_disk: None,
             store,
             state_directory: config.state_directory,
             master_key: config.storage_master_key,
@@ -1623,11 +1626,23 @@ impl StorageEngine {
     }
 
     pub(crate) fn commit(&mut self, batch: StorageMutationBatch) -> CommitOutcome {
+        let accounting = match self
+            .companion_disk
+            .as_ref()
+            .map(|disk| disk.stage(batch.mutations()))
+            .transpose()
+        {
+            Ok(pending) => pending,
+            Err(error) => return CommitOutcome::Rejected(error),
+        };
         let outcome = match self.commit_inner(&batch) {
             Ok(receipt) => CommitOutcome::Committed(receipt),
             Err(EngineCommitFailure::Rejected(error)) => CommitOutcome::Rejected(error),
             Err(EngineCommitFailure::Indeterminate) => CommitOutcome::Indeterminate,
         };
+        if let Some(pending) = accounting {
+            pending.finish(&outcome);
+        }
         if matches!(outcome, CommitOutcome::Committed(_)) {
             self.publish_runtime_facts();
         }
@@ -2734,6 +2749,7 @@ impl StorageEngine {
         let previous_login_generation = login_key_state.previous();
         let mut previous_login_entries = 0_u64;
         let mut table_record_counts = [0_u64; 27];
+        let mut companion_disk_bytes = 0u64;
         let mut maximum_record_revision = 0_u64;
         let mut history_inventory =
             crate::history_records::HistoryInventory::new(self.limits.database_max_bytes / 4);
@@ -2741,6 +2757,13 @@ impl StorageEngine {
             let table = TableId::from_u16(number)?;
             self.store
                 .visit_table(table, self.limits.database_max_bytes, |key, encoded| {
+                    companion_disk_bytes = companion_disk_bytes
+                        .checked_add(crate::companion_disk::row_charge(
+                            table,
+                            key.len(),
+                            encoded.len(),
+                        )?)
+                        .ok_or(StorageError::Overflow)?;
                     let stored_key = StoredKey::new(key.to_vec())?;
                     let sealed = SealedRecord::decode(encoded)?;
                     let plaintext = sealed.open(
@@ -2909,6 +2932,7 @@ impl StorageEngine {
             .state_directory
             .capacity(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)?;
         Ok(RecoveredStorageState {
+            companion_disk_bytes,
             table_record_counts,
             state_generation: self.state_meta.tbs().state_generation,
             account_service_response_count: self.state_meta.tbs().account_service_response_count,

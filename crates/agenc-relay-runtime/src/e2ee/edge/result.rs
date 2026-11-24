@@ -233,7 +233,7 @@ impl E2eeEdge {
             return Ok(Vec::new());
         }
         let Some(bytes) =
-            self.assemble_response(&correlation, object_id, index.is_none(), &fragment, context)?
+            self.assemble_response(&correlation, object_id, index, &fragment, context)?
         else {
             return Ok(Vec::new());
         };
@@ -245,20 +245,39 @@ impl E2eeEdge {
         &mut self,
         correlation: &Correlation,
         object_id: [u8; 32],
-        result: bool,
+        index: Option<u16>,
         fragment: &FragmentTag,
         context: &StateCoreContext,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
-        // A response object is any client-visible kind; its ceiling is the
-        // largest one (the Welcome mailbox object) until it decodes.
-        let command = if result {
-            CarrierCommand::Federation(ArcWireObjectKind::FederationResult)
-        } else {
-            CarrierCommand::Response(ArcWireObjectKind::WelcomeMls)
+    ) -> Result<Option<super::super::spool::CompanionBytes>, Refusal> {
+        let pending = self
+            .pending
+            .get(&correlation.request_id)
+            .ok_or(E2eeReplyCode::InvalidFragment)?;
+        let descriptor = match (index, &pending.result) {
+            (Some(index), Some(result)) => Some(
+                result
+                    .descriptors
+                    .get(usize::from(index))
+                    .filter(|d| {
+                        d.response_index == index
+                            && d.object_id == object_id
+                            && d.total_size == fragment.total
+                    })
+                    .ok_or(E2eeReplyCode::InvalidFragment)?,
+            ),
+            _ => None,
+        };
+        let command = match (index, descriptor) {
+            (None, _) => CarrierCommand::Federation(ArcWireObjectKind::FederationResult),
+            (Some(_), Some(d)) => CarrierCommand::Response(d.wire_kind),
+            (Some(_), None) => CarrierCommand::Response(ArcWireObjectKind::WelcomeMls),
         };
         let mut route = [0; 32];
         if let Some(head) = route.get_mut(..16) {
             head.copy_from_slice(&correlation.request_id);
+        }
+        if let (Some(index), Some(scope)) = (index, route.get_mut(16..18)) {
+            scope.copy_from_slice(&index.to_be_bytes());
         }
         let key = AssemblyKey {
             direction: Direction::Response,
@@ -268,16 +287,46 @@ impl E2eeEdge {
             scope: None,
             object_id: agenc_relay_e2ee::ObjectId::from_bytes(object_id),
         };
+        let account =
+            agenc_relay_e2ee::ids::account_id_digest(&self.config.network_id, &pending.account)
+                .map_err(|_| E2eeReplyCode::InvalidFragment)?;
         let scopes = QuotaScopes {
+            connection: None,
+            account: Some(account),
+            route: Some(pending.command.route_key()),
             peer: Some(*self.config.coordinator_server_id.as_bytes()),
-            ..QuotaScopes::default()
         };
         let now = context.now().get() / 1_000;
-        match self
-            .assembler
-            .ingest(key, scopes, command.limit(), fragment, now)
-        {
-            Ok(Ingest::Complete(bytes)) => Ok(Some(bytes)),
+        let result = if let Some(spool) = &self.spool {
+            let admission = super::super::spool::Admission {
+                key,
+                carrier: command,
+                scopes,
+                authenticated_spool: descriptor.is_some() && self.ingress_link.is_some(),
+            };
+            spool.ingest(
+                &mut self.assembler,
+                admission,
+                fragment,
+                now,
+                self.ingress_link.clone(),
+            )
+        } else {
+            self.assembler.ingest_backed(
+                key,
+                scopes,
+                command.limit(),
+                fragment,
+                now,
+                agenc_relay_e2ee::wire::assembly::AssemblyBacking::Memory(&|bytes| {
+                    Ok(Box::new(context.reserve_output_backing(bytes).map_err(
+                        |_| agenc_relay_e2ee::wire::assembly::AssemblyError::ReassemblyLimit,
+                    )?))
+                }),
+            )
+        };
+        match result {
+            Ok(Ingest::Complete(bytes)) => Ok(Some(bytes.into())),
             Ok(Ingest::Incomplete | Ingest::Duplicate | Ingest::Recent) => Ok(None),
             Err(error) => Err(error.reply_code().into()),
         }
@@ -287,8 +336,9 @@ impl E2eeEdge {
         &mut self,
         correlation: &Correlation,
         index: Option<u16>,
-        bytes: Vec<u8>,
+        bytes: impl Into<super::super::spool::CompanionBytes>,
     ) -> Result<(), Refusal> {
+        let bytes = bytes.into();
         let pending = self
             .pending
             .get_mut(&correlation.request_id)

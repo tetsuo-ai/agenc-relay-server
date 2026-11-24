@@ -1294,6 +1294,7 @@ fn direct_route_state(conversation: [u8; 32], pair: ([u8; 24], [u8; 24])) -> Tes
 /// A local companion origin authenticated as `held`, attached or not.
 fn hosting_origin(held: [u8; 24], attached: bool) -> LocalOrigin {
     LocalOrigin {
+        ingress: crate::federation::link::ingress_budget(),
         origin_id: [5; 16],
         declared: Some(1),
         acked: Some(1),

@@ -155,11 +155,15 @@ impl Exec<'_> {
     }
 
     /// The payload object, required.
-    pub fn payload(&self) -> Result<(&agenc_relay_e2ee::object::ArcWireObject, &[u8]), Fail> {
-        match (&self.decoded.payload, &self.decoded.payload_bytes) {
-            (Some(object), Some(bytes)) => Ok((object, bytes)),
-            _ => Err(E2eeReplyCode::InvalidFragment.into()),
-        }
+    pub fn payload(&self) -> Result<(agenc_relay_e2ee::object::ArcWireObjectRef<'_>, &[u8]), Fail> {
+        let bytes = self
+            .decoded
+            .payload
+            .as_ref()
+            .ok_or(E2eeReplyCode::InvalidFragment)?;
+        let object = agenc_relay_e2ee::object::ArcWireObjectRef::parse(bytes)
+            .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+        Ok((object, bytes))
     }
 
     /// Fresh random bytes.

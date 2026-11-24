@@ -8,7 +8,7 @@ use agenc_relay_domain::e2ee::sequencer_log::SequencerLog;
 use agenc_relay_domain::e2ee::{
     BindingSummary, ConversationId, DirectPair, ReservationId, RouteTarget, SemanticLockId,
 };
-use agenc_relay_e2ee::envelope::{RouteExpectation, verify_application_object};
+use agenc_relay_e2ee::envelope::{RouteExpectation, verify_application_view};
 use agenc_relay_e2ee::limits::{
     MAX_ABORT_OBJECT, MAX_APPLICATION_MLS_OBJECT, MAX_BINDING_OBJECT, MAX_CAPABILITY_OBJECT,
     MAX_CLOSE_OBJECT, MAX_COMMIT_ACK_OBJECT, MAX_COMMIT_APPROVAL_OBJECT, MAX_FINALIZATION_OBJECT,
@@ -179,7 +179,7 @@ pub fn application(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         }
     }
     let mut budget = DecodeBudget::new(MAX_APPLICATION_MLS_OBJECT, 4_096);
-    verify_application_object(object, &expectation(exec, conversation_id)?, &mut budget)
+    verify_application_view(object, &expectation(exec, conversation_id)?, &mut budget)
         .map_err(|_| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
     let kind = if channel {
         EventKind::ChannelApplication

@@ -159,6 +159,7 @@ impl E2eeEdge {
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
         let lines = self.origin_lines(facts.origin_id, base_generation, &bytes)?;
         let entry = self.origins.entry(generation).or_insert(LocalOrigin {
+            ingress: crate::federation::link::ingress_budget(),
             origin_id: facts.origin_id,
             declared: None,
             acked: None,

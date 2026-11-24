@@ -73,7 +73,7 @@ pub(super) fn admitted(
     let object = ArcWireObject::decode_kind(bytes, Some(expected), &mut budget)
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
     let (conversation, predecessor) = match kind {
-        MailboxKind::Binding => (binding_conversation(coordinator, &object)?, None),
+        MailboxKind::Binding => (binding_conversation(coordinator, (&object).into())?, None),
         MailboxKind::Application => (application_conversation(coordinator, item, &object)?, None),
         MailboxKind::Welcome | MailboxKind::StagedReinit => {
             welcome_conversations(coordinator, target, item, &object)?
@@ -90,7 +90,7 @@ pub(super) fn admitted(
 
 pub(super) fn binding_conversation(
     coordinator: &CompanionCoordinator,
-    object: &ArcWireObject,
+    object: agenc_relay_e2ee::object::ArcWireObjectRef<'_>,
 ) -> Result<[u8; 32], Fail> {
     let mut budget = DecodeBudget::new(MAX_BINDING_OBJECT, 1 << 20);
     let package = ArcConversationBindingPackage::decode_exact(object.body(), &mut budget)

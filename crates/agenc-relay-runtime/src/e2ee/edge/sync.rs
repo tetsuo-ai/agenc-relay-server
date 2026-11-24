@@ -59,6 +59,7 @@ impl E2eeEdge {
         // A durable witness row no longer refuses the resume itself: the
         // coordinator can only prove the chain over a resumed link, and the
         // blocked phase below admits nothing but EWITNESS (12.5.1).
+        self.ingress_link = edge.companion_ingress_budget();
         let blocked = self.witness_recovery_pending();
         if !blocked && !self.prepare_witness_retry(context, edge) {
             return false;

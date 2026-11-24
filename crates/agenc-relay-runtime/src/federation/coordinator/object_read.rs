@@ -74,7 +74,7 @@ pub(super) fn submit(
         .complete
         .request
         .len()
-        .checked_add(operation.complete.payload.as_ref().map_or(0, Vec::len))
+        .checked_add(operation.complete.payload.as_ref().map_or(0, |p| p.len()))
         .and_then(|n| n.checked_add(65_536))
         .ok_or(Violation::Ceiling)?;
     let metadata = context

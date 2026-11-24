@@ -12,7 +12,7 @@ use agenc_relay_crypto::{SemanticHashDomain, SignatureDomain};
 use agenc_relay_domain::e2ee::projection::{EmptyKind, EventKind, PendingKind, StoreKind};
 use agenc_relay_domain::e2ee::sequencer_log::{CandidateSlot, SequencerLog};
 use agenc_relay_e2ee::E2eeError;
-use agenc_relay_e2ee::envelope::verify_commit_object;
+use agenc_relay_e2ee::envelope::verify_commit_view;
 use agenc_relay_e2ee::finality::{
     QuorumLedger, ReinitVoteSlot, Terminal, VoteSlot, reinit_vote_tbs, vote_tbs,
 };
@@ -499,7 +499,7 @@ pub fn submit_candidate(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, &conversation_id))?;
     let mut budget = DecodeBudget::new(MAX_LIVE_OBJECT, 1 << 16);
     let expectation = super::route::expectation_for(exec, conversation_id)?;
-    let envelope = verify_commit_object(
+    let envelope = verify_commit_view(
         object,
         &expectation,
         log.accepted_state_id(),

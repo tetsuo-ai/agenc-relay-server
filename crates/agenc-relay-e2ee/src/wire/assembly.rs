@@ -9,6 +9,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+#[path = "assembly_backing.rs"]
+mod backing;
+pub use backing::{AssemblyBacking, BackingPermit, ChargedBuffer, FragmentSpool, ReservedObject};
 
 use crate::error::E2eeError;
 use crate::limits::{
@@ -136,8 +141,8 @@ impl Counter {
         self.bytes = self.bytes.saturating_add(total);
     }
 
-    fn release(&mut self, total: usize) {
-        self.open = self.open.saturating_sub(1);
+    fn release(&mut self, total: usize, objects: usize) {
+        self.open = self.open.saturating_sub(objects);
         self.bytes = self.bytes.saturating_sub(total);
     }
 }
@@ -183,7 +188,7 @@ impl Default for QuotaLimits {
 
 /// Reservation ledger over every scope.
 #[derive(Clone, Debug, Default)]
-pub struct QuotaLedger {
+struct Counters {
     limits: QuotaLimits,
     connections: BTreeMap<u64, Counter>,
     accounts: BTreeMap<[u8; 32], Counter>,
@@ -192,18 +197,9 @@ pub struct QuotaLedger {
     global: Counter,
 }
 
-impl QuotaLedger {
-    /// A ledger with the given limits.
-    #[must_use]
-    pub fn new(limits: QuotaLimits) -> Self {
-        Self {
-            limits,
-            ..Self::default()
-        }
-    }
-
+impl Counters {
     /// Whether `total` bytes and one object fit every applicable scope.
-    fn fits(&self, scopes: &QuotaScopes, total: usize) -> bool {
+    fn fits(&self, scopes: &QuotaScopes, total: usize, live_bytes: usize) -> bool {
         let limits = self.limits;
         let check = |counter: Option<&Counter>, limit: (usize, usize)| {
             counter
@@ -212,9 +208,13 @@ impl QuotaLedger {
                 .fits(limit.0, limit.1, total)
         };
         self.global.fits(limits.global.0, limits.global.1, total)
-            && scopes
-                .connection
-                .is_none_or(|id| check(self.connections.get(&id), limits.connection))
+            && scopes.connection.is_none_or(|id| {
+                self.connections.get(&id).copied().unwrap_or_default().fits(
+                    limits.connection.0,
+                    limits.connection.1,
+                    live_bytes,
+                )
+            })
             && scopes
                 .account
                 .is_none_or(|id| check(self.accounts.get(&id), limits.account))
@@ -227,13 +227,18 @@ impl QuotaLedger {
     }
 
     /// Atomically reserves `total` bytes and one object.
-    pub fn reserve(&mut self, scopes: &QuotaScopes, total: usize) -> Result<(), E2eeError> {
-        if !self.fits(scopes, total) {
+    fn reserve(
+        &mut self,
+        scopes: &QuotaScopes,
+        total: usize,
+        live_bytes: usize,
+    ) -> Result<(), E2eeError> {
+        if !self.fits(scopes, total, live_bytes) {
             return Err(E2eeError::LimitExceeded);
         }
         self.global.charge(total);
         if let Some(id) = scopes.connection {
-            self.connections.entry(id).or_default().charge(total);
+            self.connections.entry(id).or_default().charge(live_bytes);
         }
         if let Some(id) = scopes.account {
             self.accounts.entry(id).or_default().charge(total);
@@ -248,33 +253,136 @@ impl QuotaLedger {
     }
 
     /// Releases a reservation.
-    pub fn release(&mut self, scopes: &QuotaScopes, total: usize) {
-        self.global.release(total);
-        release_scope(&mut self.connections, scopes.connection, total);
-        release_scope(&mut self.accounts, scopes.account, total);
-        release_scope(&mut self.routes, scopes.route, total);
-        release_scope(&mut self.peers, scopes.peer, total);
-    }
-
-    /// Reserved bytes across every open assembly.
-    #[must_use]
-    pub const fn reserved_bytes(&self) -> usize {
-        self.global.bytes
-    }
-
-    /// Open assemblies across every scope.
-    #[must_use]
-    pub const fn open_objects(&self) -> usize {
-        self.global.open
+    fn release(&mut self, scopes: &QuotaScopes, total: usize, live_bytes: usize, objects: usize) {
+        self.global.release(total, objects);
+        release_scope(
+            &mut self.connections,
+            scopes.connection,
+            live_bytes,
+            objects,
+        );
+        release_scope(&mut self.accounts, scopes.account, total, objects);
+        release_scope(&mut self.routes, scopes.route, total, objects);
+        release_scope(&mut self.peers, scopes.peer, total, objects);
     }
 }
 
-fn release_scope<K: Ord>(map: &mut BTreeMap<K, Counter>, key: Option<K>, total: usize) {
+/// Reservation ledger over every scope. A completed object can outlive its
+/// assembler and returns its charge directly when its last owner drops it.
+#[derive(Debug, Default)]
+pub struct QuotaLedger {
+    counters: Arc<Mutex<Counters>>,
+}
+
+impl Clone for QuotaLedger {
+    fn clone(&self) -> Self {
+        Self {
+            counters: Arc::new(Mutex::new(self.lock().clone())),
+        }
+    }
+}
+
+impl QuotaLedger {
+    /// A ledger with the given limits.
+    #[must_use]
+    pub fn new(limits: QuotaLimits) -> Self {
+        Self {
+            counters: Arc::new(Mutex::new(Counters {
+                limits,
+                ..Counters::default()
+            })),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Counters> {
+        self.counters.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Atomically reserves one object in memory against all applicable scopes.
+    pub fn reserve(&mut self, scopes: &QuotaScopes, total: usize) -> Result<(), E2eeError> {
+        self.lock().reserve(scopes, total, total)
+    }
+
+    /// Releases a reservation made by [`Self::reserve`].
+    pub fn release(&mut self, scopes: &QuotaScopes, total: usize) {
+        self.lock().release(scopes, total, total, 1);
+    }
+
+    /// Reserved decoded bytes, including completed objects held for dispatch.
+    #[must_use]
+    pub fn reserved_bytes(&self) -> usize {
+        self.lock().global.bytes
+    }
+
+    /// Incomplete assemblies, excluding objects already verified for dispatch.
+    #[must_use]
+    pub fn open_objects(&self) -> usize {
+        self.lock().global.open
+    }
+
+    fn acquire(
+        &self,
+        scopes: QuotaScopes,
+        total: usize,
+        live_bytes: usize,
+    ) -> Result<QuotaReservation, AssemblyError> {
+        self.lock()
+            .reserve(&scopes, total, live_bytes)
+            .map_err(|_| AssemblyError::ReassemblyLimit)?;
+        Ok(QuotaReservation {
+            counters: Arc::clone(&self.counters),
+            scopes,
+            total,
+            live_bytes,
+            open: true,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct QuotaReservation {
+    counters: Arc<Mutex<Counters>>,
+    scopes: QuotaScopes,
+    total: usize,
+    live_bytes: usize,
+    open: bool,
+}
+
+impl QuotaReservation {
+    fn verified(&mut self) {
+        self.counters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .release(&self.scopes, 0, 0, 1);
+        self.open = false;
+    }
+}
+
+impl Drop for QuotaReservation {
+    fn drop(&mut self) {
+        self.counters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .release(
+                &self.scopes,
+                self.total,
+                self.live_bytes,
+                usize::from(self.open),
+            );
+    }
+}
+
+fn release_scope<K: Ord>(
+    map: &mut BTreeMap<K, Counter>,
+    key: Option<K>,
+    total: usize,
+    objects: usize,
+) {
     let Some(key) = key else { return };
     let Some(counter) = map.get_mut(&key) else {
         return;
     };
-    counter.release(total);
+    counter.release(total, objects);
     if counter.open == 0 && counter.bytes == 0 {
         map.remove(&key);
     }
@@ -317,20 +425,20 @@ impl std::error::Error for AssemblyError {}
 
 /// The outcome of accepting one fragment.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Ingest {
+pub enum Ingest<T = Vec<u8>> {
     /// More fragments are needed.
     Incomplete,
     /// The complete object bytes, verified against the object identifier.
-    Complete(Vec<u8>),
+    Complete(T),
     /// An identical duplicate of an already held fragment; ignored.
     Duplicate,
     /// The object completed recently; the prior outcome applies.
     Recent,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Assembly {
-    scopes: QuotaScopes,
+    reservation: QuotaReservation,
     /// Whether completion keeps the tuple in the recent-object cache; the
     /// slot is reserved while the assembly is open.
     records: bool,
@@ -338,7 +446,7 @@ struct Assembly {
     total: usize,
     received: Vec<bool>,
     received_count: u32,
-    buffer: Vec<u8>,
+    buffer: backing::Storage,
     started: u64,
     last: u64,
     absolute_seconds: u64,
@@ -354,6 +462,14 @@ impl Assembly {
     fn next_local_part(&self) -> u32 {
         self.received_count
     }
+}
+
+struct OpenFragment<'a> {
+    scopes: QuotaScopes,
+    limit: ObjectLimit,
+    tag: &'a FragmentTag,
+    now: u64,
+    backing: AssemblyBacking<'a>,
 }
 
 /// The reassembler.
@@ -417,11 +533,46 @@ impl E2eeAssembler {
         tag: &FragmentTag,
         now: u64,
     ) -> Result<Ingest, AssemblyError> {
+        match self.ingest_backed(
+            key,
+            scopes,
+            limit,
+            tag,
+            now,
+            AssemblyBacking::Memory(&|_| Ok(Box::new(()))),
+        )? {
+            Ingest::Incomplete => Ok(Ingest::Incomplete),
+            Ingest::Duplicate => Ok(Ingest::Duplicate),
+            Ingest::Recent => Ok(Ingest::Recent),
+            Ingest::Complete(object) => Ok(Ingest::Complete(object.into_unreserved_bytes())),
+        }
+    }
+
+    /// Accepts a fragment with caller-backed storage and transfers all
+    /// reservations to the verified complete object through dispatch.
+    pub fn ingest_backed(
+        &mut self,
+        key: AssemblyKey,
+        scopes: QuotaScopes,
+        limit: ObjectLimit,
+        tag: &FragmentTag,
+        now: u64,
+        backing: AssemblyBacking<'_>,
+    ) -> Result<Ingest<ReservedObject>, AssemblyError> {
         if tag.object_id != key.object_id {
             return Err(AssemblyError::InvalidFragment);
         }
         if !self.open.contains_key(&key)
-            && let Some(answer) = self.admit(&key, scopes, limit, tag, now)?
+            && let Some(answer) = self.admit(
+                &key,
+                OpenFragment {
+                    scopes,
+                    limit,
+                    tag,
+                    now,
+                    backing,
+                },
+            )?
         {
             return Ok(answer);
         }
@@ -443,13 +594,10 @@ impl E2eeAssembler {
     fn admit(
         &mut self,
         key: &AssemblyKey,
-        scopes: QuotaScopes,
-        limit: ObjectLimit,
-        tag: &FragmentTag,
-        now: u64,
-    ) -> Result<Option<Ingest>, AssemblyError> {
+        first: OpenFragment<'_>,
+    ) -> Result<Option<Ingest<ReservedObject>>, AssemblyError> {
         if key.direction == Direction::Response {
-            self.open_assembly(key, scopes, limit, tag, now, false)?;
+            self.open_assembly(key, first, false)?;
             return Ok(None);
         }
         if self.is_recent(key) {
@@ -459,19 +607,23 @@ impl E2eeAssembler {
         if !records && self.ceiling != RecentCeiling::PerSender {
             return Err(AssemblyError::ReassemblyLimit);
         }
-        self.open_assembly(key, scopes, limit, tag, now, records)?;
+        self.open_assembly(key, first, records)?;
         Ok(None)
     }
 
     fn open_assembly(
         &mut self,
         key: &AssemblyKey,
-        scopes: QuotaScopes,
-        limit: ObjectLimit,
-        tag: &FragmentTag,
-        now: u64,
+        first: OpenFragment<'_>,
         records: bool,
     ) -> Result<(), AssemblyError> {
+        let OpenFragment {
+            scopes,
+            limit,
+            tag,
+            now,
+            backing,
+        } = first;
         let total = usize::try_from(tag.total).map_err(|_| AssemblyError::ObjectTooLarge)?;
         if total > limit.max_bytes || tag.count > limit.max_fragments {
             return Err(AssemblyError::ObjectTooLarge);
@@ -482,21 +634,31 @@ impl E2eeAssembler {
         if self.open_for_sender(key) >= sender_ceiling(key.direction) {
             return Err(AssemblyError::ReassemblyLimit);
         }
-        self.quotas
-            .reserve(&scopes, total)
-            .map_err(|_| AssemblyError::ReassemblyLimit)?;
+        // Only a control/mailbox spool can substitute disk for live
+        // connection bytes. Every other scope charges the complete total.
+        let live_bytes = match &backing {
+            AssemblyBacking::Memory(_) => total,
+            AssemblyBacking::Spool(_)
+                if limit.deadline == crate::wire::carrier::DeadlineClass::Mailbox =>
+            {
+                0
+            }
+            AssemblyBacking::Spool(_) => return Err(AssemblyError::InvalidFragment),
+        };
+        let reservation = self.quotas.acquire(scopes, total, live_bytes)?;
+        let buffer = backing.create(total)?;
         let count = usize::try_from(tag.count).map_err(|_| AssemblyError::ObjectTooLarge)?;
         let (absolute_seconds, idle_seconds) = limit.deadline.seconds();
         self.open.insert(
             key.clone(),
             Assembly {
-                scopes,
+                reservation,
                 records,
                 count: tag.count,
                 total,
                 received: vec![false; count],
                 received_count: 0,
-                buffer: vec![0; total],
+                buffer,
                 started: now,
                 last: now,
                 absolute_seconds,
@@ -518,7 +680,7 @@ impl E2eeAssembler {
         key: &AssemblyKey,
         tag: &FragmentTag,
         now: u64,
-    ) -> Result<Ingest, AssemblyError> {
+    ) -> Result<Ingest<ReservedObject>, AssemblyError> {
         let assembly = self
             .open
             .get_mut(key)
@@ -537,7 +699,7 @@ impl E2eeAssembler {
             .filter(|end| *end <= assembly.total)
             .ok_or(AssemblyError::InvalidFragment)?;
         if assembly.received.get(part).copied().unwrap_or(false) {
-            return if assembly.buffer.get(offset..end) == Some(tag.segment.as_slice()) {
+            return if assembly.buffer.matches(offset, end, &tag.segment)? {
                 Ok(Ingest::Duplicate)
             } else {
                 Err(AssemblyError::InvalidFragment)
@@ -546,11 +708,7 @@ impl E2eeAssembler {
         if key.direction == Direction::LocalIngress && tag.part != assembly.next_local_part() {
             return Err(AssemblyError::InvalidFragment);
         }
-        let slot = assembly
-            .buffer
-            .get_mut(offset..end)
-            .ok_or(AssemblyError::InvalidFragment)?;
-        slot.copy_from_slice(&tag.segment);
+        assembly.buffer.write(offset, end, &tag.segment)?;
         if let Some(flag) = assembly.received.get_mut(part) {
             *flag = true;
         }
@@ -584,12 +742,12 @@ impl E2eeAssembler {
         held.saturating_add(reserved) < MAX_RECENT_OBJECTS
     }
 
-    fn finish(&mut self, key: &AssemblyKey) -> Result<Ingest, AssemblyError> {
+    fn finish(&mut self, key: &AssemblyKey) -> Result<Ingest<ReservedObject>, AssemblyError> {
         let Some(assembly) = self.open.remove(key) else {
             return Err(AssemblyError::InvalidFragment);
         };
-        self.quotas.release(&assembly.scopes, assembly.total);
-        if ObjectId::compute(&assembly.buffer) != key.object_id {
+        let mut object = ReservedObject::new(assembly.buffer.finish()?, assembly.reservation);
+        if object.len() != assembly.total || ObjectId::compute(&object) != key.object_id {
             return Err(AssemblyError::HashMismatch);
         }
         let retained_until = assembly
@@ -599,14 +757,13 @@ impl E2eeAssembler {
             let held = self.recent_by_sender.entry(key.sender).or_default();
             *held = held.saturating_add(1);
         }
-        Ok(Ingest::Complete(assembly.buffer))
+        object.verified();
+        Ok(Ingest::Complete(object))
     }
 
     /// Discards one assembly and releases its reservation.
     pub fn discard(&mut self, key: &AssemblyKey) {
-        if let Some(assembly) = self.open.remove(key) {
-            self.quotas.release(&assembly.scopes, assembly.total);
-        }
+        self.open.remove(key);
     }
 
     /// Discards every assembly of `sender` (detach, logout, disconnect).

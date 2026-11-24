@@ -26,7 +26,7 @@ use tokio::task::JoinSet;
 use super::certificate::{server_id_from_certificate, verify_peer_certificate};
 use super::dial::{DialPlan, dial, reconnect_delay};
 use super::hello::{HELLO_DEADLINE, PeerHistory, exchange_hello};
-use super::link::{FrameReader, LinkContext, LinkTiming, ingress_budget, link_queue, run_link};
+use super::link::{FrameReader, LinkContext, LinkTiming, link_queue, run_link};
 use super::{
     AcceptedFederationSocket, FederationInbound, LinkCloseReason, LinkEvent, LinkId, LinkSession,
     LocalIdentity, MAX_FEDERATION_PEERS, PeerIdentity,
@@ -464,6 +464,7 @@ where
         transition: outcome.transition,
     };
     let (handle, queue) = link_queue(shared.outbound_bytes);
+    let budget = Arc::clone(&handle.ingress);
     let established = shared
         .inbound
         .send(FederationInbound {
@@ -484,7 +485,7 @@ where
             peer: peer.server_id(),
             local_name: shared.local.server_name().to_owned(),
             inbound: shared.inbound.clone(),
-            budget: ingress_budget(),
+            budget,
             observer: shared.observer.clone(),
             token,
             timing: shared.timing,

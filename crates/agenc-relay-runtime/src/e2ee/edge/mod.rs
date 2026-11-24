@@ -110,6 +110,7 @@ pub enum Phase {
 /// The companion origin of one local connection.
 #[derive(Clone, Debug)]
 pub(crate) struct LocalOrigin {
+    ingress: std::sync::Arc<tokio::sync::Semaphore>,
     /// The base origin identity.
     pub(crate) origin_id: [u8; 16],
     /// The base generation the last declaration mirrored.
@@ -171,7 +172,7 @@ pub(crate) struct PendingRequest {
     pub(crate) result: Option<DecodedResult>,
     /// Exact result envelope identity, retained to reject conflicting duplicates.
     pub(super) result_object_id: Option<[u8; 32]>,
-    pub(crate) responses: BTreeMap<u16, Vec<u8>>,
+    pub(crate) responses: BTreeMap<u16, super::spool::CompanionBytes>,
     pub(crate) completion_seen: bool,
     pub(crate) rendered: bool,
 }
@@ -226,6 +227,8 @@ type BarrierParts = BTreeMap<u16, (events::OpenEvent, Option<Vec<u8>>)>;
 
 /// The edge E2EE router.
 pub struct E2eeEdge {
+    pub(crate) spool: Option<super::spool::SpoolResources>,
+    ingress_link: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     projection_before: Option<projection::ProjectionBefore>,
     barrier_completions: Vec<completion::PreparedCompletion>,
     replies: retry::Replies,
@@ -349,6 +352,8 @@ impl E2eeEdge {
             // Each connection holds its own share of the recent-object
             // cache: one connection past it never refuses another's
             // submissions (companion 16).
+            spool: None,
+            ingress_link: None,
             assembler: E2eeAssembler::with_ceiling(
                 QuotaLimits::default(),
                 RecentCeiling::PerSenderRefused,
@@ -403,6 +408,7 @@ impl E2eeEdge {
     /// Whether the companion link and every retained assembly of a closed
     /// link are gone.
     pub fn link_down(&mut self) {
+        self.ingress_link = None;
         self.barrier_completions.clear();
         self.phase = Phase::Down;
         // The next link carries every object again from its first fragment.

@@ -152,7 +152,7 @@ pub(super) fn submit_recovery(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 }
 
 fn decode_submission(
-    object: &agenc_relay_e2ee::object::ArcWireObject,
+    object: agenc_relay_e2ee::object::ArcWireObjectRef<'_>,
     conversation_id: &[u8; 32],
 ) -> Result<ArcRecoverySubmission, Fail> {
     let malformed = || fail(E2eeReplyCode::InvalidFragment, conversation_id);

@@ -577,7 +577,7 @@ impl Fixture {
         complete.request =
             ArcWireObject::new(ArcWireObjectKind::FederationRequest, request.encode()?)?
                 .encode()?;
-        complete.payload = Some(payload.to_vec());
+        complete.payload = Some(payload.to_vec().into());
         Ok(complete)
     }
 

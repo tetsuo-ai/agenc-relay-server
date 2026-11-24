@@ -203,6 +203,8 @@ pub struct Snapshot {
 /// The synchronization state of one edge.
 #[derive(Default)]
 pub struct PeerSync {
+    /// Shared with the authenticated link reader and its base decoder.
+    pub(crate) ingress: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     /// The authenticated connection allowed to publish this process's replies.
     pub link: Option<LinkId>,
     /// The incarnation this scope belongs to.

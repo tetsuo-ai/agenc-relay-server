@@ -77,7 +77,7 @@ pub struct CommitEnvelope {
 }
 
 fn private_message(
-    object: &ArcWireObject,
+    object: crate::object::ArcWireObjectRef<'_>,
     kind: ArcWireObjectKind,
     content_type: MlsContentType,
     expected: &RouteExpectation,
@@ -98,6 +98,15 @@ fn private_message(
 /// Validates an `application_mls` object against its route.
 pub fn verify_application_object(
     object: &ArcWireObject,
+    expected: &RouteExpectation,
+    budget: &mut DecodeBudget,
+) -> Result<ApplicationEnvelope, E2eeError> {
+    verify_application_view(object.into(), expected, budget)
+}
+
+/// Verifies the same route and AAD against a borrowed, validated wire envelope.
+pub fn verify_application_view(
+    object: crate::object::ArcWireObjectRef<'_>,
     expected: &RouteExpectation,
     budget: &mut DecodeBudget,
 ) -> Result<ApplicationEnvelope, E2eeError> {
@@ -124,6 +133,23 @@ pub fn verify_application_object(
 /// not step the validation time backwards.
 pub fn verify_commit_object(
     object: &ArcWireObject,
+    expected: &RouteExpectation,
+    accepted_state_id: &SemanticId,
+    last_validation_time: u64,
+    budget: &mut DecodeBudget,
+) -> Result<CommitEnvelope, E2eeError> {
+    verify_commit_view(
+        object.into(),
+        expected,
+        accepted_state_id,
+        last_validation_time,
+        budget,
+    )
+}
+
+/// Verifies the same route and AAD against a borrowed, validated wire envelope.
+pub fn verify_commit_view(
+    object: crate::object::ArcWireObjectRef<'_>,
     expected: &RouteExpectation,
     accepted_state_id: &SemanticId,
     last_validation_time: u64,

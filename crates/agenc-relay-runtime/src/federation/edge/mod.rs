@@ -570,6 +570,14 @@ impl EdgeFederation {
     }
 
     /// Exact transport identity for companion receipt publication ownership.
+    pub(crate) fn companion_ingress_budget(
+        &self,
+    ) -> Option<std::sync::Arc<tokio::sync::Semaphore>> {
+        self.live
+            .as_ref()
+            .map(|live| std::sync::Arc::clone(&live.handle.ingress))
+    }
+
     pub(crate) fn current_companion_link_id(&self) -> Option<LinkId> {
         self.live.as_ref().map(|live| live.link)
     }

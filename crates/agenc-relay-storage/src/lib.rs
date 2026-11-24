@@ -5,6 +5,7 @@
 mod backup;
 mod bounded;
 mod codec;
+mod companion_disk;
 mod construction;
 mod construction_directory;
 mod construction_runtime;
@@ -42,6 +43,7 @@ pub use backup::{
     verify_backup,
 };
 pub use bounded::{LIVE_DATABASE_REGION_BYTES, guard_replacement_charge};
+pub use companion_disk::{CompanionDisk, ExtentReservation};
 pub use construction::{
     MAX_CONSTRUCTION_PLAN_BYTES, STORAGE_CONSTRUCTION_KEY, StorageConstruction,
     StorageConstructionAction, StorageConstructionCursor, StorageConstructionKind,
@@ -123,8 +125,9 @@ pub use owner::{
     StorageShutdown,
 };
 pub use platform::{
-    BackupDestination, BackupDirectoryReader, BackupOutput, FilesystemCapacity, FilesystemTuple,
-    InspectionStateDirectory, StateDirectory, StorageQualification, rename_path_no_replace,
+    BackupDestination, BackupDirectoryReader, BackupOutput, CompanionSpoolDirectory,
+    FilesystemCapacity, FilesystemTuple, InspectionStateDirectory, StateDirectory,
+    StorageQualification, rename_path_no_replace,
 };
 pub use qualification::{
     MAX_GROWTH_SAMPLES, MAX_QUALIFICATION_CASES, MAX_QUALIFICATION_REPORT_BYTES,

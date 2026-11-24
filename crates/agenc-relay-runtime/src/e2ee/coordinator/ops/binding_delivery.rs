@@ -4,7 +4,7 @@
 
 use agenc_relay_e2ee::ObjectId;
 use agenc_relay_e2ee::limits::MAX_BINDING_OBJECT;
-use agenc_relay_e2ee::object::ArcWireObject;
+use agenc_relay_e2ee::object::ArcWireObjectRef;
 use agenc_relay_e2ee::objects::conversation::ArcConversationBindingPackage;
 use agenc_relay_e2ee::route::verify_binding_package;
 use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode};
@@ -15,7 +15,7 @@ use super::{Exec, Fail, route};
 pub(super) fn admit(
     exec: &Exec<'_>,
     conversation: &[u8; 32],
-    object: &ArcWireObject,
+    object: ArcWireObjectRef<'_>,
     bytes: &[u8],
 ) -> Result<(), Fail> {
     let account = exec.account_id()?;

@@ -80,7 +80,7 @@ fn a_payload_must_hash_to_the_identifier_the_request_declares() -> TestResult {
     let conversation = harness.bind_channel()?;
     let policy = wire(ArcWireObjectKind::Policy, &harness.operational_policy)?;
     let mut complete = harness.request(Op::SubmitPolicy, &conversation, Some(&policy))?;
-    complete.payload = Some(vec![1, 2, 3]);
+    complete.payload = Some(vec![1, 2, 3].into());
     assert_eq!(
         request::decode(&harness.coordinator, &complete).err(),
         Some(E2eeReplyCode::HashMismatch)

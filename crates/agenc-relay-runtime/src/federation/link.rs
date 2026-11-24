@@ -304,6 +304,7 @@ impl std::error::Error for SendRefusal {}
 /// The state owner's handle to one link's writer queue.
 #[derive(Clone)]
 pub struct LinkHandle {
+    pub(crate) ingress: Arc<Semaphore>,
     sender: mpsc::Sender<LinkOutbound>,
     queued_bytes: Arc<AtomicU64>,
     capacity_bytes: u64,
@@ -399,6 +400,7 @@ pub fn link_queue(capacity_bytes: u64) -> (LinkHandle, LinkQueue) {
     let closed = Arc::new(std::sync::Mutex::new(false));
     (
         LinkHandle {
+            ingress: ingress_budget(),
             sender,
             queued_bytes: Arc::clone(&queued_bytes),
             capacity_bytes,

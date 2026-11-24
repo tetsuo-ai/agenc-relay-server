@@ -205,6 +205,13 @@ pub(super) fn admitted(
     let Some(executor) = coordinator.companion_exec.as_mut() else {
         return Err(Violation::Companion(CompanionViolation::Unsupported));
     };
+    let ingress = coordinator
+        .peers
+        .get(&peer)
+        .and_then(|state| state.live.as_ref())
+        .filter(|live| live.link == link)
+        .map(|live| std::sync::Arc::clone(&live.handle.ingress));
+    executor.set_ingress(peer, ingress);
     let actions = executor
         .on_frame(link, peer, frame, now, &host, context.entropy_mut())
         .map_err(fault_violation)?;

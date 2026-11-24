@@ -195,8 +195,9 @@ fn conflicting_responses_and_result_envelopes_leave_previous_values_intact() -> 
             .get(&REQUEST)
             .ok_or("pending")?
             .responses
-            .get(&0),
-        Some(&bytes)
+            .get(&0)
+            .map(AsRef::as_ref),
+        Some(bytes.as_slice())
     );
 
     let mut edge = waiting();

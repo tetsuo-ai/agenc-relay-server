@@ -7,7 +7,10 @@ use agenc_relay_e2ee::federation::frames::{CompanionFrame, Correlation};
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
 use agenc_relay_e2ee::objects::federation::{ArcFederationOpcode, ArcFederationRequest};
 use agenc_relay_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsEncode, Writer};
-use agenc_relay_e2ee::wire::assembly::{AssemblyKey, Direction, Ingest, QuotaScopes, Sender};
+use agenc_relay_e2ee::wire::assembly::{
+    AssemblyBacking, AssemblyError, AssemblyKey, Direction, Ingest, QuotaScopes, ReservedObject,
+    Sender,
+};
 use agenc_relay_e2ee::wire::carrier::CarrierCommand;
 use agenc_relay_e2ee::wire::command::{
     ClientCommand, EgroupCommand, EkeyCommand, MailboxKind, SubmitKind, parse_command,
@@ -85,6 +88,10 @@ impl Resolved {
                     conversation_id, ..
                 },
             )) => *conversation_id,
+            Self::Command(ClientCommand::Ekey(EkeyCommand::DeliverWelcome {
+                conversation_id,
+                ..
+            })) => *conversation_id,
             _ => [0; 32],
         }
     }
@@ -388,7 +395,7 @@ impl E2eeEdge {
         carrier: CarrierCommand,
         tag: &FragmentTag,
         context: &StateCoreContext,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
+    ) -> Result<Option<ReservedObject>, Refusal> {
         let session_generation = self
             .origins
             .get(&generation)
@@ -419,10 +426,43 @@ impl E2eeEdge {
             peer: None,
         };
         let now = context.now().get() / 1_000;
-        match self
-            .assembler
-            .ingest(key.clone(), scopes, carrier.limit(), tag, now)
-        {
+        let ingestion = if let Some(spool) = &self.spool {
+            let origin = self
+                .origins
+                .get(&generation)
+                .ok_or(E2eeReplyCode::AccountRequired)?;
+            let admission = crate::e2ee::spool::Admission {
+                key: key.clone(),
+                carrier,
+                scopes,
+                authenticated_spool: scopes.account.is_some()
+                    && settled(origin)
+                    && origin.device.is_some(),
+            };
+            spool.ingest(
+                &mut self.assembler,
+                admission,
+                tag,
+                now,
+                Some(std::sync::Arc::clone(&origin.ingress)),
+            )
+        } else {
+            self.assembler.ingest_backed(
+                key.clone(),
+                scopes,
+                carrier.limit(),
+                tag,
+                now,
+                AssemblyBacking::Memory(&|bytes| {
+                    Ok(Box::new(
+                        context
+                            .reserve_output_backing(bytes)
+                            .map_err(|_| AssemblyError::ReassemblyLimit)?,
+                    ))
+                }),
+            )
+        };
+        match ingestion {
             Ok(Ingest::Complete(bytes)) => {
                 self.ingress.remove(&generation);
                 Ok(Some(bytes))
@@ -471,7 +511,7 @@ impl E2eeEdge {
         account: [u8; 24],
         label: Option<String>,
         command: Resolved,
-        payload: Option<Vec<u8>>,
+        payload: Option<ReservedObject>,
     ) -> Result<(), Refusal> {
         // A submission's reply is kept for its retries: its largest size is
         // reserved now, so keeping it never fails (companion 11.8, 16).

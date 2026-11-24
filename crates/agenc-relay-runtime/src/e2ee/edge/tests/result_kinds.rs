@@ -341,7 +341,7 @@ fn only_an_aborted_tuple_names_an_aborted_batch_child() -> TestResult {
     ] {
         let mut edge = edge();
         let mut request = submission(&CASES[1], None)?;
-        request.responses.insert(0, object.clone());
+        request.responses.insert(0, object.clone().into());
         let result = DecodedResult {
             request_object_id: [7; 32],
             kind,

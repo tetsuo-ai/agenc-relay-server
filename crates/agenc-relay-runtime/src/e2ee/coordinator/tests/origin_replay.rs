@@ -144,7 +144,6 @@ fn decoded(generation: u64, sequence: u64) -> TestResult<Decoded> {
         request_object_id: *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes(),
         request,
         payload: None,
-        payload_bytes: None,
     })
 }
 

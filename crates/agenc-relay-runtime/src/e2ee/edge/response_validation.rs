@@ -60,7 +60,7 @@ pub(super) fn response(
     }
     ArcWireObject::peek(bytes).map_err(|_| E2eeReplyCode::InvalidFragment)?;
     if let Some(previous) = pending.responses.get(&index) {
-        return if previous == bytes {
+        return if previous.as_ref() == bytes {
             Ok(false)
         } else {
             Err(E2eeReplyCode::InvalidFragment.into())

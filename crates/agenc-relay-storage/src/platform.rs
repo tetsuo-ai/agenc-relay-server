@@ -115,6 +115,43 @@ pub struct StateDirectory {
     faults: StorageFaultInjector,
 }
 
+/// A duplicate of the qualified state-directory descriptor, restricted to
+/// allocating private unnamed spool files on that filesystem.
+#[derive(Debug)]
+pub struct CompanionSpoolDirectory {
+    directory: File,
+    reserve_bytes: u64,
+    reserve_percent: u8,
+}
+
+impl CompanionSpoolDirectory {
+    /// Allocates an unnamed file on the original qualified directory. The
+    /// kernel closes and unlinks it on cancellation or process death.
+    pub fn allocate(&self, length: u64) -> Result<File, StorageError> {
+        let fd = openat(
+            &self.directory,
+            ".",
+            OFlags::TMPFILE | OFlags::EXCL | OFlags::RDWR | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(rustix_rejected)?;
+        let stats = fstatvfs(&fd).map_err(rustix_rejected)?;
+        let capacity = capacity_from_statistics(&stats, self.reserve_bytes, self.reserve_percent)?;
+        let required = capacity
+            .reserve_bytes
+            .checked_add(MAX_STORAGE_TRANSACTION_PHYSICAL_GROWTH)
+            .and_then(|v| v.checked_add(length))
+            .ok_or(StorageError::Overflow)?;
+        if capacity.available_bytes < required {
+            return Err(StorageError::FilesystemRejected(
+                FilesystemCause::InsufficientCapacity,
+            ));
+        }
+        rustix::fs::fallocate(&fd, rustix::fs::FallocateFlags::empty(), 0, length)
+            .map_err(rustix_rejected)?;
+        Ok(File::from(fd))
+    }
+}
 /// Read-only state-directory authority used by stopped-daemon inspection.
 ///
 /// Opening this authority never creates the writer lock, removes temporary
@@ -440,6 +477,23 @@ impl Drop for BackupOutput {
 }
 
 impl StateDirectory {
+    /// Delegates only an unnamed spool-file allocator. It cannot reopen a
+    /// pathname, list the directory or reach the database writer.
+    pub fn companion_spool_directory(
+        &self,
+        reserve_bytes: u64,
+        reserve_percent: u8,
+    ) -> Result<CompanionSpoolDirectory, StorageError> {
+        if reserve_percent > 100 {
+            return Err(StorageError::InvalidEncoding);
+        }
+        Ok(CompanionSpoolDirectory {
+            directory: self.directory.try_clone().map_err(io_rejected)?,
+            reserve_bytes,
+            reserve_percent,
+        })
+    }
+
     /// Probes the exact filesystem tuple before selecting signed qualification evidence.
     pub fn probe(path: &Path) -> Result<FilesystemTuple, StorageError> {
         let directory_fd = openat(

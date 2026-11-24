@@ -115,6 +115,7 @@ fn account(seed: u8) -> TestResult<[u8; 24]> {
 /// A companion origin authenticated as `account` with an attached device.
 fn attached(account: [u8; 24], seed: u8) -> LocalOrigin {
     LocalOrigin {
+        ingress: crate::federation::link::ingress_budget(),
         origin_id: [seed; 16],
         declared: Some(1),
         acked: Some(1),

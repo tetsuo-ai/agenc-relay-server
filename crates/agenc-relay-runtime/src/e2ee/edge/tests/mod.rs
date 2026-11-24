@@ -238,6 +238,7 @@ fn edge() -> E2eeEdge {
 
 fn origin(origin_id: [u8; 16], declared: u64, sequence: u64) -> LocalOrigin {
     LocalOrigin {
+        ingress: crate::federation::link::ingress_budget(),
         origin_id,
         declared: Some(declared),
         acked: None,

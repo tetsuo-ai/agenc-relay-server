@@ -390,9 +390,60 @@ pub struct Decoded {
     /// The request object identifier.
     pub request_object_id: [u8; 32],
     /// The payload wire object, if any.
-    pub payload: Option<ArcWireObject>,
-    /// The raw payload bytes.
-    pub payload_bytes: Option<Vec<u8>>,
+    pub payload: Option<super::super::spool::CompanionBytes>,
+}
+
+/// Parses the bounded request fields required to grant a large-control
+/// spool. The correlation is the authenticated home link's namespace.
+pub(super) fn large_control(
+    request: &ArcFederationRequest,
+    network: &[u8; 32],
+    correlation: &agenc_relay_e2ee::federation::frames::Correlation,
+) -> Option<(agenc_relay_e2ee::wire::carrier::CarrierCommand, [u8; 32])> {
+    use agenc_relay_e2ee::objects::federation::ArcFederationOpcode as Op;
+    use agenc_relay_e2ee::wire::carrier::CarrierCommand as C;
+    if request.profile_version != agenc_relay_e2ee::limits::PROFILE_VERSION
+        || &request.network_id != network
+        || !agrees(request, correlation)
+    {
+        return None;
+    }
+    let mut budget = DecodeBudget::new(1024, 64);
+    let mut input =
+        agenc_relay_e2ee::tls::Reader::new(request.encoded_parameters.as_slice(), &mut budget);
+    let (carrier, route) = match request.opcode {
+        Op::DeliverWelcome => {
+            super::ops::account(&mut input).ok()?;
+            input.fixed::<16>().ok()?;
+            let route = input.fixed().ok()?;
+            input.fixed::<32>().ok()?;
+            (C::DeliverWelcome, route)
+        }
+        Op::SubmitRecoveryElement => {
+            let route = input.fixed().ok()?;
+            input.fixed::<32>().ok()?;
+            (C::SubmitRecoveryElement, route)
+        }
+        Op::SubmitFinalization => (C::SubmitFinalization, input.fixed().ok()?),
+        Op::SubmitReinitAttempt => (C::SubmitReinitAttempt, input.fixed().ok()?),
+        Op::SubmitReinitActivate => (C::SubmitReinitActivate, input.fixed().ok()?),
+        Op::SubmitReinitAbort => (C::SubmitReinitAbort, input.fixed().ok()?),
+        _ => return None,
+    };
+    input.finish().ok()?;
+    Some((carrier, route))
+}
+
+fn agrees(
+    request: &ArcFederationRequest,
+    correlation: &agenc_relay_e2ee::federation::frames::Correlation,
+) -> bool {
+    request.home_server_id == correlation.peer_server_id_home()
+        && request.server_incarnation == correlation.server_incarnation
+        && request.origin_id == correlation.origin_id
+        && request.origin_generation == correlation.origin_generation
+        && request.operation_sequence == correlation.operation_sequence
+        && request.request_id == correlation.request_id
 }
 
 /// Reads the payload object identifier a request names.
@@ -401,7 +452,7 @@ pub fn payload_object_id(request_bytes: &[u8]) -> Result<Option<[u8; 32]>, E2eeR
     Ok(decoded.payload_object_id.exactly::<32>().ok())
 }
 
-fn decode_request(bytes: &[u8]) -> Result<ArcFederationRequest, E2eeReplyCode> {
+pub(super) fn decode_request(bytes: &[u8]) -> Result<ArcFederationRequest, E2eeReplyCode> {
     let mut budget = DecodeBudget::new(REQUEST_DECODE_BYTES, REQUEST_DECODE_VALUES);
     let object = ArcWireObject::decode_kind(
         bytes,
@@ -424,13 +475,7 @@ pub fn decode(
         return Err(E2eeReplyCode::InvalidFragment);
     }
     let correlation = &complete.correlation;
-    let agrees = request.home_server_id == correlation.peer_server_id_home()
-        && request.server_incarnation == correlation.server_incarnation
-        && request.origin_id == correlation.origin_id
-        && request.origin_generation == correlation.origin_generation
-        && request.operation_sequence == correlation.operation_sequence
-        && request.request_id == correlation.request_id;
-    if !agrees {
+    if !agrees(&request, correlation) {
         return Err(E2eeReplyCode::InvalidFragment);
     }
     let declared = request.payload_object_id.exactly::<32>().ok();
@@ -445,10 +490,7 @@ pub fn decode(
             // request without a decoded payload, and the operation that
             // reads it answers the request with `E2EE_INVALID_FRAGMENT`
             // (`ops::Exec::payload`), as a failed result.
-            let mut budget = DecodeBudget::new(1 << 23, 1 << 16);
-            ArcWireObject::peek(bytes).ok().and_then(|(kind, _)| {
-                ArcWireObject::decode_kind(bytes, Some(kind), &mut budget).ok()
-            })
+            ArcWireObject::peek(bytes).ok().map(|_| bytes.clone())
         }
         _ => return Err(E2eeReplyCode::InvalidFragment),
     };
@@ -456,7 +498,6 @@ pub fn decode(
         request_object_id: *agenc_relay_e2ee::ObjectId::compute(&complete.request).as_bytes(),
         request,
         payload,
-        payload_bytes: complete.payload.clone(),
     })
 }
 

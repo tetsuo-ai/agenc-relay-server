@@ -488,6 +488,10 @@ fn harden_process(config: &Config) -> Result<HardeningOutcome, DaemonError> {
 }
 
 struct LiveStorage {
+    companion_spool: Option<(
+        agenc_relay_storage::CompanionDisk,
+        Arc<agenc_relay_storage::CompanionSpoolDirectory>,
+    )>,
     owner: StorageOwner,
     limit_writer: StorageLimitWriter,
     seed: StateCoreSeed,
@@ -507,7 +511,21 @@ impl LiveStorage {
     ) -> Result<Self, DaemonError> {
         let qualifications = embedded_storage_qualifications()?;
         let state_directory = StateDirectory::open(&config.storage.state_dir, &qualifications)?;
-        let mut owner = StorageOwner::start(storage_open_config(config, secrets, state_directory))?;
+        let companion_spool = if config.e2ee.enabled {
+            Some((
+                agenc_relay_storage::CompanionDisk::new(config.e2ee.global_disk_bytes)?,
+                Arc::new(state_directory.companion_spool_directory(
+                    config.storage.disk_reserve_bytes,
+                    config.storage.disk_reserve_percent,
+                )?),
+            ))
+        } else {
+            None
+        };
+        let mut owner = StorageOwner::start_with_companion_disk(
+            storage_open_config(config, secrets, state_directory),
+            companion_spool.as_ref().map(|(disk, _)| disk.clone()),
+        )?;
         let limit_writer = owner.take_limit_writer()?;
         let seed = StateCoreSeed::from_storage(&owner)?;
         let storage = seed.storage();
@@ -571,6 +589,7 @@ impl LiveStorage {
             &config.storage.backup_trust_manifest_file,
         )?)?;
         Ok(Self {
+            companion_spool,
             owner,
             limit_writer,
             seed,
@@ -685,7 +704,7 @@ fn build_live_state(
         } else {
             router
         };
-        let e2ee = e2ee_setup(
+        let mut e2ee = e2ee_setup(
             config,
             SequencerSecrets {
                 active: secrets.sequencer_private().map(SecretBytes32::expose),
@@ -697,6 +716,17 @@ fn build_live_state(
                     .map(SecretBytes32::expose),
             },
         )?;
+        if let Some(setup) = e2ee.as_mut() {
+            let (disk, directory) = storage
+                .companion_spool
+                .as_ref()
+                .ok_or(DaemonError::UnsupportedProfile)?;
+            setup.spool = Some(crate::e2ee::spool::SpoolResources {
+                directory: Arc::clone(directory),
+                disk: disk.clone(),
+                memory: crate::budget::BackingReservationPort::new(Arc::clone(&budget)),
+            });
+        }
         let mut router = attach_federation_role(config, federation, e2ee, router)?;
         router.restore_edge(
             &storage.owner.port(),
@@ -742,6 +772,7 @@ fn build_live_state(
         }
     };
     let LiveStorage {
+        companion_spool: _,
         owner,
         limit_writer,
         seed: _,
@@ -1306,6 +1337,7 @@ async fn edge_dial_plan(
 /// The companion profile of an encrypted node and, on the coordinator, the
 /// executor with its sequencer installed.
 struct E2eeSetup {
+    spool: Option<crate::e2ee::spool::SpoolResources>,
     profile: CompanionProfile,
     executor: Option<CompanionCoordinator>,
     /// The verified key set the ECAP tuple advertises: an edge authenticates
@@ -1436,6 +1468,7 @@ fn e2ee_setup_with_hook(
         NodeRole::Edge => None,
     };
     Ok(Some(E2eeSetup {
+        spool: None,
         profile,
         executor,
         key_set: negotiated,
@@ -1493,7 +1526,8 @@ fn attach_coordinator_role(
     );
     if let Some(e2ee) = e2ee {
         coordinator.set_companion_profile(Some(e2ee.profile));
-        if let Some(executor) = e2ee.executor {
+        if let Some(mut executor) = e2ee.executor {
+            executor.spool = e2ee.spool;
             coordinator
                 .install_companion_executor(executor, setup.local.incarnation())
                 .map_err(|_| DaemonError::E2eeCredentials)?;
@@ -1527,7 +1561,7 @@ fn attach_edge_role(
         return Ok(router.with_edge(edge));
     };
     edge.set_companion_profile(Some(e2ee.profile));
-    let e2ee_edge = E2eeEdge::new(E2eeEdgeConfig {
+    let mut e2ee_edge = E2eeEdge::new(E2eeEdgeConfig {
         network_id: *config.network.network_id.as_bytes(),
         server_id: config.server.server_id,
         server_name,
@@ -1536,6 +1570,7 @@ fn attach_edge_role(
         incarnation: *setup.local.incarnation().as_bytes(),
         global_disk_bytes: config.e2ee.global_disk_bytes,
     });
+    e2ee_edge.spool = e2ee.spool;
     Ok(router.with_edge(edge).with_e2ee_edge(e2ee_edge)?)
 }
 
