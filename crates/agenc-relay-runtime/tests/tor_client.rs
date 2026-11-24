@@ -259,6 +259,10 @@ async fn profiles_send_only_the_selected_hostname_through_socks() -> TestResult 
     let direct_fixture = TlsFixture::mint([31; 32], "chat.example")?;
     let onion_name = format!("{}.onion", "a".repeat(56));
     let onion_fixture = TlsFixture::mint([36; 32], &onion_name)?;
+    assert_ne!(
+        direct_fixture.ca_certificate_der(),
+        onion_fixture.ca_certificate_der()
+    );
     let descriptor = descriptor(*onion_fixture.leaf_spki_sha256())?;
     let tls = client_tls(&direct_fixture)?;
     let context = TorIsolationContext::network(descriptor.network_id);
@@ -475,6 +479,7 @@ async fn tls_name_pin_and_alpn_failures_end_the_tor_attempt() -> TestResult {
     let onion_name = format!("{}.onion", "a".repeat(56));
     let onion = TlsFixture::mint([35; 32], &onion_name)?;
     let wrong_name = TlsFixture::mint([35; 32], "wrong.example")?;
+    let wrong_ca = TlsFixture::mint([36; 32], "chat.example")?;
     let tls = client_tls(&trusted)?;
     let correct = descriptor(*onion.leaf_spki_sha256())?;
     let wrong_pin = descriptor([0xA5; 32])?;
@@ -483,6 +488,11 @@ async fn tls_name_pin_and_alpn_failures_end_the_tor_attempt() -> TestResult {
             TorClientProfile::TorExit,
             correct.clone(),
             server_tls(&wrong_name, CLIENT_ALPN)?,
+        ),
+        (
+            TorClientProfile::TorExit,
+            correct.clone(),
+            server_tls(&wrong_ca, CLIENT_ALPN)?,
         ),
         (
             TorClientProfile::Onion,

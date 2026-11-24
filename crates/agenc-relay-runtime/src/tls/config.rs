@@ -14,8 +14,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::{WebPkiServerVerifier, verify_server_cert_signed_by_trust_anchor};
-use rustls::crypto::aws_lc_rs::{self, cipher_suite, kx_group};
+use rustls::client::verify_server_cert_signed_by_trust_anchor;
 use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -34,15 +33,19 @@ use agenc_relay_crypto::{
     tls_ticket_key_id,
 };
 
+use agenc_relay_transport as transport;
 use agenc_relay_types::ServerId;
+
+pub use transport::{
+    CLIENT_ALPN, MAX_CHAIN_CERTIFICATES, MAX_TLS_DOCUMENT_BYTES, TLS_PLAINTEXT_BUFFER_LIMIT_BYTES,
+    provider,
+};
 
 use crate::RuntimeError;
 use crate::federation::certificate::server_id_from_certificate;
 use crate::purpose::ListenerPurpose;
 use crate::sync::Arc;
 
-/// ALPN identifier of every client endpoint (spec line 488).
-pub const CLIENT_ALPN: &[u8] = b"agenc-chat/1";
 /// ALPN identifier of the federation listener (spec line 488).
 pub const FEDERATION_ALPN: &[u8] = b"agenc-chat-fed/1";
 /// ALPN identifier of the remote administrative listener (spec line 489).
@@ -54,16 +57,7 @@ pub const TLS_TICKET_LIFETIME_SECONDS: u64 = 86_400;
 const TLS_TICKET_LIFETIME_SECONDS_U32: u32 = 86_400;
 const TLS_TICKET_KEY_GENERATIONS: usize = 4;
 const TLS_TICKET_KEY_GENERATION_ATTEMPTS: usize = 4;
-/// Bytes of plaintext rustls may buffer for one connection before the
-/// writer sees back-pressure; two complete physical lines (spec line 583).
-pub const TLS_PLAINTEXT_BUFFER_LIMIT_BYTES: usize = 17_406;
-/// Longest certificate chain or key document accepted from disk: 64 KiB,
-/// far above any Ed25519 or ECDSA chain the profile allows.
-pub const MAX_TLS_DOCUMENT_BYTES: usize = 65_536;
-/// Maximum certificates in one chain: leaf plus three intermediates.
-pub const MAX_CHAIN_CERTIFICATES: usize = 4;
-
-/// The DER `SEQUENCE` tag that opens every certificate and key document.
+/// The DER `SEQUENCE` tag that opens every private key document.
 const DER_SEQUENCE_TAG: u8 = 0x30;
 
 struct TicketKeyGeneration {
@@ -313,6 +307,17 @@ impl fmt::Display for TlsConfigError {
 
 impl Error for TlsConfigError {}
 
+impl From<transport::TlsConfigError> for TlsConfigError {
+    fn from(error: transport::TlsConfigError) -> Self {
+        match error {
+            transport::TlsConfigError::InvalidCertificate => Self::InvalidCertificate,
+            transport::TlsConfigError::InvalidPrivateKey => Self::InvalidPrivateKey,
+            transport::TlsConfigError::InvalidTrustStore => Self::InvalidTrustStore,
+            transport::TlsConfigError::ProviderUnavailable => Self::ProviderUnavailable,
+        }
+    }
+}
+
 impl From<TlsConfigError> for RuntimeError {
     fn from(_: TlsConfigError) -> Self {
         Self::InvalidValue
@@ -329,7 +334,7 @@ impl CertChain {
     /// Parses one DER certificate or a PEM document of one to four
     /// certificates, leaf first.
     pub fn parse(document: &[u8]) -> Result<Self, TlsConfigError> {
-        let certificates = parse_certificates(document)?;
+        let certificates = transport::parse_certificates(document)?;
         if certificates.is_empty() || certificates.len() > MAX_CHAIN_CERTIFICATES {
             return Err(TlsConfigError::InvalidCertificate);
         }
@@ -378,53 +383,38 @@ impl PrivateKey {
 }
 
 /// A private trust store for mutual TLS (spec lines 502-505).
-#[derive(Clone, Debug)]
-pub struct TrustStore {
-    roots: Arc<RootCertStore>,
-    spki_sha256: Vec<[u8; 32]>,
+#[derive(Clone)]
+pub struct TrustStore(transport::TrustStore);
+
+impl fmt::Debug for TrustStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
 }
 
 impl TrustStore {
     /// Parses one or more DER or PEM anchors; public WebPKI roots are never
     /// loaded implicitly.
     pub fn parse(document: &[u8]) -> Result<Self, TlsConfigError> {
-        let anchors =
-            parse_certificates(document).map_err(|_| TlsConfigError::InvalidTrustStore)?;
-        let mut roots = RootCertStore::empty();
-        let mut spki_sha256 = Vec::new();
-        spki_sha256
-            .try_reserve_exact(anchors.len())
-            .map_err(|_| TlsConfigError::InvalidTrustStore)?;
-        for anchor in anchors {
-            spki_sha256
-                .push(certificate_spki_sha256(&anchor).ok_or(TlsConfigError::InvalidTrustStore)?);
-            roots
-                .add(anchor)
-                .map_err(|_| TlsConfigError::InvalidTrustStore)?;
-        }
-        if roots.is_empty() {
-            return Err(TlsConfigError::InvalidTrustStore);
-        }
-        Ok(Self {
-            roots: Arc::new(roots),
-            spki_sha256,
-        })
+        transport::TrustStore::parse(document)
+            .map(Self)
+            .map_err(TlsConfigError::from)
     }
 
     /// Returns the number of anchors.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.roots.len()
+        self.0.len()
     }
 
     /// Returns whether the store is empty, which parsing forbids.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.roots.is_empty()
+        self.0.is_empty()
     }
 
     pub(crate) fn spki_identities(&self) -> &[[u8; 32]] {
-        &self.spki_sha256
+        self.0.spki_identities()
     }
 }
 
@@ -482,27 +472,15 @@ impl OcspStaple {
     }
 }
 
-/// Builds the exact provider: the three TLS 1.3 suites and the hybrid-first
-/// key exchange order (spec lines 474-485). The order is fixed here, so the
-/// `prefer-post-quantum` feature cannot change it.
-#[must_use]
-pub fn provider() -> CryptoProvider {
-    let mut provider = aws_lc_rs::default_provider();
-    provider.cipher_suites = vec![
-        cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
-        cipher_suite::TLS13_AES_256_GCM_SHA384,
-        cipher_suite::TLS13_AES_128_GCM_SHA256,
-    ];
-    provider.kx_groups = vec![kx_group::X25519MLKEM768, kx_group::X25519];
-    provider
+fn transport_group_policy(group_policy: GroupPolicy) -> transport::GroupPolicy {
+    match group_policy {
+        GroupPolicy::HybridPreferred => transport::GroupPolicy::HybridPreferred,
+        GroupPolicy::HybridRequired => transport::GroupPolicy::HybridRequired,
+    }
 }
 
 fn provider_for_group_policy(group_policy: GroupPolicy) -> CryptoProvider {
-    let mut provider = provider();
-    if group_policy == GroupPolicy::HybridRequired {
-        provider.kx_groups = vec![kx_group::X25519MLKEM768];
-    }
-    provider
+    transport::provider_for_group_policy(transport_group_policy(group_policy))
 }
 
 /// Builds one endpoint's server configuration synchronously.
@@ -546,9 +524,10 @@ pub fn build_server_config_with_policy_blocking(
     let builder = match (client_auth, profile.requires_client_certificate()) {
         (ClientAuth::None, false) => builder.with_no_client_auth(),
         (ClientAuth::MutualTls(store), true) => {
-            let verifier = WebPkiClientVerifier::builder_with_provider(store.roots, provider)
-                .build()
-                .map_err(|_| TlsConfigError::InvalidTrustStore)?;
+            let verifier =
+                WebPkiClientVerifier::builder_with_provider(Arc::clone(store.0.roots()), provider)
+                    .build()
+                    .map_err(|_| TlsConfigError::InvalidTrustStore)?;
             builder.with_client_cert_verifier(verifier)
         }
         _ => return Err(TlsConfigError::ClientAuthMismatch),
@@ -704,72 +683,14 @@ pub(crate) fn build_client_config_with_group_policy(
     client_certificate: Option<(CertChain, PrivateKey)>,
     group_policy: GroupPolicy,
 ) -> Result<Arc<ClientConfig>, TlsConfigError> {
-    let builder =
-        ClientConfig::builder_with_provider(Arc::new(provider_for_group_policy(group_policy)))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|_| TlsConfigError::ProviderUnavailable)?
-            .with_root_certificates(Arc::clone(&roots.roots));
-    let mut config = match client_certificate {
-        None => builder.with_no_client_auth(),
-        Some((chain, key)) => builder
-            .with_client_auth_cert(chain.certificates, key.key)
-            .map_err(|_| TlsConfigError::InvalidPrivateKey)?,
-    };
-    if let Some(alpn) = alpn {
-        config.alpn_protocols = vec![alpn.to_vec()];
-    }
-    config.enable_early_data = false;
-    Ok(Arc::new(config))
-}
-
-#[derive(Debug)]
-struct SpkiPinVerifier {
-    inner: Arc<dyn ServerCertVerifier>,
-    expected: [u8; 32],
-}
-
-impl ServerCertVerifier for SpkiPinVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        let actual = certificate_spki_sha256(end_entity)
-            .ok_or_else(|| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        if !bool::from(actual.ct_eq(&self.expected)) {
-            return Err(rustls::Error::InvalidCertificate(
-                CertificateError::ApplicationVerificationFailure,
-            ));
-        }
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        certificate: &CertificateDer<'_>,
-        signature: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .verify_tls12_signature(message, certificate, signature)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        certificate: &CertificateDer<'_>,
-        signature: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .verify_tls13_signature(message, certificate, signature)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.inner.supported_verify_schemes()
-    }
+    let client_certificate = client_certificate.map(|(chain, key)| (chain.certificates, key.key));
+    transport::build_client_config(
+        roots.0,
+        alpn,
+        client_certificate,
+        transport_group_policy(group_policy),
+    )
+    .map_err(TlsConfigError::from)
 }
 
 /// Verifies a federation coordinator's certificate: private-CA chain, the
@@ -805,7 +726,7 @@ impl ServerCertVerifier for FederationServerVerifier {
             now,
             self.algorithms.all,
         )?;
-        let actual = certificate_spki_sha256(end_entity)
+        let actual = transport::certificate_spki_sha256(end_entity)
             .ok_or_else(|| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
         if !bool::from(actual.ct_eq(&self.expected_spki)) {
             return Err(rustls::Error::InvalidCertificate(
@@ -874,7 +795,7 @@ pub fn build_federation_client_config_with_group_policy(
     let provider = provider_for_group_policy(group_policy);
     let algorithms = provider.signature_verification_algorithms;
     let verifier = FederationServerVerifier {
-        roots: Arc::clone(&roots.roots),
+        roots: Arc::clone(roots.0.roots()),
         algorithms,
         expected_spki: expected_spki_sha256,
         expected_server_id,
@@ -911,55 +832,12 @@ pub(crate) fn build_pinned_client_config_with_group_policy(
     expected_spki_sha256: [u8; 32],
     group_policy: GroupPolicy,
 ) -> Result<Arc<ClientConfig>, TlsConfigError> {
-    let crypto = Arc::new(provider_for_group_policy(group_policy));
-    let webpki =
-        WebPkiServerVerifier::builder_with_provider(Arc::clone(&roots.roots), Arc::clone(&crypto))
-            .build()
-            .map_err(|_| TlsConfigError::InvalidTrustStore)?;
-    let verifier = SpkiPinVerifier {
-        inner: webpki,
-        expected: expected_spki_sha256,
-    };
-    let mut config = ClientConfig::builder_with_provider(crypto)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|_| TlsConfigError::ProviderUnavailable)?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
-        .with_no_client_auth();
-    config.alpn_protocols = vec![CLIENT_ALPN.to_vec()];
-    config.enable_early_data = false;
-    Ok(Arc::new(config))
-}
-
-fn certificate_spki_sha256(certificate: &CertificateDer<'_>) -> Option<[u8; 32]> {
-    let parsed = ParsedCertificate::try_from(certificate).ok()?;
-    let spki = parsed.subject_public_key_info();
-    let suite = cipher_suite::TLS13_AES_128_GCM_SHA256.tls13()?;
-    let output = suite.common.hash_provider.hash(spki.as_ref());
-    let mut digest = [0_u8; 32];
-    if output.as_ref().len() != digest.len() {
-        return None;
-    }
-    digest.copy_from_slice(output.as_ref());
-    Some(digest)
-}
-
-fn parse_certificates(document: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsConfigError> {
-    if document.is_empty() || document.len() > MAX_TLS_DOCUMENT_BYTES {
-        return Err(TlsConfigError::InvalidCertificate);
-    }
-    if document.first() == Some(&DER_SEQUENCE_TAG) {
-        return Ok(vec![CertificateDer::from(document.to_vec())]);
-    }
-    let mut certificates = Vec::new();
-    for item in CertificateDer::pem_slice_iter(document) {
-        let certificate = item.map_err(|_| TlsConfigError::InvalidCertificate)?;
-        if certificates.len() >= MAX_CHAIN_CERTIFICATES {
-            return Err(TlsConfigError::InvalidCertificate);
-        }
-        certificates.push(certificate);
-    }
-    Ok(certificates)
+    transport::build_pinned_client_config(
+        roots.0,
+        expected_spki_sha256,
+        transport_group_policy(group_policy),
+    )
+    .map_err(TlsConfigError::from)
 }
 
 fn read_bounded(path: &std::path::Path) -> Result<Vec<u8>, TlsConfigError> {

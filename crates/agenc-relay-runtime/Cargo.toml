@@ -22,6 +22,7 @@ agenc-relay-domain.workspace = true
 agenc-relay-e2ee.workspace = true
 agenc-relay-federation-wire.workspace = true
 agenc-relay-storage.workspace = true
+agenc-relay-transport.workspace = true
 agenc-relay-types.workspace = true
 rustls.workspace = true
 rustix = { workspace = true, features = ["time"] }
