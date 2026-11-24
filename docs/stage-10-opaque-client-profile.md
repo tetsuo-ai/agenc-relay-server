@@ -125,10 +125,9 @@ an auth source.
   source it is linked with. In this workspace and the fuzz workspace that is
   the reviewed local copy, whose patch keeps the password-derived OPRF and
   KSF outputs in zeroizing wrappers inside `get_password_derived_key`, which
-  both client finishes call. A consumer with its own workspace root, such as
-  the SDK, resolves the unpatched crates.io release unless it repeats the
-  root `[patch]`, because the explicit edge of X-09 is not applied (see
-  [the OPAQUE fuzz source record](stage-10-opaque-fuzz-source.md)).
+  both client finishes call. The auth crate now resolves that reviewed
+  source through its explicit workspace dependency in separately rooted Git
+  consumers as well. [Independent consumer qualification](stage-10-opaque-fuzz-source.md)
 - The SDK keeps its own OPAQUE module and comparison tests until the owner
   accepts this extraction.
 

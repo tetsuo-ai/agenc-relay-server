@@ -93,13 +93,19 @@ def verify(root: Path, git_url: str, revision: str) -> None:
 def main() -> None:
     """Require an immutable Git commit and run the consumer check."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--git", required=True, help="server Git URL")
-    parser.add_argument("--rev", required=True, help="full server commit")
+    parser.add_argument("--git", help="server Git URL (default: this checkout)")
+    parser.add_argument("--rev", help="full server commit for --git (default: checked-out HEAD)")
     arguments = parser.parse_args()
-    if re.fullmatch(r"[0-9a-f]{40}", arguments.rev) is None:
+    if (arguments.git is None) != (arguments.rev is None):
+        parser.error("supply --git and --rev together")
+    if arguments.rev is not None and re.fullmatch(r"[0-9a-f]{40}", arguments.rev) is None:
         parser.error("--rev requires a full lowercase Git commit hash")
+    root = Path(__file__).resolve().parent.parent
     try:
-        verify(Path(__file__).resolve().parent.parent, arguments.git, arguments.rev)
+        revision = arguments.rev or subprocess.check_output(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=root, text=True
+        ).strip()
+        verify(root, arguments.git or root.as_uri(), revision)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"OPAQUE consumer check failed: {error}\n")
 

@@ -145,6 +145,7 @@ REQUIRED_STAGE_FOUR = (
     ("python3", "scripts/requirements.py", "check-stage-four"),
     ("python3", "scripts/check-stage-four.py", "check"),
     ("python3", "scripts/check-stage-four.py", "self-test"),
+    ("python3", "scripts/check-opaque-consumer.py"),
     ("cargo", "nextest", "run", "-p", "agenc-relay-auth", "--test", "stage_four", "--locked"),
     ("cargo", "nextest", "run", "-p", "agenc-relay-crypto", "--test", "stage_four", "--locked"),
     (

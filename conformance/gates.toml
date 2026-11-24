@@ -154,6 +154,9 @@ argv = ["python3", "scripts/check-stage-four.py", "check"]
 argv = ["python3", "scripts/check-stage-four.py", "self-test"]
 
 [[gate.stage-four-implementation.command]]
+argv = ["python3", "scripts/check-opaque-consumer.py"]
+
+[[gate.stage-four-implementation.command]]
 argv = ["cargo", "nextest", "run", "-p", "agenc-relay-auth", "--test", "stage_four", "--locked"]
 
 [[gate.stage-four-implementation.command]]
