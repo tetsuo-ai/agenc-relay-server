@@ -8,3 +8,5 @@ pub mod coordinator;
 pub(crate) mod downgrade;
 pub mod edge;
 pub mod link;
+pub(crate) mod outbound;
+pub(crate) mod spool;

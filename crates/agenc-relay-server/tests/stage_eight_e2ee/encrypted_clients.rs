@@ -474,6 +474,129 @@ pub(super) fn join_through_welcome<C: MlsConfig>(
     expires_at: u64,
     nonce: [u8; 16],
 ) -> TestResult<mls_rs::Group<C>> {
+    join_with_group_info(live, joiner, package, expires_at, nonce, false)
+}
+
+const SIZING_EXTENSION: u16 = 0xfefe;
+
+/// Creates a genuine MLS Add carrying a signed opaque GroupInfo extension.
+fn add_with_group_info(
+    group: &mut MlsGroup,
+    provider: &openmls_rust_crypto::OpenMlsRustCrypto,
+    signer: &openmls_basic_credential::SignatureKeyPair,
+    package: openmls::prelude::KeyPackage,
+    length: usize,
+) -> TestResult<(
+    openmls::prelude::MlsMessageOut,
+    openmls::prelude::MlsMessageOut,
+)> {
+    use openmls::prelude::{Extension, OpenMlsProvider as _};
+    let (commit, welcome, _) = group
+        .commit_builder()
+        .propose_adds([package])
+        .force_self_update(true)
+        .load_psks(provider.storage())?
+        .create_group_info_with_extensions([Extension::Unknown(
+            SIZING_EXTENSION,
+            openmls::extensions::UnknownExtension(vec![0xa5; length]),
+        )])?
+        .build(provider.rand(), provider.crypto(), signer, |_| true)?
+        .stage_commit(provider)?
+        .into_messages();
+    Ok((commit, welcome.ok_or("the MLS Add omitted its Welcome")?))
+}
+
+/// Measures the native Welcome at the same TLS length widths in a private copy of
+/// the creator's test provider. No calibration Commit reaches the real group.
+fn maximum_group_info_length(
+    live: &Live,
+    package: &openmls::prelude::KeyPackage,
+) -> TestResult<usize> {
+    use openmls::prelude::OpenMlsProvider as _;
+    let probe = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    let values = live
+        .creator
+        .provider
+        .storage()
+        .values
+        .read()
+        .map_err(|_| "creator store")?
+        .clone();
+    *probe.storage().values.write().map_err(|_| "probe store")? = values;
+    let mut group = MlsGroup::load(probe.storage(), live.group.group_id())?.ok_or("probe group")?;
+    group.set_aad(live.group.aad().to_owned());
+    let sample = 32 * 1024;
+    let (_, welcome) = add_with_group_info(
+        &mut group,
+        &probe,
+        &live.creator.signer,
+        package.clone(),
+        sample,
+    )?;
+    let overhead = welcome
+        .to_bytes()?
+        .len()
+        .checked_sub(sample)
+        .ok_or("invalid Welcome sizing sample")?;
+    e2ee::limits::MAX_EMBEDDED_MLS_WELCOME_BYTES
+        .checked_sub(overhead)
+        .ok_or_else(|| failure("MLS overhead exceeds the Welcome limit".to_owned()))
+}
+
+/// The transfer limit and the mailbox decoder are independent. A maximum-size
+/// envelope with trailing body data reaches the complete-object validator. A
+/// one-byte-over declaration is refused before its first fragment is retained.
+pub(super) fn check_welcome_carrier_boundary(
+    sender: &mut ArcClient,
+    keys: &mut Principal,
+    command: &str,
+    valid: &[u8],
+) -> TestResult {
+    let parsed = e2ee::object::ArcWireObjectRef::parse(valid)?;
+    let mut body = parsed.body().to_vec();
+    let limit = e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT;
+    assert!(valid.len() < limit);
+    body.resize(limit - e2ee::limits::WIRE_OBJECT_ENVELOPE_BYTES, 0);
+    let maximum = ArcWireObject::new(parsed.kind(), body)?.encode()?;
+    assert_eq!(maximum.len(), limit);
+    let mut over = maximum.clone();
+    over.push(0);
+    let total = u32::try_from(over.len())?;
+    let body = u32::try_from(over.len() - e2ee::limits::WIRE_OBJECT_ENVELOPE_BYTES)?;
+    let [_, high, middle, low] = body.to_be_bytes();
+    over.get_mut(3..6)
+        .ok_or("short ARC envelope")?
+        .copy_from_slice(&[high, middle, low]);
+    let first = e2ee::wire::fragment::FragmentTag {
+        object_id: e2ee::ObjectId::compute(&over),
+        part: 0,
+        count: e2ee::wire::fragment::fragment_count(total)?,
+        total,
+        segment: over
+            .get(..e2ee::limits::MAX_FRAGMENT_RAW)
+            .ok_or("short fragment zero")?
+            .to_vec(),
+    };
+    let label = keys.label();
+    sender.send(&format!(
+        "@label={label};{CLIENT_FRAGMENT_TAG}={} {command}",
+        first.render()
+    ))?;
+    assert_contains(&labeled_reply(sender, &label)?, "E2EE_OBJECT_TOO_LARGE")?;
+    let label = keys.label();
+    send_object(sender, &label, command, &maximum)?;
+    assert_contains(&labeled_reply(sender, &label)?, "E2EE_INVALID_FRAGMENT")
+}
+
+/// Optional signed GroupInfo data travels inside the encrypted Welcome.
+fn join_with_group_info<C: MlsConfig>(
+    live: &mut Live,
+    joiner: &mls_rs::Client<C>,
+    package: &[u8],
+    expires_at: u64,
+    nonce: [u8; 16],
+    exact_max: bool,
+) -> TestResult<mls_rs::Group<C>> {
     let reference = {
         let Clients {
             bob,
@@ -489,9 +612,24 @@ pub(super) fn join_through_welcome<C: MlsConfig>(
     };
     let imported = live.creator.import_key_package(package)?;
     live.arm_commit()?;
-    let (commit, welcome, _info) =
-        live.group
-            .add_members(&live.creator.provider, &live.creator.signer, &[imported])?;
+    let extent = exact_max
+        .then(|| maximum_group_info_length(live, &imported))
+        .transpose()?;
+    let provider = &live.creator.provider;
+    let (commit, welcome) = if let Some(length) = extent {
+        add_with_group_info(
+            &mut live.group,
+            provider,
+            &live.creator.signer,
+            imported,
+            length,
+        )?
+    } else {
+        let (commit, welcome, _) =
+            live.group
+                .add_members(provider, &live.creator.signer, &[imported])?;
+        (commit, welcome)
+    };
     let policies = live.clients.policies;
     let added = live.certify(
         &commit.to_bytes()?,
@@ -499,6 +637,12 @@ pub(super) fn join_through_welcome<C: MlsConfig>(
         (policies.1, policies.1),
     )?;
     let welcome_bytes = welcome.to_bytes()?;
+    if exact_max {
+        assert_eq!(
+            welcome_bytes.len(),
+            e2ee::limits::MAX_EMBEDDED_MLS_WELCOME_BYTES
+        );
+    }
     let delivered = {
         let Clients {
             alice,
@@ -519,7 +663,45 @@ pub(super) fn join_through_welcome<C: MlsConfig>(
             &welcome_bytes,
         )?
     };
-    let (group, _info) = joiner.join_group(None, &MlsMessage::from_bytes(&delivered)?, None)?;
+    let (group, info) = joiner.join_group(None, &MlsMessage::from_bytes(&delivered)?, None)?;
+    if let Some(length) = extent {
+        let extension = info
+            .group_info_extensions()
+            .get(SIZING_EXTENSION.into())
+            .ok_or("recipient did not authenticate the large GroupInfo extension")?;
+        assert_eq!(extension.extension_data.len(), length);
+        assert!(extension.extension_data.iter().all(|byte| *byte == 0xa5));
+    }
     assert_eq!(group.current_epoch(), live.head.0);
     Ok(group)
+}
+
+/// SC-011. Both client and federation writers transfer over 1,024 fragments
+/// in each direction. The recipient authenticates the complete MLS GroupInfo
+/// and uses the joined state for application decryption.
+#[test]
+fn a_large_certified_welcome_crosses_two_edges_and_joins_the_recipient() -> TestResult {
+    run_network(|network, _, _, _| {
+        let mut live = Live::open(bind_channel(network)?)?;
+        let policies = live.clients.policies;
+        activate_bootstrap(&mut live, policies)?;
+        let interval = live.clients.bob_interval();
+        let joiner =
+            real_clients::mls_rs_client_with_leaf(&live.clients.bob_keys, interval, BOB_LEAF)?;
+        let package = joiner
+            .generate_key_package_message(
+                Default::default(),
+                Default::default(),
+                Some(MlsTime::from(interval.0)),
+            )?
+            .to_bytes()?;
+        let mut joined =
+            join_with_group_info(&mut live, &joiner, &package, interval.1, [77; 16], true)?;
+        let message = live.relay("after the large Welcome", 1)?;
+        assert_eq!(
+            mls_rs_text(&mut joined, &message)?.as_deref(),
+            Some("after the large Welcome")
+        );
+        Ok(())
+    })
 }

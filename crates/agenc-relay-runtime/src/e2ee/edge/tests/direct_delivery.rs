@@ -21,6 +21,7 @@ fn a_captured_attachment_waits_for_its_own_declaration_and_never_follows_a_repla
         account: Some((account, 1)),
     };
     let mut origin = LocalOrigin {
+        ingress: std::sync::Arc::new(tokio::sync::Semaphore::new(1 << 20)),
         origin_id: base.origin_id,
         declared: Some(2),
         acked: Some(2),

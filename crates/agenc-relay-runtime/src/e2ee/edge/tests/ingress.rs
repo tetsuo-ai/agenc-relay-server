@@ -501,6 +501,8 @@ async fn a_connection_past_its_recent_share_leaves_the_others_admitted() -> Test
         edge.assembler
             .is_recent(&identity_tuple(second, &fragment)?)
     );
+    assert_eq!(edge.assembler.quotas().reserved_bytes(), object.len());
+    edge.connection_closed(second);
     assert_eq!(edge.assembler.quotas().reserved_bytes(), 0);
     Ok(())
 }
@@ -994,8 +996,8 @@ async fn a_connection_at_its_reply_quota_is_served_a_request_it_keeps_no_reply_f
     Ok(())
 }
 
-/// A submission whose largest reply the memory budget cannot reserve is
-/// refused `E2EE_RATE_LIMITED` before it goes out (architecture 19.2).
+/// The assembly must first reserve decoded memory; the retained reply then
+/// needs its own reservation before the submission goes out (architecture 19.2).
 #[tokio::test]
 async fn a_submission_the_memory_budget_cannot_reserve_for_is_refused() -> TestResult {
     let generation = ConnectionGeneration::new(1);
@@ -1004,8 +1006,9 @@ async fn a_submission_the_memory_budget_cannot_reserve_for_is_refused() -> TestR
     let mut edge = active_edge(generation)?;
     let capabilities = capabilities()?;
     let facts = facts(&capabilities)?;
+    let input = core.context_mut()?.reserve_output_backing(64)?;
     let mut held = Vec::new();
-    for chunk in [1_u64 << 20, 4_096] {
+    for chunk in [1_u64 << 20, 4096, 256, 1] {
         while let Ok(permit) = core.context_mut()?.reserve_kept_output(chunk) {
             held.push(permit);
         }
@@ -1021,7 +1024,27 @@ async fn a_submission_the_memory_budget_cannot_reserve_for_is_refused() -> TestR
         &line(&fragment)?,
         &facts,
     );
-    assert!(refused_with(&refused, "E2EE_RATE_LIMITED"), "{refused:?}");
+    assert!(
+        refused_with(&refused, "E2EE_REASSEMBLY_LIMIT"),
+        "{refused:?}"
+    );
+    let key = identity_tuple(generation, &fragment)?;
+    assert!(!edge.assembler.is_recent(&key));
+    assert!(edge.pending.is_empty());
+    // Make room for the 64-byte object while the larger writer reserve is full.
+    drop(input);
+    let refused_reply = edge.client_line(
+        core.context_mut()?,
+        &mut base,
+        generation,
+        &line(&fragment)?,
+        &facts,
+    );
+    assert!(
+        refused_with(&refused_reply, "E2EE_RATE_LIMITED"),
+        "{refused_reply:?}"
+    );
+    assert!(!edge.assembler.is_recent(&key));
     assert!(edge.pending.is_empty());
     drop(held);
     let _sent = edge.client_line(

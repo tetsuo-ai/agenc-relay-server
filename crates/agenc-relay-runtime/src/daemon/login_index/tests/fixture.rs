@@ -175,6 +175,7 @@ impl FaultFixture {
             60,
         )?;
         Ok(LiveStorage {
+            companion_spool: None,
             owner,
             limit_writer,
             seed,

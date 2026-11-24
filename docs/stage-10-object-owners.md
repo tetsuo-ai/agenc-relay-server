@@ -94,6 +94,43 @@ A refusal is `E2EE_RATE_LIMITED`, changes nothing, and deletes no ancestry.
 `ConversationState::stored_bytes` mirrors the ledger's per-conversation
 charge after every commit and reload.
 
+## Shared logical disk budget
+
+Architecture Appendix C.7 also limits the stored keys and sealed envelopes
+of every table-22 and table-23 row. Each row costs
+`4096 * ceil((key_bytes + sealed_bytes + 256) / 4096)`. The singleton
+`companion-disk/v1` in table 23, record kind 23, contains this aggregate as
+one big-endian `u64` in the existing version-one protocol record wrapper.
+The aggregate includes the singleton's own 4 KiB charge. Its creation or
+change joins the owning mutation's authenticated manifest and redb transaction.
+The storage owner verifies the proposed total independently before accepting
+the batch. Startup and signed-backup verification compare the stored total to
+the complete authenticated row set.
+
+This reader accepts older databases and backups that predate the singleton.
+Their first live companion allocation or release seeds it from the verified
+scan. Readers that predate kind 23 reject databases and backups containing
+it. The outer StateMeta, backup and numbered-table formats keep their original
+encodings. Rekey preserves sealed envelope lengths and the aggregate. A
+recovery restore selects a new set of rows and rebuilds the baseline for that
+epoch. The next live companion change installs the resulting aggregate.
+
+Each active anonymous encrypted spool extent also reserves its full allocated
+length rounded up to 4 KiB against the same limit. The reservation lasts
+through file close. Process death releases anonymous inodes and their
+reservations together. An indeterminate storage commit suspends new
+allocations until startup authenticates the surviving rows.
+
+Authenticated ingress still charges the full decoded object to its account,
+route and peer. The durable ownership records continue to charge each shared
+object once to every conversation that references it. Historical table-22
+rows are content-addressed, and a single object may be retained by several
+accounts or peers. Appendix C.7's persisted per-account, per-conversation and
+per-peer subtotals for the complete sealed store still require an ownership
+rule for shared content, retired objects and shared metadata, plus a compatible
+way to carry those owners in each transaction. The persisted counter here
+covers the global sealed store.
+
 ## Reconstruction
 
 Startup reads every object's identity, kind and size, every owner row, and

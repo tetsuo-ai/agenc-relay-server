@@ -47,7 +47,7 @@ pub fn submit_membership(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 
 /// Exactly one `leaf_membership_proof` body naming a leaf the group can hold.
 fn decode_proof(
-    object: &agenc_relay_e2ee::object::ArcWireObject,
+    object: agenc_relay_e2ee::object::ArcWireObjectRef<'_>,
     conversation_id: &[u8; 32],
 ) -> Result<ArcLeafMembershipProof, Fail> {
     let malformed = || Fail::with(E2eeReplyCode::InvalidFragment, conversation_id);

@@ -960,6 +960,7 @@ fn trusted_backup_key(
 /// counter; `finish` binds those accumulators and the exact stream length to
 /// the authenticated StateMeta row.
 pub(crate) struct BackupRecordVerification {
+    companion_disk: crate::companion_disk::accounting::Scan,
     history_inventory: crate::history_records::HistoryInventory,
     source_header: DatabaseHeader,
     reservation: crate::NonceReservationTbs,
@@ -988,6 +989,7 @@ impl BackupRecordVerification {
             ),
         )?;
         Ok(Self {
+            companion_disk: crate::companion_disk::accounting::Scan::default(),
             history_inventory: crate::history_records::HistoryInventory::new(1_073_741_824),
             source_header,
             reservation: *header.source_nonce_reservation().tbs(),
@@ -1042,6 +1044,12 @@ impl BackupRecordVerification {
             record.stored_key(),
         )?;
         let exposed = plaintext.expose_for_storage_codec();
+        self.companion_disk.observe(
+            record.table(),
+            record.stored_key(),
+            record.sealed_record().len(),
+            exposed,
+        )?;
         crate::AuthenticatedSourceRecord::checked(
             self.source_header.tbs().schema_generation,
             record.table(),
@@ -1137,6 +1145,7 @@ impl BackupRecordVerification {
             return Err(StorageError::StaleState);
         }
         self.history_inventory.finish()?;
+        self.companion_disk.finish()?;
         self.reconstruction.finish(&state_meta)?;
         Ok((self.logical_database_bytes, state_meta))
     }

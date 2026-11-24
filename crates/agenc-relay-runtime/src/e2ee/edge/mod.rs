@@ -6,6 +6,8 @@
 //! apply; and until the companion link reaches `STATE_ACTIVE` every E2EE
 //! command fails with `E2EE_SYNCING`.
 
+mod client_batch;
+pub use client_batch::{ClientBatch, ClientLine};
 mod completion;
 mod direct_delivery;
 mod entitlement;
@@ -27,7 +29,7 @@ mod witness_failure;
 mod witness_recovery;
 mod witness_resolution;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use agenc_relay_client_wire::{CapabilityState, WireMessage};
 use agenc_relay_domain::e2ee::RouteTable;
@@ -86,6 +88,8 @@ pub struct ClientOutput {
     pub generation: ConnectionGeneration,
     /// The frames in order.
     pub frames: Vec<WireMessage>,
+    /// Owned bulk query output, rendered by its connection writer.
+    pub(crate) batch: Option<Box<ClientBatch>>,
 }
 
 /// Where the companion link stands (12.5 STATE_ACTIVE).
@@ -111,6 +115,7 @@ pub enum Phase {
 /// The companion origin of one local connection.
 #[derive(Clone, Debug)]
 pub(crate) struct LocalOrigin {
+    ingress: std::sync::Arc<tokio::sync::Semaphore>,
     /// The base origin identity.
     pub(crate) origin_id: [u8; 16],
     /// The base generation the last declaration mirrored.
@@ -168,11 +173,13 @@ pub(crate) struct PendingRequest {
     pub(crate) origin_generation: u64,
     /// The request and payload frames exactly as first sent, resent after
     /// a resume while the result is outstanding.
-    pub(crate) frames: Vec<agenc_relay_e2ee::federation::frames::CompanionFrame>,
+    pub(crate) transfer: Option<std::sync::Arc<crate::e2ee::outbound::Transfer>>,
     pub(crate) result: Option<DecodedResult>,
     /// Exact result envelope identity, retained to reject conflicting duplicates.
     pub(super) result_object_id: Option<[u8; 32]>,
-    pub(crate) responses: BTreeMap<u16, Vec<u8>>,
+    pub(crate) responses: BTreeMap<u16, super::spool::CompanionBytes>,
+    /// The single committed, request-correlated home event before its result.
+    pub(super) early_completion: Option<[u8; 16]>,
     pub(crate) completion_seen: bool,
     pub(crate) rendered: bool,
 }
@@ -224,10 +231,18 @@ type AppliedPosition = (u64, u64, [u8; 16]);
 
 /// The companion parts of one open barrier by part index, each with its
 /// payload when the event named one.
-type BarrierParts = BTreeMap<u16, (events::OpenEvent, Option<Vec<u8>>)>;
+type BarrierParts = BTreeMap<
+    u16,
+    (
+        std::sync::Arc<events::OpenEvent>,
+        Option<super::spool::CompanionBytes>,
+    ),
+>;
 
 /// The edge E2EE router.
 pub struct E2eeEdge {
+    pub(crate) spool: Option<super::spool::SpoolResources>,
+    ingress_link: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     projection_before: Option<projection::ProjectionBefore>,
     barrier_completions: Vec<completion::PreparedCompletion>,
     replies: retry::Replies,
@@ -247,8 +262,6 @@ pub struct E2eeEdge {
     /// keep their places in the outstanding bounds until a frame of their
     /// result arrives, the deletion is acknowledged or the link ends.
     closed_requests: BTreeMap<[u8; 16], ([u8; 16], [u8; 24])>,
-    by_completion: BTreeMap<[u8; 16], [u8; 16]>,
-    covered: BTreeSet<[u8; 16]>,
     assembler: E2eeAssembler,
     ingress: BTreeMap<ConnectionGeneration, Ingress>,
     /// The object each connection last retried: its fragment zero was
@@ -270,7 +283,7 @@ pub struct E2eeEdge {
     witness_recovery: witness_recovery::WitnessRecovery,
     witness_resolution: Option<witness_resolution::OpenResolution>,
     witness_request_wake: Option<crate::state_core::timers::TimerEntry>,
-    queued: VecDeque<(CompanionFrame, Vec<u8>)>,
+    queued: VecDeque<(CompanionFrame, Option<super::spool::CompanionBytes>)>,
     direct_delivery: Option<direct_delivery::Delivery>,
     direct_probe: Option<[u8; 16]>,
     events_in: BTreeMap<[u8; 16], events::OpenEvent>,
@@ -348,11 +361,11 @@ impl E2eeEdge {
             origins: BTreeMap::new(),
             pending: BTreeMap::new(),
             closed_requests: BTreeMap::new(),
-            by_completion: BTreeMap::new(),
-            covered: BTreeSet::new(),
             // Each connection holds its own share of the recent-object
             // cache: one connection past it never refuses another's
             // submissions (companion 16).
+            spool: None,
+            ingress_link: None,
             assembler: E2eeAssembler::with_ceiling(
                 QuotaLimits::default(),
                 RecentCeiling::PerSenderRefused,
@@ -409,7 +422,12 @@ impl E2eeEdge {
     /// Whether the companion link and every retained assembly of a closed
     /// link are gone.
     pub fn link_down(&mut self) {
-        self.barrier_completions.clear();
+        self.ingress_link = None;
+        // Once a joint cursor write is staged, its local storage receipt
+        // decides publication even if the federation transport closes.
+        if self.barrier_pending.is_none() {
+            self.barrier_completions.clear();
+        }
         self.phase = Phase::Down;
         // The next link carries every object again from its first fragment.
         let coordinator = Sender::Peer(*self.config.coordinator_server_id.as_bytes());
@@ -421,7 +439,6 @@ impl E2eeEdge {
         self.queued.clear();
         self.direct_delivery = None;
         self.events_in.clear();
-        self.barrier_pending = None;
         // The coordinator drops a closed link's queued requests.
         self.closed_requests.clear();
         for origin in self.origins.values_mut() {

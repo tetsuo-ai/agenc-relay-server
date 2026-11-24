@@ -922,8 +922,17 @@ fn a_retransmitted_request_replays_its_stored_result() -> TestResult {
     for frame in fragments {
         replay.extend(sync.frame(frame)?);
     }
-    let lines = frames(&replay)?;
-    assert!(matches!(lines.first(), Some(CompanionFrame::Result { .. })));
+    assert_eq!(replay.len(), 1);
+    let Some(Action::Replay(reply)) = replay.pop() else {
+        return Err("expected a streamed stored result".into());
+    };
+    let transfer = reply.into_backed().map_err(|e| e.to_string())?;
+    let mut cursor = transfer.cursor();
+    assert!(matches!(
+        parse(&cursor.next_line().map_err(|e| e.to_string())?)?,
+        CompanionFrame::Result { .. }
+    ));
+    assert!(!cursor.remaining());
     Ok(())
 }
 

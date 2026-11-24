@@ -205,6 +205,13 @@ pub(super) fn admitted(
     let Some(executor) = coordinator.companion_exec.as_mut() else {
         return Err(Violation::Companion(CompanionViolation::Unsupported));
     };
+    let ingress = coordinator
+        .peers
+        .get(&peer)
+        .and_then(|state| state.live.as_ref())
+        .filter(|live| live.link == link)
+        .map(|live| std::sync::Arc::clone(&live.handle.ingress));
+    executor.set_ingress(peer, ingress);
     let actions = executor
         .on_frame(link, peer, frame, now, &host, context.entropy_mut())
         .map_err(fault_violation)?;
@@ -329,6 +336,10 @@ pub(super) fn apply(
         Action::Execute(complete) => execute_or_queue(coordinator, context, link, peer, complete),
         Action::Send(lines) => {
             send_lines(coordinator, context, link, peer, lines);
+            Ok(())
+        }
+        Action::Replay(reply) => {
+            send_reply(coordinator, context, link, peer, reply);
             Ok(())
         }
         Action::SendPage(output) => {
@@ -634,14 +645,14 @@ fn replayed(
     context: &mut StateCoreContext,
     (link, peer): (LinkId, ServerId),
     correlation: &agenc_relay_e2ee::federation::frames::Correlation,
-    lines: Vec<FederationLineText>,
+    reply: crate::e2ee::outbound::Reply,
 ) {
     coordinator.counters.requests_replayed =
         coordinator.counters.requests_replayed.saturating_add(1);
     if let Some(executor) = coordinator.companion_exec.as_mut() {
         executor.request_answered(peer, correlation);
     }
-    send_lines(coordinator, context, link, peer, lines);
+    send_reply(coordinator, context, link, peer, reply);
 }
 
 /// Sends `lines` to the live link of `peer`, retiring the link on refusal.
@@ -759,12 +770,26 @@ pub(super) fn committed(
             committed_ack(coordinator, context, link, target, barrier, resume)
         }
         Committed::Request(pending) => {
-            let lines = execute::committed_lines(&*executor, &pending);
+            let lines = execute::committed_events(&*executor, &pending);
+            let reply = crate::e2ee::outbound::Reply::new(
+                &executor.server_name,
+                pending.correlation,
+                *pending.peer.as_bytes(),
+                pending.result,
+                pending.responses,
+                pending.object_backing,
+            );
             if open_barriers(coordinator, &pending.barriers, events).is_err() {
                 super::startup::fail_restore(coordinator);
                 return;
             }
-            request_committed(coordinator, context, link, peer, lines);
+            request_committed(
+                coordinator,
+                context,
+                link,
+                peer,
+                lines.map(|events| (reply, events)),
+            );
         }
     }
 }
@@ -805,13 +830,13 @@ fn request_committed(
     context: &mut StateCoreContext,
     link: LinkId,
     peer: ServerId,
-    lines: Result<Vec<CommittedLine>, E2eeReplyCode>,
+    output: Result<(crate::e2ee::outbound::Reply, Vec<CommittedLine>), E2eeReplyCode>,
 ) {
     schedule_mailbox_expiry(coordinator, context);
     schedule_listing_expiry(coordinator, context);
     coordinator.counters.requests_committed =
         coordinator.counters.requests_committed.saturating_add(1);
-    let Ok(lines) = lines else {
+    let Ok((reply, lines)) = output else {
         coordinator.fail_link(
             context,
             link,
@@ -820,31 +845,26 @@ fn request_committed(
         );
         return;
     };
+    send_reply(coordinator, context, link, peer, reply);
     for committed in lines {
-        match committed.sequence {
-            None => send_response(coordinator, context, link, peer, committed),
-            Some(sequence) => send_to_target(
-                coordinator,
-                context,
-                committed.target,
-                Some(sequence),
-                committed.line,
-            ),
-        }
+        send_to_target(
+            coordinator,
+            context,
+            committed.target,
+            Some(committed.sequence),
+            committed.line,
+        );
     }
 }
 
-fn send_response(
+/// Admits an entire authenticated reply as a single ordered link item.
+pub(super) fn send_reply(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,
     link: LinkId,
     peer: ServerId,
-    committed: CommittedLine,
+    reply: crate::e2ee::outbound::Reply,
 ) {
-    let Some(backing) = committed.backing else {
-        send_lines(coordinator, context, link, peer, vec![committed.line]);
-        return;
-    };
     let Some(live) = coordinator
         .peers
         .get(&peer)
@@ -853,7 +873,16 @@ fn send_response(
     else {
         return;
     };
-    if let Err(refusal) = live.handle.try_send_backed(committed.line, backing) {
+    let send = reply
+        .into_transfer(context)
+        .and_then(|transfer| {
+            transfer
+                .reserve_writer(context)
+                .map(|backing| (transfer, backing))
+        })
+        .map_err(|_| crate::federation::link::SendRefusal::QueueFull)
+        .and_then(|(transfer, backing)| live.handle.try_send_transfer(&transfer, backing));
+    if let Err(refusal) = send {
         coordinator.send_failed(context, link, peer, SendFailure::from(refusal));
     }
 }

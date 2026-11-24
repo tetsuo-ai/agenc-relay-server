@@ -115,6 +115,7 @@ fn account(seed: u8) -> TestResult<[u8; 24]> {
 /// A companion origin authenticated as `account` with an attached device.
 fn attached(account: [u8; 24], seed: u8) -> LocalOrigin {
     LocalOrigin {
+        ingress: crate::federation::link::ingress_budget(),
         origin_id: [seed; 16],
         declared: Some(1),
         acked: Some(1),
@@ -315,6 +316,7 @@ fn event(case: &Case, request: Option<[u8; 16]>, ack: Option<&[u8]>) -> TestResu
     };
     let payload_object_id = ack.map(|bytes| *ObjectId::compute(bytes).as_bytes());
     Ok(OpenEvent {
+        _backing: None,
         position,
         event,
         payload_object_id,
@@ -573,8 +575,10 @@ async fn a_barrier_completion_reaches_its_requesting_connection_only_as_its_labe
                 let early = deliver_result(&mut edge, &mut fixture, case)?;
                 assert!(early.is_empty(), "{:?}: no completion yet", case.event);
             }
-            edge.barrier_parts
-                .insert(MUTATION, BTreeMap::from([(1, (open, ack.clone()))]));
+            edge.barrier_parts.insert(
+                MUTATION,
+                BTreeMap::from([(1, (open.into(), ack.clone().map(Into::into)))]),
+            );
             let (_, mut outputs) = edge
                 .prepare_barrier(fixture.context_mut()?, &base_edge(), MUTATION)
                 .map_err(|code| code.to_string())?;

@@ -119,6 +119,22 @@ fn empty_replay_has_no_required_response_objects() -> TestResult {
     Ok(())
 }
 
+fn recent_lines(
+    mut actions: Vec<super::super::super::sync::Action>,
+) -> TestResult<Vec<agenc_relay_federation_wire::FederationLineText>> {
+    assert_eq!(actions.len(), 1);
+    let Some(super::super::super::sync::Action::Replay(reply)) = actions.pop() else {
+        return Err("missing immutable replay".into());
+    };
+    let transfer = reply.into_backed().map_err(|_| "replay needs a backing")?;
+    let mut cursor = transfer.cursor();
+    let mut lines = Vec::new();
+    while cursor.remaining() {
+        lines.push(cursor.next_line().map_err(|_| "invalid replay fragment")?);
+    }
+    Ok(lines)
+}
+
 fn recent_correlation(decoded: &Decoded) -> Correlation {
     Correlation {
         peer_server_id: COORDINATOR,
@@ -141,6 +157,7 @@ fn recent_fragment_replay_refuses_every_missing_response_before_emitting_lines()
             ServerId::from_bytes(HOME),
             &recent_correlation(&decoded),
             decoded.request_object_id,
+            |capacity| backing().reserve(capacity).ok(),
         );
         let actions = result?;
         assert!(
@@ -162,10 +179,9 @@ fn recent_fragment_replay_preserves_all_three_response_indices_and_object_ids() 
         ServerId::from_bytes(HOME),
         &recent_correlation(&decoded),
         decoded.request_object_id,
+        |capacity| backing().reserve(capacity).ok(),
     )?;
-    let [super::super::super::sync::Action::Send(lines)] = actions.as_slice() else {
-        return Err("recent replay did not return lines".into());
-    };
+    let lines = recent_lines(actions)?;
     let mut returned = BTreeMap::new();
     for line in lines {
         if let ParsedLine::Companion(CompanionFrame::Response {
@@ -207,10 +223,9 @@ fn recent_fragment_replay_accepts_a_result_with_no_required_response_objects() -
         ServerId::from_bytes(HOME),
         &recent_correlation(&decoded),
         decoded.request_object_id,
+        |capacity| backing().reserve(capacity).ok(),
     )?;
-    let [super::super::super::sync::Action::Send(lines)] = actions.as_slice() else {
-        return Err("empty-result replay did not return lines".into());
-    };
+    let lines = recent_lines(actions)?;
     assert!(!lines.is_empty());
     assert!(lines.iter().all(|line| line.as_str().contains(" ERESULT ")));
     Ok(())
@@ -294,9 +309,15 @@ async fn a_retained_response_on_disk_remains_replayable_after_its_memory_copy_is
         count += 1;
     }
     assert_eq!(count, 3);
-    let mut output = job.finish(&coordinator)?;
-    let _backing = output.backing();
-    let lines: Vec<_> = output.drain().collect();
+    let transfer = job
+        .finish(&coordinator)?
+        .into_backed()
+        .map_err(|_| "missing replay backing")?;
+    let mut cursor = transfer.cursor();
+    let mut lines = Vec::new();
+    while cursor.remaining() {
+        lines.push(cursor.next_line().map_err(|_| "invalid replay line")?);
+    }
     let expected = replay_lines(
         &coordinator,
         &recent_correlation(&decoded),

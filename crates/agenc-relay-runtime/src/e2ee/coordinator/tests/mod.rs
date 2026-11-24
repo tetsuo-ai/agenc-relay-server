@@ -331,8 +331,8 @@ impl Harness {
                 operation_sequence: self.sequence,
                 request_id,
             },
-            request: wire(ArcWireObjectKind::FederationRequest, &request)?,
-            payload: payload.map(<[u8]>::to_vec),
+            request: wire(ArcWireObjectKind::FederationRequest, &request)?.into(),
+            payload: payload.map(|bytes| bytes.to_vec().into()),
             refusal: None,
         })
     }
@@ -1190,7 +1190,7 @@ fn replay_rows_answer_exact_duplicates_and_refuse_conflicts() -> TestResult {
     state.objects.insert([2; 32], vec![9, 9]);
     assert_eq!(
         request::classify(&state, HOME, &decoded),
-        Classified::Replay(vec![1, 2, 3], vec![vec![9, 9]])
+        Classified::Replay(&[1, 2, 3], vec![&[9, 9]])
     );
     assert_eq!(
         request::classify(&state, HOME, &conflicting),

@@ -7,7 +7,7 @@
 //! with the sequencer key, stores opaque objects under their IDs, dispenses
 //! one-use KeyPackages, runs device mailboxes, and projects route state.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use agenc_relay_crypto::{Ed25519SecretKey, SemanticHashDomain, SignatureDomain, sign_canonical};
 use agenc_relay_domain::e2ee::RouteTable;
@@ -473,9 +473,9 @@ pub struct QueuedCompanion {
     /// Correlation.
     pub correlation: Correlation,
     /// The request object.
-    pub request: Vec<u8>,
+    pub request: super::spool::CompanionBytes,
     /// The payload object, if any.
-    pub payload: Option<Vec<u8>>,
+    pub payload: Option<super::spool::CompanionBytes>,
     /// The refusal the request is answered with, if any.
     pub refusal: Option<E2eeReplyCode>,
 }
@@ -485,9 +485,9 @@ pub struct CompleteRequest {
     /// Correlation.
     pub correlation: Correlation,
     /// Request bytes.
-    pub request: Vec<u8>,
+    pub request: super::spool::CompanionBytes,
     /// Payload bytes.
-    pub payload: Option<Vec<u8>>,
+    pub payload: Option<super::spool::CompanionBytes>,
     /// Set when the request is refused rather than run: a fresh request is
     /// answered with this failed result, which consumes its operation
     /// sequence and commits no semantic mutation (companion 12.5).
@@ -497,7 +497,7 @@ pub struct CompleteRequest {
 /// What one fragment did to its assembly.
 enum Ingested {
     /// The object is complete.
-    Complete(Vec<u8>),
+    Complete(super::spool::CompanionBytes),
     /// More fragments are needed, or this one repeated.
     Pending,
     /// The object completed recently; the prior outcome applies.
@@ -506,14 +506,18 @@ enum Ingested {
 
 /// An EREQUEST whose EPAYLOAD has not arrived.
 struct OpenRequest {
+    descriptor: AssemblyKey,
+    first_payload_deadline: Option<u64>,
+    large_control: Option<(CarrierCommand, [u8; 32])>,
     correlation: Correlation,
-    request: Vec<u8>,
-    payload_object_id: Option<[u8; 32]>,
+    request: super::spool::CompanionBytes,
+    payload_object_id: [u8; 32],
     refusal: Option<E2eeReplyCode>,
 }
 
 /// The coordinator.
 pub struct CompanionCoordinator {
+    pub(crate) spool: Option<super::spool::SpoolResources>,
     /// Network identity.
     pub network_id: [u8; 32],
     /// This server.
@@ -609,6 +613,7 @@ impl CompanionCoordinator {
             owner_reconstruction: owners::Diagnostics::default(),
             pending_owners: None,
             current_credential: None,
+            spool: None,
             assembler: E2eeAssembler::with_ceiling(
                 QuotaLimits::default(),
                 RecentCeiling::PerSender,
@@ -861,6 +866,14 @@ impl CompanionCoordinator {
         self.refused_origins.insert(key, generation);
     }
 
+    pub(crate) fn set_ingress(
+        &mut self,
+        peer: ServerId,
+        ingress: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    ) {
+        self.peers.entry(peer).or_default().ingress = ingress;
+    }
+
     /// Handles one admitted companion frame from `peer` on `link`.
     pub(crate) fn on_frame(
         &mut self,
@@ -881,7 +894,14 @@ impl CompanionCoordinator {
                 correlation,
                 object_id,
                 fragment,
-            } => self.on_request_fragment(peer, correlation, object_id, fragment, now_millis),
+            } => self.on_request_fragment(
+                peer,
+                correlation,
+                object_id,
+                fragment,
+                now_millis,
+                |capacity| host.reserve_cut_backing(capacity).ok(),
+            ),
             CompanionFrame::Payload {
                 correlation,
                 object_id,
@@ -915,7 +935,6 @@ impl CompanionCoordinator {
         &mut self,
         key: AssemblyKey,
         peer: ServerId,
-        command: CarrierCommand,
         fragment: &agenc_relay_e2ee::wire::fragment::FragmentTag,
         now_millis: u64,
     ) -> Result<Ingested, CompanionFault> {
@@ -925,10 +944,16 @@ impl CompanionCoordinator {
         };
         let now = now_millis / 1_000;
         self.expire_assemblies(now);
-        match self
-            .assembler
-            .ingest(key, scopes, command.limit(), fragment, now)
-        {
+        let link = self.peers.get(&peer).and_then(|peer| peer.ingress.clone());
+        match super::spool::ingest_control(
+            &mut self.assembler,
+            self.spool.as_ref(),
+            link,
+            key,
+            scopes,
+            fragment,
+            now,
+        ) {
             Ok(Ingest::Complete(bytes)) => Ok(Ingested::Complete(bytes)),
             Ok(Ingest::Incomplete | Ingest::Duplicate) => Ok(Ingested::Pending),
             Ok(Ingest::Recent) => Ok(Ingested::Recent),
@@ -943,7 +968,20 @@ impl CompanionCoordinator {
     fn expire_assemblies(&mut self, now: u64) {
         if now > self.recent_expired_at {
             self.recent_expired_at = now;
-            let _discarded = self.assembler.expire(now);
+            let expired: BTreeSet<_> = self.assembler.expire(now).into_iter().collect();
+            self.open.retain(|_, open| {
+                let mut payload = open.descriptor.clone();
+                payload.object_id = agenc_relay_e2ee::ObjectId::from_bytes(open.payload_object_id);
+                let waiting_expired = open
+                    .first_payload_deadline
+                    .is_some_and(|until| now >= until);
+                if waiting_expired || expired.contains(&payload) {
+                    self.assembler.forget(&open.descriptor);
+                    false
+                } else {
+                    true
+                }
+            });
         }
     }
 
@@ -975,6 +1013,7 @@ impl CompanionCoordinator {
         object_id: [u8; 32],
         fragment: agenc_relay_e2ee::wire::fragment::FragmentTag,
         now_millis: u64,
+        reserve: impl FnOnce(usize) -> Option<crate::budget::MemoryPermit>,
     ) -> Result<Vec<sync::Action>, CompanionFault> {
         if correlation.peer_server_id != *self.server_id.as_bytes() {
             return Err(CompanionFault::Protocol);
@@ -987,38 +1026,48 @@ impl CompanionCoordinator {
         };
         let command = CarrierCommand::Federation(ArcWireObjectKind::FederationRequest);
         let key = Self::assembly_key(peer, &correlation, command, object_id);
-        let bytes = match self.ingest(key.clone(), peer, command, &fragment, now_millis)? {
+        let bytes = match self.ingest(key.clone(), peer, &fragment, now_millis)? {
             Ingested::Complete(bytes) => bytes,
             Ingested::Pending => return Ok(Vec::new()),
-            Ingested::Recent => return self.replay_recent(peer, &correlation, object_id),
+            Ingested::Recent => return self.replay_recent(peer, &correlation, object_id, reserve),
         };
-        let payload_object_id =
-            request::payload_object_id(&bytes).map_err(|_| CompanionFault::Protocol)?;
+        let decoded = request::decode_request(&bytes).map_err(|_| CompanionFault::Protocol)?;
+        let refusal = self.refusal_for(&key);
+        if decoded.payload_object_id.as_slice().is_empty() {
+            return Ok(vec![sync::Action::Execute(CompleteRequest {
+                correlation,
+                request: bytes,
+                payload: None,
+                refusal,
+            })]);
+        }
+        let payload_object_id = decoded
+            .payload_object_id
+            .exactly::<32>()
+            .map_err(|_| CompanionFault::Protocol)?;
+        // A peer only occupies its own bounded descriptor waits.
+        let waiting = self
+            .open
+            .range((peer, [0; 16])..=(peer, [u8::MAX; 16]))
+            .count();
+        if waiting >= MAX_QUEUED_COMPANION_REQUESTS {
+            return Err(CompanionFault::Ceiling);
+        }
+        let large_control = request::large_control(&decoded, &self.network_id, &correlation);
+        let carrier = large_control.map_or(CarrierCommand::DeliverWelcome, |(carrier, _)| carrier);
+        let (absolute, idle) = carrier.limit().deadline.seconds();
+        let until = (now_millis / 1_000).saturating_add(idle.min(absolute));
         let open = OpenRequest {
+            descriptor: key,
+            first_payload_deadline: Some(until),
+            large_control,
             correlation,
             request: bytes,
             payload_object_id,
-            refusal: self.refusal_for(&key),
+            refusal,
         };
-        if open.payload_object_id.is_some() {
-            // Each peer has its own payload waits: one peer's never refuse
-            // another's.
-            let waiting = self
-                .open
-                .range((peer, [0; 16])..=(peer, [u8::MAX; 16]))
-                .count();
-            if waiting >= MAX_QUEUED_COMPANION_REQUESTS {
-                return Err(CompanionFault::Ceiling);
-            }
-            self.open.insert((peer, correlation.request_id), open);
-            return Ok(Vec::new());
-        }
-        Ok(vec![sync::Action::Execute(CompleteRequest {
-            correlation: open.correlation,
-            request: open.request,
-            payload: None,
-            refusal: open.refusal,
-        })])
+        self.open.insert((peer, correlation.request_id), open);
+        Ok(Vec::new())
     }
 
     /// The stored answer of a request object the assembler already saw;
@@ -1028,6 +1077,7 @@ impl CompanionCoordinator {
         peer: ServerId,
         correlation: &Correlation,
         object_id: [u8; 32],
+        reserve: impl FnOnce(usize) -> Option<crate::budget::MemoryPermit>,
     ) -> Result<Vec<sync::Action>, CompanionFault> {
         let home = *peer.as_bytes();
         let key = agenc_relay_storage::e2ee_records::ReplayKey {
@@ -1053,7 +1103,7 @@ impl CompanionCoordinator {
         let responses = stored
             .responses
             .iter()
-            .map(|id| self.state.objects.get(id).cloned())
+            .map(|id| self.state.objects.get(id).map(Vec::as_slice))
             .collect::<Option<Vec<_>>>();
         let Some(responses) = responses else {
             return Ok(vec![sync::Action::ReadResponses(response_read::Identity {
@@ -1062,9 +1112,16 @@ impl CompanionCoordinator {
                 request_object_id: object_id,
             })]);
         };
-        let lines = execute::replay_lines(self, correlation, home, &stored.result, &responses)
-            .map_err(|_| CompanionFault::Protocol)?;
-        Ok(vec![sync::Action::Send(lines)])
+        let reply = crate::e2ee::outbound::Reply::retained(
+            &self.server_name,
+            *correlation,
+            home,
+            &stored.result,
+            &responses,
+            reserve,
+        )
+        .map_err(|_| CompanionFault::Ceiling)?;
+        Ok(vec![sync::Action::Replay(reply)])
     }
 
     /// EPAYLOAD: completes the open request; a retransmitted payload the
@@ -1084,31 +1141,107 @@ impl CompanionCoordinator {
             peer_server_id: *peer.as_bytes(),
             ..correlation
         };
-        let expected = self
+        let now = now_millis / 1_000;
+        self.expire_assemblies(now);
+        let open = self
             .open
             .get(&(peer, correlation.request_id))
             .filter(|open| open.correlation == correlation)
-            .and_then(|open| open.payload_object_id)
             .ok_or(CompanionFault::Protocol)?;
-        if expected != object_id {
+        if open.payload_object_id != object_id {
             return Err(CompanionFault::Protocol);
         }
-        let command = CarrierCommand::Federation(ArcWireObjectKind::FederationRequest);
-        let key = Self::assembly_key(peer, &correlation, command, object_id);
-        let limit_command = CarrierCommand::DeliverWelcome;
-        let (bytes, refusal) =
-            match self.ingest(key.clone(), peer, limit_command, &fragment, now_millis)? {
-                Ingested::Complete(bytes) => (bytes, self.refusal_for(&key)),
-                Ingested::Pending => return Ok(Vec::new()),
-                Ingested::Recent => (
-                    self.state
-                        .objects
-                        .get(&object_id)
-                        .cloned()
-                        .ok_or(CompanionFault::Protocol)?,
-                    None,
-                ),
+        let large_control = open.large_control;
+        let key = Self::assembly_key(
+            peer,
+            &correlation,
+            CarrierCommand::Federation(ArcWireObjectKind::FederationRequest),
+            object_id,
+        );
+        let peer_scope = QuotaScopes {
+            peer: Some(*peer.as_bytes()),
+            ..QuotaScopes::default()
+        };
+        let total = usize::try_from(fragment.total).map_err(|_| CompanionFault::Ceiling)?;
+        let large = total > agenc_relay_e2ee::limits::MAX_LIVE_REASSEMBLY_BYTES_PER_CONNECTION;
+        let link = self.peers.get(&peer).and_then(|sync| sync.ingress.clone());
+        let result = if let Some(spool) = self.spool.as_ref() {
+            let origin = self
+                .state
+                .origins
+                .get(&CompanionOriginKey::from(&correlation))
+                .filter(|origin| {
+                    origin.generation == correlation.origin_generation
+                        && !origin.suspended
+                        && !origin.fenced
+                });
+            let account = origin.and_then(|origin| origin.account_digest);
+            let authorized = account.is_some()
+                && origin
+                    .and_then(|origin| self.state.current_attachment(origin))
+                    .is_some();
+            let (carrier, route) =
+                large_control.unwrap_or((CarrierCommand::DeliverWelcome, [0; 32]));
+            if large && (large_control.is_none() || !authorized || link.is_none()) {
+                self.assembler.discard(&key);
+                return Err(CompanionFault::Assembly(E2eeReplyCode::ReassemblyLimit));
+            }
+            let scopes = QuotaScopes {
+                account,
+                route: large_control.map(|_| route),
+                ..peer_scope
             };
+            let admission = super::spool::Admission {
+                key: key.clone(),
+                carrier,
+                scopes,
+                authenticated_spool: authorized && large_control.is_some(),
+            };
+            spool.ingest(&mut self.assembler, admission, &fragment, now, link.clone())
+        } else {
+            // The standalone executor has no authenticated disk allocator.
+            if large {
+                return Err(CompanionFault::Assembly(E2eeReplyCode::ReassemblyLimit));
+            }
+            self.assembler.ingest_backed(
+                key.clone(),
+                peer_scope,
+                CarrierCommand::DeliverWelcome.limit(),
+                &fragment,
+                now,
+                agenc_relay_e2ee::wire::assembly::AssemblyBacking::Memory(&|_| Ok(Box::new(()))),
+            )
+        }
+        .map_err(|error| CompanionFault::Assembly(error.reply_code()))?;
+        let (bytes, refusal) = match result {
+            Ingest::Complete(object) => (
+                super::spool::CompanionBytes::from(object),
+                self.refusal_for(&key),
+            ),
+            Ingest::Duplicate | Ingest::Incomplete => {
+                let open = self
+                    .open
+                    .get_mut(&(peer, correlation.request_id))
+                    .ok_or(CompanionFault::Protocol)?;
+                // The assembler now owns the payload's absolute and idle deadlines.
+                open.first_payload_deadline = None;
+                return Ok(Vec::new());
+            }
+            Ingest::Recent => {
+                let bytes = self
+                    .state
+                    .objects
+                    .get(&object_id)
+                    .ok_or(CompanionFault::Protocol)?;
+                let copy = match &self.spool {
+                    Some(spool) => spool
+                        .copy_for_dispatch(bytes, link)
+                        .map_err(|e| CompanionFault::Assembly(e.reply_code()))?,
+                    None => bytes.clone().into(),
+                };
+                (copy, None)
+            }
+        };
         let open = self
             .open
             .remove(&(peer, correlation.request_id))

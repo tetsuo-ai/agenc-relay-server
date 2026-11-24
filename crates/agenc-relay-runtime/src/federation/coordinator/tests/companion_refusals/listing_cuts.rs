@@ -118,7 +118,8 @@ impl Fixture {
         request.encoded_parameters = Opaque::new(parameters)?;
         complete.request =
             ArcWireObject::new(ArcWireObjectKind::FederationRequest, request.encode()?)?
-                .encode()?;
+                .encode()?
+                .into();
         Ok(complete)
     }
 }

@@ -964,7 +964,7 @@ const E2EE_LINE_TOKENS_PER_SECOND: f64 = 4.0;
 const E2EE_LINE_BURST: f64 = 8.0;
 /// The dedicated ingress bucket refills `MIN_ADMITTED_E2EE_INGRESS_RATE`
 /// decoded bytes a second per account and device.
-const E2EE_INGRESS_BYTES_PER_SECOND: f64 = 65_536.0;
+const E2EE_INGRESS_BYTES_PER_SECOND: u32 = 65_536;
 /// Half the published burst of one live object, for the same reason the
 /// line burst stays inside twenty: the server credits whole seconds.
 const E2EE_INGRESS_BURST: f64 = 131_072.0;
@@ -1084,8 +1084,9 @@ impl ArcClient {
             self.e2ee_refilled = now;
             self.e2ee_tokens =
                 (self.e2ee_tokens + elapsed * E2EE_LINE_TOKENS_PER_SECOND).min(E2EE_LINE_BURST);
-            self.e2ee_bytes =
-                (self.e2ee_bytes + elapsed * E2EE_INGRESS_BYTES_PER_SECOND).min(E2EE_INGRESS_BURST);
+            self.e2ee_bytes = (self.e2ee_bytes
+                + elapsed * f64::from(E2EE_INGRESS_BYTES_PER_SECOND))
+            .min(E2EE_INGRESS_BURST);
             match charge {
                 E2eeCharge::Bytes(bytes) if self.e2ee_bytes >= bytes => {
                     self.e2ee_bytes -= bytes;
@@ -1119,14 +1120,23 @@ impl ArcClient {
     fn read_until_within(
         &mut self,
         limit: usize,
+        complete: impl FnMut(&str) -> bool,
+    ) -> TestResult<Vec<String>> {
+        self.read_until_deadline(limit, REPLY_DEADLINE, complete)
+    }
+
+    fn read_until_deadline(
+        &mut self,
+        limit: usize,
+        timeout: Duration,
         mut complete: impl FnMut(&str) -> bool,
     ) -> TestResult<Vec<String>> {
-        let deadline = Instant::now() + REPLY_DEADLINE;
+        let deadline = Instant::now() + timeout;
         let mut lines = Vec::new();
         for _ in 0..limit {
             if Instant::now() > deadline {
                 return Err(failure(format!(
-                    "reply did not arrive within {REPLY_DEADLINE:?}; first lines {:?}; last lines {:?}",
+                    "reply did not arrive within {timeout:?}; first lines {:?}; last lines {:?}",
                     lines.iter().take(5).collect::<Vec<_>>(),
                     lines.iter().rev().take(3).collect::<Vec<_>>()
                 )));
@@ -2080,9 +2090,18 @@ fn tag_value(line: &str, key: &str) -> Option<String> {
 /// Reads the labeled reply: one line, or a whole `agenc.ag/e2ee-objects`
 /// batch when the reply opens one.
 fn labeled_reply(client: &mut ArcClient, label: &str) -> TestResult<Vec<String>> {
+    labeled_reply_within(client, label, TRANSCRIPT_LINES, REPLY_DEADLINE)
+}
+
+fn labeled_reply_within(
+    client: &mut ArcClient,
+    label: &str,
+    limit: usize,
+    timeout: Duration,
+) -> TestResult<Vec<String>> {
     let mut batch_id: Option<String> = None;
     client
-        .read_until(|line| {
+        .read_until_deadline(limit, timeout, |line| {
             if let Some(id) = &batch_id {
                 return line.contains(&format!(" BATCH -{id}"));
             }
@@ -4394,6 +4413,55 @@ mod real_clients {
             .ok_or_else(|| failure(format!("no EKEY CLAIMED line in {reply:?}")))
     }
 
+    /// A multi-megabyte object crosses federation before the first batch
+    /// line. Bound both the fragment count and the time at the configured rate.
+    fn object_reply(client: &mut ArcClient, label: &str, bytes: usize) -> TestResult<Vec<String>> {
+        let limit = TRANSCRIPT_LINES + bytes.div_ceil(e2ee::limits::MAX_FRAGMENT_RAW);
+        if limit <= 2 * TRANSCRIPT_LINES {
+            return labeled_reply_within(client, label, limit, REPLY_DEADLINE);
+        }
+        let transfer = u64::try_from(bytes)?.div_ceil(u64::from(E2EE_INGRESS_BYTES_PER_SECOND));
+        let timeout = REPLY_DEADLINE + Duration::from_secs(transfer);
+        let previous = client.reader.get_ref().sock.read_timeout()?;
+        client
+            .reader
+            .get_ref()
+            .sock
+            .set_read_timeout(Some(timeout))?;
+        let response = labeled_reply_within(client, label, limit, timeout);
+        client.reader.get_ref().sock.set_read_timeout(previous)?;
+        response
+    }
+
+    /// Encodes the complete recipient mailbox carrier for native Welcome bytes.
+    pub(super) fn welcome_object(
+        target: &Principal,
+        bound: &BoundConversation,
+        proof: ([u8; 32], [u8; 32]),
+        key_package_ref: &[u8],
+        welcome: &[u8],
+    ) -> TestResult<Vec<u8>> {
+        let delivered = ArcDeliveredWelcome {
+            profile_version: 1,
+            network_id: *NETWORK_ID.as_bytes(),
+            conversation_id: bound.conversation,
+            target_account_id_digest: account_id_digest(NETWORK_ID.as_bytes(), &target.account)?,
+            target_device_id: [target.device; 16],
+            authorization: ArcNormalJoinAuthorizationProof {
+                finalization_id: proof.0,
+                finalization_object_id: proof.1,
+                added_key_package_ref: Opaque::new(key_package_ref.to_vec())?,
+                resulting_leaf_index: 1,
+                resulting_leaf_credential_hash: [0; 32],
+            },
+            transition_proofs: ArcJoinTransitionProofBundle {
+                references: TlsVec::new(Vec::new())?,
+            },
+            welcome_bytes: Opaque::new(welcome.to_vec())?,
+        };
+        wire_object(ArcWireObjectKind::WelcomeMls, &delivered)
+    }
+
     /// Delivers `welcome` to `target` under the finalization that added it,
     /// fetches it from the target's mailbox, and returns the Welcome bytes.
     // agenc-review: allow owner=tests reviewed=2026-09-04 reason=one delivery names both clients both principals the conversation the certification the package reference and the welcome together
@@ -4408,48 +4476,59 @@ mod real_clients {
         key_package_ref: &[u8],
         welcome: &[u8],
     ) -> TestResult<Vec<u8>> {
-        let delivered = ArcDeliveredWelcome {
-            profile_version: 1,
-            network_id: *NETWORK_ID.as_bytes(),
-            conversation_id: bound.conversation,
-            target_account_id_digest: account_id_digest(NETWORK_ID.as_bytes(), &target.account)?,
-            target_device_id: [target.device; 16],
-            authorization: ArcNormalJoinAuthorizationProof {
-                finalization_id: certified.finalization_id,
-                finalization_object_id: certified.record_id,
-                added_key_package_ref: Opaque::new(key_package_ref.to_vec())?,
-                resulting_leaf_index: 1,
-                resulting_leaf_credential_hash: [0; 32],
-            },
-            transition_proofs: ArcJoinTransitionProofBundle {
-                references: TlsVec::new(Vec::new())?,
-            },
-            welcome_bytes: Opaque::new(welcome.to_vec())?,
-        };
-        let object = wire_object(ArcWireObjectKind::WelcomeMls, &delivered)?;
-        let label = sender_keys.label();
-        send_object(
-            sender,
-            &label,
-            &format!(
-                "EKEY DELIVER WELCOME {} {} {} {}",
-                base64url_encode(&target.account),
-                target.device_token(),
-                base64url_encode(&bound.conversation),
-                base64url_encode(&certified.finalization_id)
-            ),
-            &object,
+        let object = welcome_object(
+            target,
+            bound,
+            (certified.finalization_id, certified.record_id),
+            key_package_ref,
+            welcome,
         )?;
+        let command = format!(
+            "EKEY DELIVER WELCOME {} {} {} {}",
+            base64url_encode(&target.account),
+            target.device_token(),
+            base64url_encode(&bound.conversation),
+            base64url_encode(&certified.finalization_id)
+        );
+        if welcome.len() == e2ee::limits::MAX_EMBEDDED_MLS_WELCOME_BYTES {
+            super::encrypted_clients::check_welcome_carrier_boundary(
+                sender,
+                sender_keys,
+                &command,
+                &object,
+            )?;
+        }
+        let label = sender_keys.label();
+        send_object(sender, &label, &command, &object)?;
         let reply = labeled_reply(sender, &label)?;
         assert_contains(&reply, " EKEY STORED WELCOME ")?;
         let object_id = *e2ee::ObjectId::compute(&object).as_bytes();
 
         let label = target.label();
         receiver.send(&format!("@label={label} EKEY FETCH MAILBOX WELCOME *"))?;
-        let page = labeled_reply(receiver, &label)?;
+        let page = object_reply(receiver, &label, object.len())?;
         assert_contains(&page, " EKEY MAILBOX ")?;
         let token = hash_at(&page, "MAILBOX", 3)?;
-        assert_eq!(fragments_object(&page)?, object);
+        let fetched = fragments_object(&page)?;
+        if fetched != object {
+            return Err(failure(
+                "mailbox fetch did not reproduce the delivered Welcome",
+            ));
+        }
+        if welcome.len() == e2ee::limits::MAX_EMBEDDED_MLS_WELCOME_BYTES {
+            let label = target.label();
+            receiver.send(&format!(
+                "@label={label} EGROUP FETCH OBJECT {} {}",
+                base64url_encode(&bound.conversation),
+                base64url_encode(&object_id)
+            ))?;
+            let answer = object_reply(receiver, &label, object.len())?;
+            if fragments_object(&answer)? != object {
+                return Err(failure(
+                    "registered recipient object query returned different bytes",
+                ));
+            }
+        }
         let label = target.label();
         receiver.send(&format!(
             "@label={label} EKEY ACK MAILBOX {} {}",
@@ -4458,7 +4537,14 @@ mod real_clients {
         ))?;
         let acked = labeled_reply(receiver, &label)?;
         assert_contains(&acked, " EKEY ACKED ")?;
-        Ok(welcome.to_vec())
+        let mut budget = DecodeBudget::new(e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT, 1 << 16);
+        let envelope =
+            ArcWireObject::decode_kind(&fetched, Some(ArcWireObjectKind::WelcomeMls), &mut budget)?;
+        let delivered: ArcDeliveredWelcome = ArcDeliveredWelcome::decode_exact(
+            envelope.body(),
+            &mut DecodeBudget::new(e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT, 1 << 16),
+        )?;
+        Ok(delivered.welcome_bytes.as_slice().to_owned())
     }
 
     /// Sends real MLS application bytes on the bound channel and returns the

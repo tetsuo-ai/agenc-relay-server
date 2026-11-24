@@ -6,7 +6,7 @@ use agenc_relay_e2ee::E2eeError;
 use agenc_relay_e2ee::ids::conversation_id;
 use agenc_relay_e2ee::limits::PROFILE_VERSION;
 use agenc_relay_e2ee::mls_outer::{MlsOuterMessage, parse_mls_message};
-use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind as Kind};
+use agenc_relay_e2ee::object::{ArcWireObjectKind as Kind, ArcWireObjectRef};
 use agenc_relay_e2ee::objects::aad::{ArcApplicationAad, ArcCommitAad};
 use agenc_relay_e2ee::objects::reinit::ArcStagedReInit;
 use agenc_relay_e2ee::objects::sequencing::ArcDeliveredWelcome;
@@ -31,7 +31,8 @@ fn encrypted_lineages(
     exec: &Exec<'_>,
     bytes: &[u8],
 ) -> Result<Option<EncryptedLineages>, E2eeError> {
-    let (kind, _) = ArcWireObject::peek(bytes)?;
+    let object = ArcWireObjectRef::parse(bytes)?;
+    let kind = object.kind();
     if kind.is_server_only() {
         return Err(E2eeError::WrongKind);
     }
@@ -42,10 +43,9 @@ fn encrypted_lineages(
         return Ok(None);
     }
     let mut budget = DecodeBudget::new(kind.maximum_object_bytes(), 1 << 20);
-    let object = ArcWireObject::decode_kind(bytes, Some(kind), &mut budget)?;
     let ids = match kind {
         Kind::ApplicationMls | Kind::CommitMls => {
-            (private_conversation(exec, &object, &mut budget)?, None)
+            (private_conversation(exec, object, &mut budget)?, None)
         }
         Kind::WelcomeMls => {
             let welcome = ArcDeliveredWelcome::decode_exact(object.body(), &mut budget)?;
@@ -75,7 +75,7 @@ fn encrypted_lineages(
 
 fn private_conversation(
     exec: &Exec<'_>,
-    object: &ArcWireObject,
+    object: ArcWireObjectRef<'_>,
     budget: &mut DecodeBudget,
 ) -> Result<[u8; 32], E2eeError> {
     let MlsOuterMessage::Private(header) = parse_mls_message(object.body(), budget)? else {

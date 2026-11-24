@@ -411,7 +411,7 @@ impl RegistrationRouter {
         });
         if !admitted {
             for output in e2ee.rate_limited(generation, message) {
-                let _sent = context.send_to(output.generation, output.frames);
+                context.send_companion_output(output);
             }
             return ResultClass::Rejected;
         }
@@ -425,7 +425,7 @@ impl RegistrationRouter {
         let outputs = e2ee.client_line(context, edge, generation, message, &facts);
         let refused = !outputs.is_empty();
         for output in outputs {
-            let _sent = context.send_to(output.generation, output.frames);
+            context.send_companion_output(output);
         }
         if refused {
             ResultClass::Rejected
@@ -484,7 +484,7 @@ impl RegistrationRouter {
         outputs.extend(e2ee.barrier_outputs(context, edge));
         outputs.extend(e2ee.batch_applied_outputs());
         for output in outputs {
-            let _sent = context.send_to(output.generation, output.frames);
+            context.send_companion_output(output);
         }
     }
 
@@ -3450,7 +3450,7 @@ impl CommandRouter for RegistrationRouter {
         if let (Some(e2ee), Some(edge)) = (self.e2ee.as_mut(), self.edge.as_mut()) {
             let outputs = e2ee.batch_applied(context, edge);
             for output in outputs {
-                let _sent = context.send_to(output.generation, output.frames);
+                context.send_companion_output(output);
             }
         }
         // A committed barrier part may have completed the set.
@@ -3817,7 +3817,7 @@ impl RegistrationRouter {
             return;
         };
         for output in e2ee.drain_waiting_events(context, edge) {
-            let _sent = context.send_to(output.generation, output.frames);
+            context.send_companion_output(output);
         }
     }
 

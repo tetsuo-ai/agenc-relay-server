@@ -145,7 +145,7 @@ fn queue_complete(fixture: &mut Fixture) -> TestResult {
             operation_sequence: request.operation_sequence,
             request_id: request.request_id,
         },
-        request: fixture.request_bytes.clone(),
+        request: fixture.request_bytes.clone().into(),
         payload: None,
         refusal: None,
     };

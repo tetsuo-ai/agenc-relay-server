@@ -554,7 +554,7 @@ impl E2eeEdge {
         route: [u8; 32],
         object_id: [u8; 32],
         fragment: &FragmentTag,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
+    ) -> Result<Option<crate::e2ee::spool::CompanionBytes>, Refusal> {
         let coordinator = *self.config.coordinator_server_id.as_bytes();
         let command = CarrierCommand::Federation(kind);
         // A resolution object is keyed by its token, not its content.
@@ -570,10 +570,12 @@ impl E2eeEdge {
             peer: Some(coordinator),
             ..QuotaScopes::default()
         };
-        match self.assembler.ingest(
+        match crate::e2ee::spool::ingest_control(
+            &mut self.assembler,
+            self.spool.as_ref(),
+            self.ingress_link.clone(),
             key,
             scopes,
-            command.limit(),
             fragment,
             context.now().get() / 1_000,
         ) {

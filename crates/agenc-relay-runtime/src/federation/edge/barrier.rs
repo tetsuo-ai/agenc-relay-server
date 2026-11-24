@@ -115,7 +115,7 @@ pub(super) fn companion_part(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
     part: BarrierPart,
-    payload: Option<Vec<u8>>,
+    payload: Option<&[u8]>,
 ) -> Result<(), Violation> {
     let expected = identity(
         edge,
@@ -140,7 +140,7 @@ fn stage_part(
     context: &mut StateCoreContext,
     part: BarrierPart,
     base_event: Option<(EventHeader, ProjectedEvent)>,
-    payload: Option<Vec<u8>>,
+    payload: Option<&[u8]>,
 ) -> Result<(), Violation> {
     let mutation_id = part.identity.mutation_id;
     if edge.barrier.applied.contains_key(&mutation_id) {
@@ -195,7 +195,7 @@ fn payload_row(
     edge: &EdgeFederation,
     context: &StateCoreContext,
     part: &BarrierPart,
-    payload: Option<Vec<u8>>,
+    payload: Option<&[u8]>,
     revision: u64,
 ) -> Result<Option<AccountServiceDurableWrite>, Violation> {
     use agenc_relay_storage::e2ee_records::{OBJECT_RECORD_KIND, ObjectRow};
@@ -206,12 +206,12 @@ fn payload_row(
             Err(Violation::Consistency)
         };
     };
-    if part.payload_object_id != Some(*agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes())
+    if part.payload_object_id != Some(*agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes())
         || usize::try_from(part.payload_object_bytes).ok() != Some(bytes.len())
     {
         return Err(Violation::Consistency);
     }
-    let row = ObjectRow::new(bytes).map_err(|_| Violation::Codec)?;
+    let row = ObjectRow::new(bytes.to_vec()).map_err(|_| Violation::Codec)?;
     let key = row.key().map_err(|_| Violation::Codec)?;
     if context
         .index()
@@ -449,6 +449,12 @@ fn apply_complete(
     let (upserted, removed) =
         apply_base_events(edge, context, &open, &mut fanout, &mut join_echoes)?;
     for output in companion_outputs {
+        // Committed barrier events and submission acknowledgements have a
+        // bounded eager representation. A bulk query never belongs to a
+        // barrier or its durable event/acknowledgement fanout.
+        if output.batch.is_some() {
+            return Err(Violation::Consistency);
+        }
         fanout.append(context, output.generation, output.frames)?;
     }
     let receipt = applied_receipt(context, &open)?;

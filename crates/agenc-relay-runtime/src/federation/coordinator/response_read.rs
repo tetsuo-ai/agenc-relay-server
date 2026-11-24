@@ -3,10 +3,10 @@
 
 mod io;
 
-use super::{FederationCoordinator, ReadStep, SendFailure, Violation, companion};
+use super::{FederationCoordinator, ReadStep, Violation, companion};
 use crate::bridge::StorageReadId;
 use crate::budget::MemoryPermit;
-use crate::e2ee::coordinator::response_read::{Candidate, Identity, Job, Output};
+use crate::e2ee::coordinator::response_read::{Candidate, Identity, Job};
 use crate::federation::LinkId;
 use crate::state_core::StateCoreContext;
 use agenc_relay_storage::ReadPlan;
@@ -168,33 +168,6 @@ fn advance(
     if let Some(executor) = coordinator.companion_exec.as_mut() {
         executor.request_answered(identity.peer, &identity.correlation);
     }
-    send(coordinator, context, link, identity.peer, output);
+    companion::send_reply(coordinator, context, link, identity.peer, output);
     Ok(())
-}
-
-fn send(
-    coordinator: &mut FederationCoordinator,
-    context: &mut StateCoreContext,
-    link: LinkId,
-    peer: ServerId,
-    mut output: Output,
-) {
-    let backing = output.backing();
-    for line in output.drain() {
-        let Some(live) = coordinator
-            .peers
-            .get(&peer)
-            .and_then(|state| state.live.as_ref())
-            .filter(|live| live.link == link)
-        else {
-            return;
-        };
-        if let Err(refusal) = live
-            .handle
-            .try_send_backed(line, std::sync::Arc::clone(&backing))
-        {
-            coordinator.send_failed(context, link, peer, SendFailure::from(refusal));
-            return;
-        }
-    }
 }

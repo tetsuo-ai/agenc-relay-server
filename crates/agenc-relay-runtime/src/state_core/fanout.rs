@@ -222,6 +222,23 @@ impl FanoutReservation {
         }
     }
 
+    /// Apply the normal whole-sink policy when its ordered output owner
+    /// cannot accept another group, including a pending privacy floor.
+    pub(super) fn saturated(
+        generation: ConnectionGeneration,
+        sink: Option<Arc<dyn ClientSink>>,
+    ) -> Self {
+        let mut reservation = Self::empty();
+        if let Some(sink) = sink {
+            reservation
+                .slow_consumers
+                .push(SlowConsumer { generation, sink });
+        } else {
+            reservation.excluded_closed = 1;
+        }
+        reservation
+    }
+
     /// Returns the number of sinks holding a prepared reservation.
     #[must_use]
     pub fn reserved_sinks(&self) -> usize {

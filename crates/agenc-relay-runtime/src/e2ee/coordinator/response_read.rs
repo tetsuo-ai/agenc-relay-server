@@ -9,7 +9,6 @@ use agenc_relay_e2ee::ObjectId;
 use agenc_relay_e2ee::federation::frames::Correlation;
 use agenc_relay_e2ee::object::ArcWireObject;
 use agenc_relay_e2ee::objects::federation::ArcFederationResponseDescriptor;
-use agenc_relay_federation_wire::FederationLineText;
 use agenc_relay_storage::e2ee_records::{OBJECT_RECORD_KIND, ObjectRow, ReplayKey, ReplayRow};
 use agenc_relay_storage::{PersistentRecordValue, ReadPlan, StoredKey, TableId};
 use agenc_relay_types::ServerId;
@@ -267,31 +266,15 @@ impl Job {
         }
         self.candidate.validate(coordinator)?;
         let identity = self.candidate.identity;
-        let lines = super::execute::replay_lines(
-            coordinator,
-            &identity.correlation,
+        Ok(crate::e2ee::outbound::Reply::new(
+            &coordinator.server_name,
+            identity.correlation,
             *identity.peer.as_bytes(),
-            &self.candidate.stored.result,
-            &self.bodies,
-        )
-        .map_err(|_| CompanionFault::Storage)?;
-        Ok(Output {
-            lines,
-            _memory: Arc::new(self._memory),
-        })
+            self.candidate.stored.result,
+            self.bodies,
+            Some(Arc::new(self._memory)),
+        ))
     }
 }
 
-pub(crate) struct Output {
-    lines: Vec<FederationLineText>,
-    _memory: Arc<MemoryPermit>,
-}
-
-impl Output {
-    pub(crate) fn backing(&self) -> Arc<MemoryPermit> {
-        Arc::clone(&self._memory)
-    }
-    pub(crate) fn drain(&mut self) -> std::vec::Drain<'_, FederationLineText> {
-        self.lines.drain(..)
-    }
-}
+pub(crate) type Output = crate::e2ee::outbound::Reply;

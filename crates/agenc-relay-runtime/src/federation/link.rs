@@ -278,7 +278,8 @@ pub async fn write_line<W: AsyncWrite + Unpin>(
 pub struct LinkOutbound {
     /// The line to write, or `None` when the owner asks the link to close.
     line: Option<FederationLineText>,
-    _reservation: Option<reservation::QueuedReservation>,
+    _reservation: Option<Arc<reservation::QueuedReservation>>,
+    transfer: Option<crate::e2ee::outbound::Cursor>,
 }
 
 /// Why one line was not queued.
@@ -304,6 +305,7 @@ impl std::error::Error for SendRefusal {}
 /// The state owner's handle to one link's writer queue.
 #[derive(Clone)]
 pub struct LinkHandle {
+    pub(crate) ingress: Arc<Semaphore>,
     sender: mpsc::Sender<LinkOutbound>,
     queued_bytes: Arc<AtomicU64>,
     capacity_bytes: u64,
@@ -327,6 +329,7 @@ impl LinkHandle {
         match self.sender.try_send(LinkOutbound {
             line: Some(line),
             _reservation: None,
+            transfer: None,
         }) {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -344,6 +347,7 @@ impl LinkHandle {
         let _sent = self.sender.try_send(LinkOutbound {
             line: None,
             _reservation: None,
+            transfer: None,
         });
     }
 
@@ -362,6 +366,7 @@ fn release_queued(queued_bytes: &AtomicU64, bytes: u64) {
 
 /// The writer's end of one link queue.
 pub struct LinkQueue {
+    active: Option<LinkOutbound>,
     receiver: mpsc::Receiver<LinkOutbound>,
     queued_bytes: Arc<AtomicU64>,
     closed: Arc<std::sync::Mutex<bool>>,
@@ -379,9 +384,34 @@ impl Drop for LinkQueue {
 }
 
 impl LinkQueue {
+    /// Produce a single line at a time. The main link loop polls inbound
+    /// control and keepalive again between output fragments. FIFO requests
+    /// behind a transfer keep their place until its final write.
+    async fn next_output(&mut self) -> Option<LinkOutbound> {
+        if self.active.is_none() {
+            let item = self.receiver.recv().await?;
+            if item.transfer.is_none() {
+                return Some(item);
+            }
+            self.active = Some(item);
+        }
+        let item = self.active.as_mut()?;
+        let cursor = item.transfer.as_mut()?;
+        let line = cursor.next_line().ok()?;
+        let reservation = item._reservation.clone();
+        if !cursor.remaining() {
+            self.active = None;
+        }
+        Some(LinkOutbound {
+            line: Some(line),
+            _reservation: reservation,
+            transfer: None,
+        })
+    }
+
     /// Receives the next queued line, releasing its byte reservation.
     pub async fn recv(&mut self) -> Option<FederationLineText> {
-        let item = self.receiver.recv().await?;
+        let item = self.next_output().await?;
         let line = item.line?;
         let bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
         if item._reservation.is_none() {
@@ -399,12 +429,14 @@ pub fn link_queue(capacity_bytes: u64) -> (LinkHandle, LinkQueue) {
     let closed = Arc::new(std::sync::Mutex::new(false));
     (
         LinkHandle {
+            ingress: ingress_budget(),
             sender,
             queued_bytes: Arc::clone(&queued_bytes),
             capacity_bytes,
             closed: Arc::clone(&closed),
         },
         LinkQueue {
+            active: None,
             receiver,
             queued_bytes,
             closed,
@@ -490,7 +522,7 @@ where
         let deadline = link.keepalive.next_deadline().min(link.next_sweep);
         let step = tokio::select! {
             () = link.context.token.cancelled() => return LinkCloseReason::Cancelled,
-            outbound = queue.receiver.recv() => Step::Outbound(outbound),
+            outbound = queue.next_output() => Step::Outbound(outbound),
             frame = reader.next_line() => Step::Inbound(frame.map(Box::new)),
             () = tokio::time::sleep_until(deadline) => Step::Deadline,
         };

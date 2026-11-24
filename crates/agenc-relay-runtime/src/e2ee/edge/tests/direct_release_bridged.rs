@@ -34,6 +34,7 @@ fn frames(bridged: &Bridged) -> TestResult<Vec<CompanionFrame>> {
 /// A local connection authenticated as `held` with an attached device.
 fn attached(held: [u8; 24]) -> LocalOrigin {
     LocalOrigin {
+        ingress: crate::federation::link::ingress_budget(),
         origin_id: [21; 16],
         declared: Some(1),
         acked: Some(1),

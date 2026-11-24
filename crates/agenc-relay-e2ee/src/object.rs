@@ -234,6 +234,45 @@ pub struct ArcWireObject {
     body: Opaque<1, MAX_WIRE_OBJECT_BODY_BYTES>,
 }
 
+/// A borrowed view of a structurally validated wire envelope.
+#[derive(Clone, Copy)]
+pub struct ArcWireObjectRef<'a> {
+    kind: ArcWireObjectKind,
+    body: &'a [u8],
+}
+
+impl<'a> ArcWireObjectRef<'a> {
+    /// Validates the encoded length, version and kind without copying the body.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, E2eeError> {
+        let (kind, _) = ArcWireObject::peek(bytes)?;
+        let body = bytes
+            .get(WIRE_OBJECT_ENVELOPE_BYTES..)
+            .ok_or(E2eeError::LengthOutOfRange)?;
+        Ok(Self { kind, body })
+    }
+
+    /// The verified outer kind.
+    #[must_use]
+    pub const fn kind(self) -> ArcWireObjectKind {
+        self.kind
+    }
+
+    /// The encoded body, within the kind's complete-object limit.
+    #[must_use]
+    pub const fn body(self) -> &'a [u8] {
+        self.body
+    }
+}
+
+impl<'a> From<&'a ArcWireObject> for ArcWireObjectRef<'a> {
+    fn from(value: &'a ArcWireObject) -> Self {
+        Self {
+            kind: value.kind(),
+            body: value.body(),
+        }
+    }
+}
+
 impl ArcWireObject {
     /// Wraps an encoded body under `kind`, enforcing the kind's complete
     /// object maximum.
@@ -278,6 +317,16 @@ impl ArcWireObject {
     /// without copying the body, so a carrier can check the kind's limit
     /// before allocating.
     pub fn peek(bytes: &[u8]) -> Result<(ArcWireObjectKind, usize), E2eeError> {
+        Self::peek_header(bytes, bytes.len())
+    }
+
+    /// Validates a complete six-byte envelope header against the fragment
+    /// descriptor before opening a spool. The caller still authenticates
+    /// all fragments and verifies the complete object ID before dispatch.
+    pub fn peek_header(
+        bytes: &[u8],
+        object_bytes: usize,
+    ) -> Result<(ArcWireObjectKind, usize), E2eeError> {
         let mut budget = DecodeBudget::new(0, 0);
         let mut reader = Reader::new(bytes, &mut budget);
         if reader.u16()? != PROFILE_VERSION {
@@ -291,7 +340,7 @@ impl ArcWireObject {
         let total = declared
             .checked_add(WIRE_OBJECT_ENVELOPE_BYTES)
             .ok_or(E2eeError::Overflow)?;
-        if total != bytes.len() || total > kind.maximum_object_bytes() {
+        if total != object_bytes || total > kind.maximum_object_bytes() {
             return Err(E2eeError::LimitExceeded);
         }
         Ok((kind, declared))

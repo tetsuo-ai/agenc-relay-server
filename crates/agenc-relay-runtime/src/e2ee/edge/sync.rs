@@ -59,6 +59,7 @@ impl E2eeEdge {
         // A durable witness row no longer refuses the resume itself: the
         // coordinator can only prove the chain over a resumed link, and the
         // blocked phase below admits nothing but EWITNESS (12.5.1).
+        self.ingress_link = edge.companion_ingress_budget();
         let blocked = self.witness_recovery_pending();
         if !blocked && !self.prepare_witness_retry(context, edge) {
             return false;
@@ -200,16 +201,18 @@ impl E2eeEdge {
         order: Vec<[u8; 16]>,
     ) {
         for request_id in order {
-            let lines = self
+            let Some(transfer) = self
                 .pending
                 .get(&request_id)
-                .map(|pending| pending.frames.clone())
-                .unwrap_or_default()
-                .iter()
-                .map(|frame| self.line(frame))
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_default();
-            if lines.is_empty() || !self.send(context, edge, lines) {
+                .and_then(|pending| pending.transfer.clone())
+            else {
+                return;
+            };
+            let Ok(writer) = transfer.reserve_writer(context) else {
+                edge.fail_companion_link(context);
+                return;
+            };
+            if !edge.send_companion_transfer(context, &transfer, writer) {
                 return;
             }
         }

@@ -238,6 +238,7 @@ fn edge() -> E2eeEdge {
 
 fn origin(origin_id: [u8; 16], declared: u64, sequence: u64) -> LocalOrigin {
     LocalOrigin {
+        ingress: crate::federation::link::ingress_budget(),
         origin_id,
         declared: Some(declared),
         acked: None,
@@ -267,7 +268,7 @@ fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
         request_object_id: [7; 32],
         sequence,
         origin_generation: 0,
-        frames: Vec::new(),
+        transfer: None,
         result_object_id: None,
         result: answered.then(|| super::result::DecodedResult {
             request_object_id: [7; 32],
@@ -282,6 +283,7 @@ fn pending(generation: u64, sequence: u64, answered: bool) -> PendingRequest {
             descriptors: Vec::new(),
         }),
         responses: BTreeMap::new(),
+        early_completion: None,
         completion_seen: false,
         rendered: false,
     }

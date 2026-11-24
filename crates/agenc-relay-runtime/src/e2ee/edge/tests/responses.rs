@@ -22,6 +22,9 @@ use crate::federation::PeerIdentity;
 use crate::federation::edge::{EdgeConfig, EdgeFederation};
 use crate::test_support::StateCoreFixture;
 
+#[path = "responses/completion.rs"]
+mod completion;
+
 const REQUEST: [u8; 16] = [5; 16];
 
 fn waiting() -> E2eeEdge {
@@ -65,19 +68,50 @@ fn result(
     descriptors: Vec<ArcFederationResponseDescriptor>,
     state_generation: u64,
 ) -> TestResult<Vec<u8>> {
+    result_with_completion(descriptors, state_generation, None)
+}
+
+fn result_with_completion(
+    descriptors: Vec<ArcFederationResponseDescriptor>,
+    state_generation: u64,
+    completion: Option<[u8; 16]>,
+) -> TestResult<Vec<u8>> {
+    page_result(
+        [1; 32],
+        correlation(),
+        descriptors,
+        state_generation,
+        completion,
+    )
+}
+
+fn page_result(
+    network: [u8; 32],
+    local: Correlation,
+    descriptors: Vec<ArcFederationResponseDescriptor>,
+    state_generation: u64,
+    completion: Option<[u8; 16]>,
+) -> TestResult<Vec<u8>> {
+    let mailbox = descriptors
+        .iter()
+        .any(|d| !d.delivery_token.as_slice().is_empty());
     let result = ArcFederationResult {
         profile_version: 1,
-        network_id: [1; 32],
-        home_server_id: [2; 16],
-        server_incarnation: [4; 16],
-        origin_id: [8; 16],
-        origin_generation: 0,
-        operation_sequence: 0,
-        request_id: REQUEST,
+        network_id: network,
+        home_server_id: local.peer_server_id,
+        server_incarnation: local.server_incarnation,
+        origin_id: local.origin_id,
+        origin_generation: local.origin_generation,
+        operation_sequence: local.operation_sequence,
+        request_id: local.request_id,
         request_object_id: [7; 32],
         coordinator_state_generation: state_generation,
-        completion_event_id: Opaque::new(Vec::new())?,
-        result_kind: ArcFederationResultKind::ObjectPage,
+        completion_event_id: Opaque::new(completion.map_or_else(Vec::new, |id| id.to_vec()))?,
+        result_kind: if mailbox {
+            ArcFederationResultKind::MailboxPage
+        } else {
+            ArcFederationResultKind::ObjectPage
+        },
         encoded_result: Opaque::new(Vec::new())?,
         snapshot_token: Opaque::new(vec![9; 32])?,
         next_cursor: Opaque::new(Vec::new())?,
@@ -86,15 +120,26 @@ fn result(
     Ok(ArcWireObject::new(ArcWireObjectKind::FederationResult, result.encode()?)?.encode()?)
 }
 
-fn frames(index: Option<u16>, bytes: &[u8]) -> TestResult<Vec<CompanionFrame>> {
-    let correlation = Correlation {
+fn correlation() -> Correlation {
+    Correlation {
         peer_server_id: [2; 16],
         server_incarnation: [4; 16],
         origin_id: [8; 16],
         origin_generation: 0,
         operation_sequence: 0,
         request_id: REQUEST,
-    };
+    }
+}
+
+fn frames(index: Option<u16>, bytes: &[u8]) -> TestResult<Vec<CompanionFrame>> {
+    frames_for(correlation(), index, bytes)
+}
+
+fn frames_for(
+    correlation: Correlation,
+    index: Option<u16>,
+    bytes: &[u8],
+) -> TestResult<Vec<CompanionFrame>> {
     let object_id = *ObjectId::compute(bytes).as_bytes();
     Ok(fragment_object(bytes)?
         .into_iter()
@@ -195,8 +240,9 @@ fn conflicting_responses_and_result_envelopes_leave_previous_values_intact() -> 
             .get(&REQUEST)
             .ok_or("pending")?
             .responses
-            .get(&0),
-        Some(&bytes)
+            .get(&0)
+            .map(AsRef::as_ref),
+        Some(bytes.as_slice())
     );
 
     let mut edge = waiting();
@@ -394,5 +440,156 @@ fn a_result_for_an_unknown_request_is_dropped_and_one_for_another_object_is_refu
         }
     }
     assert!(refused, "a result for another request object is refused");
+    Ok(())
+}
+
+/// A physically small attached client queue can carry a legal mailbox
+/// response larger than a thousand IRC frames without widening its limits.
+#[tokio::test]
+async fn a_large_mailbox_reply_reaches_the_attached_client_in_order() -> TestResult {
+    use crate::connection::{ClientSink, QueueLimits, WriterQueue};
+    use crate::state_core::inbox::{CloseReason, SourceAddressKey};
+    use agenc_relay_client_wire::WireMessage;
+    use agenc_relay_e2ee::limits::MAX_FRAGMENT_RAW;
+    use agenc_relay_e2ee::wire::command::MailboxKind;
+    use agenc_relay_e2ee::wire::fragment::{FragmentTag, SERVER_FRAGMENT_TAG};
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+    let mut fixture = StateCoreFixture::new(vec![0; 4096])?;
+    let mut edge = waiting();
+    let directory = crate::test_support::TestDirectory::create()?;
+    let qualification = crate::test_support::signed_test_qualification(
+        agenc_relay_storage::StateDirectory::probe(&directory.0)?,
+    )?;
+    let state_dir = agenc_relay_storage::StateDirectory::open(&directory.0, &[qualification])?;
+    edge.spool = Some(crate::e2ee::spool::SpoolResources {
+        directory: Arc::new(state_dir.companion_spool_directory(0, 0)?),
+        disk: agenc_relay_storage::CompanionDisk::new(16 * 1024 * 1024)?,
+        memory: fixture.context_mut()?.backing_reservations(),
+    });
+    let link_capacity = 16 * 1024 * 1024;
+    let link_ingress = Arc::new(tokio::sync::Semaphore::new(link_capacity));
+    edge.ingress_link = Some(Arc::clone(&link_ingress));
+    let pending = edge
+        .pending
+        .get_mut(&REQUEST)
+        .ok_or("missing mailbox origin")?;
+    pending.command = Resolved::Command(ClientCommand::Ekey(EkeyCommand::FetchMailbox {
+        kind: MailboxKind::Welcome,
+        cursor: None,
+    }));
+    let generation = pending.generation;
+    let queue = WriterQueue::new(generation, QueueLimits::DEFAULT)?;
+    let context = fixture.context_mut()?;
+    let now = context.now();
+    context.sessions_mut().open(
+        generation,
+        crate::purpose::ListenerPurpose::ClientTls,
+        SourceAddressKey::onion_listener(),
+        Arc::clone(&queue) as Arc<dyn ClientSink>,
+        now,
+    )?;
+    let notice = |text| WireMessage::new("edge.example", "NOTICE", &["nick"], Some(text));
+    context.set_monotonic_for_test(100);
+    context.begin_secret_floor(generation);
+    assert!(
+        context
+            .hold_secret_floor(generation, vec![notice("before")?])
+            .is_ok()
+    );
+    let bytes = object(ArcWireObjectKind::WelcomeMls, 3 * 1024 * 1024 + 17, 19)?;
+    let object_id = ObjectId::compute(&bytes);
+    let mut described = descriptor(0, &bytes)?;
+    described.delivery_token = Opaque::new(vec![5; 32])?;
+    described.target_device_id = Opaque::new(vec![4; 16])?;
+    let event = super::result_kinds::completion_event()?;
+    let result = result_with_completion(vec![described], 1, Some(event.event_id))?;
+    assert!(receive(&mut edge, &mut fixture, None, &result)?.is_empty());
+    assert!(receive(&mut edge, &mut fixture, Some(0), &bytes)?.is_empty());
+    let mut base = super::projection::base_edge();
+    completion::stage(&mut edge, &mut fixture, &mut base, &event)?;
+    assert_eq!(queue.queue_snapshot().queued_bytes(), 0);
+    assert!(link_ingress.available_permits() <= link_capacity - bytes.len());
+    fixture.commit_staged_batch().await?;
+    let outputs = edge.batch_applied(fixture.context_mut()?, &mut base);
+    assert_eq!(outputs.len(), 1);
+    assert!(link_ingress.available_permits() <= link_capacity - bytes.len());
+    let context = fixture.context_mut()?;
+    for output in outputs {
+        context.send_companion_output(output);
+    }
+    context.send_to(generation, vec![notice("after")?])?;
+    assert_eq!(queue.queue_snapshot().queued_bytes(), 0);
+    context.set_monotonic_for_test(200);
+    assert!(context.release_secret_floor(generation));
+    let occupied = queue.queue_snapshot().queued_bytes();
+    assert!(
+        occupied < 8704 && occupied > 2940,
+        "one physical window: {occupied}"
+    );
+    queue.close(
+        CloseReason::Shutdown,
+        crate::connection::ClosePolicy::AfterFlush,
+    );
+    let (left, right) = tokio::io::duplex(4096);
+    let writer = crate::connection::run_writer(
+        left,
+        Arc::clone(&queue),
+        crate::cancel::CancellationToken::root(),
+    );
+    let read = async {
+        let mut reader = BufReader::new(right);
+        let mut line = String::new();
+        let mut fragments = 0;
+        let mut stage = 0;
+        while reader.read_line(&mut line).await? != 0 {
+            assert!(line.ends_with("\r\n") && line.len() <= 8703);
+            if line.contains(" EOBJECT ") {
+                assert_eq!(stage, 3);
+                let tag = line
+                    .split(' ')
+                    .next()
+                    .and_then(|tags| {
+                        tags.split(';').find_map(|tag| {
+                            tag.strip_prefix(SERVER_FRAGMENT_TAG)?.strip_prefix('=')
+                        })
+                    })
+                    .ok_or("missing eobject tag")?;
+                let fragment = FragmentTag::parse(tag)?;
+                assert_eq!(fragment.object_id, object_id);
+                assert_eq!(fragment.part as usize, fragments);
+                let start = fragments * MAX_FRAGMENT_RAW;
+                let end = (start + MAX_FRAGMENT_RAW).min(bytes.len());
+                assert_eq!(Some(fragment.segment.as_slice()), bytes.get(start..end));
+                fragments += 1;
+            } else {
+                match stage {
+                    0 => assert!(line.contains(" NOTICE nick :before")),
+                    1 => assert!(line.starts_with("@label=fetch ") && line.contains(" BATCH +")),
+                    2 => assert!(line.contains(" MAILBOX ")),
+                    3 => {
+                        assert!(line.contains(" BATCH -"));
+                        assert_eq!(fragments, bytes.len().div_ceil(MAX_FRAGMENT_RAW));
+                    }
+                    4 => assert!(line.contains(" NOTICE nick :after")),
+                    _ => return Err("unexpected client line".into()),
+                }
+                stage += 1;
+            }
+            line.clear();
+        }
+        assert_eq!(stage, 5);
+        assert!(fragments > 1024);
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (reason, read) = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        tokio::join!(writer, read)
+    })
+    .await?;
+    assert_eq!(reason, CloseReason::Shutdown);
+    read?;
+    assert_eq!(queue.queue_snapshot().queued_bytes(), 0);
+    assert_eq!(link_ingress.available_permits(), link_capacity);
     Ok(())
 }

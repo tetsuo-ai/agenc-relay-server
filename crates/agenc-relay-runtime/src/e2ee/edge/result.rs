@@ -15,11 +15,11 @@ use agenc_relay_e2ee::tls::{DecodeBudget, Reader, TlsDecode};
 use agenc_relay_e2ee::wire::assembly::{AssemblyKey, Direction, Ingest, QuotaScopes, Sender};
 use agenc_relay_e2ee::wire::carrier::CarrierCommand;
 use agenc_relay_e2ee::wire::command::ClientCommand;
-use agenc_relay_e2ee::wire::fragment::{FragmentTag, fragment_object};
+use agenc_relay_e2ee::wire::fragment::FragmentTag;
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 use agenc_relay_e2ee::wire::response::{
     BatchChild, BatchOpener, EmptyGroupKind, PendingKind, StoreKind, SuccessLine, render_broadcast,
-    render_eobject, render_fail, render_labeled, render_labeled_fail,
+    render_fail, render_labeled, render_labeled_fail,
 };
 
 use super::router::{Refusal, Resolved};
@@ -233,7 +233,7 @@ impl E2eeEdge {
             return Ok(Vec::new());
         }
         let Some(bytes) =
-            self.assemble_response(&correlation, object_id, index.is_none(), &fragment, context)?
+            self.assemble_response(&correlation, object_id, index, &fragment, context)?
         else {
             return Ok(Vec::new());
         };
@@ -245,20 +245,39 @@ impl E2eeEdge {
         &mut self,
         correlation: &Correlation,
         object_id: [u8; 32],
-        result: bool,
+        index: Option<u16>,
         fragment: &FragmentTag,
         context: &StateCoreContext,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
-        // A response object is any client-visible kind; its ceiling is the
-        // largest one (the Welcome mailbox object) until it decodes.
-        let command = if result {
-            CarrierCommand::Federation(ArcWireObjectKind::FederationResult)
-        } else {
-            CarrierCommand::Response(ArcWireObjectKind::WelcomeMls)
+    ) -> Result<Option<super::super::spool::CompanionBytes>, Refusal> {
+        let pending = self
+            .pending
+            .get(&correlation.request_id)
+            .ok_or(E2eeReplyCode::InvalidFragment)?;
+        let descriptor = match (index, &pending.result) {
+            (Some(index), Some(result)) => Some(
+                result
+                    .descriptors
+                    .get(usize::from(index))
+                    .filter(|d| {
+                        d.response_index == index
+                            && d.object_id == object_id
+                            && d.total_size == fragment.total
+                    })
+                    .ok_or(E2eeReplyCode::InvalidFragment)?,
+            ),
+            _ => None,
+        };
+        let command = match (index, descriptor) {
+            (None, _) => CarrierCommand::Federation(ArcWireObjectKind::FederationResult),
+            (Some(_), Some(d)) => CarrierCommand::Response(d.wire_kind),
+            (Some(_), None) => CarrierCommand::Response(ArcWireObjectKind::WelcomeMls),
         };
         let mut route = [0; 32];
         if let Some(head) = route.get_mut(..16) {
             head.copy_from_slice(&correlation.request_id);
+        }
+        if let (Some(index), Some(scope)) = (index, route.get_mut(16..18)) {
+            scope.copy_from_slice(&index.to_be_bytes());
         }
         let key = AssemblyKey {
             direction: Direction::Response,
@@ -268,16 +287,46 @@ impl E2eeEdge {
             scope: None,
             object_id: agenc_relay_e2ee::ObjectId::from_bytes(object_id),
         };
+        let account =
+            agenc_relay_e2ee::ids::account_id_digest(&self.config.network_id, &pending.account)
+                .map_err(|_| E2eeReplyCode::InvalidFragment)?;
         let scopes = QuotaScopes {
+            connection: None,
+            account: Some(account),
+            route: Some(pending.command.route_key()),
             peer: Some(*self.config.coordinator_server_id.as_bytes()),
-            ..QuotaScopes::default()
         };
         let now = context.now().get() / 1_000;
-        match self
-            .assembler
-            .ingest(key, scopes, command.limit(), fragment, now)
-        {
-            Ok(Ingest::Complete(bytes)) => Ok(Some(bytes)),
+        let result = if let Some(spool) = &self.spool {
+            let admission = super::super::spool::Admission {
+                key,
+                carrier: command,
+                scopes,
+                authenticated_spool: descriptor.is_some() && self.ingress_link.is_some(),
+            };
+            spool.ingest(
+                &mut self.assembler,
+                admission,
+                fragment,
+                now,
+                self.ingress_link.clone(),
+            )
+        } else {
+            self.assembler.ingest_backed(
+                key,
+                scopes,
+                command.limit(),
+                fragment,
+                now,
+                agenc_relay_e2ee::wire::assembly::AssemblyBacking::Memory(&|bytes| {
+                    Ok(Box::new(context.reserve_output_backing(bytes).map_err(
+                        |_| agenc_relay_e2ee::wire::assembly::AssemblyError::ReassemblyLimit,
+                    )?))
+                }),
+            )
+        };
+        match result {
+            Ok(Ingest::Complete(bytes)) => Ok(Some(bytes.into())),
             Ok(Ingest::Incomplete | Ingest::Duplicate | Ingest::Recent) => Ok(None),
             Err(error) => Err(error.reply_code().into()),
         }
@@ -287,55 +336,42 @@ impl E2eeEdge {
         &mut self,
         correlation: &Correlation,
         index: Option<u16>,
-        bytes: Vec<u8>,
+        bytes: impl Into<super::super::spool::CompanionBytes>,
     ) -> Result<(), Refusal> {
+        let bytes = bytes.into();
+        let internal = self.direct_probe == Some(correlation.request_id);
+        if internal && index.is_some() {
+            return Err(E2eeReplyCode::InvalidFragment.into());
+        }
         let pending = self
             .pending
             .get_mut(&correlation.request_id)
             .ok_or(E2eeReplyCode::InvalidFragment)?;
         let Some(index) = index else {
             let decoded = decode_result(&bytes).map_err(|_| E2eeReplyCode::InvalidFragment)?;
-            if decoded.request_object_id != pending.request_object_id {
+            if internal
+                && (decoded.completion_event_id.is_some() || !decoded.descriptors.is_empty())
+            {
+                return Err(E2eeReplyCode::InvalidFragment.into());
+            }
+            let ordinary = match &self.commit {
+                Some(super::PendingCommit::Event { completion, .. }) => Some(completion),
+                _ => None,
+            };
+            if decoded.request_object_id != pending.request_object_id
+                || self.barrier_completions.iter().chain(ordinary).any(|c| {
+                    c.rejects_result(correlation.request_id, pending, decoded.completion_event_id)
+                })
+            {
                 return Err(E2eeReplyCode::InvalidFragment.into());
             }
             let object_id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
-            super::response_validation::result(pending, &decoded, object_id)?;
-            if pending.result_object_id.is_some() {
-                return Ok(());
-            }
-            if let Some(completion) = decoded.completion_event_id {
-                if self.covered.remove(&completion) {
-                    pending.completion_seen = true;
-                } else {
-                    self.by_completion
-                        .insert(completion, correlation.request_id);
-                }
-            }
-            pending.result = Some(decoded);
-            pending.result_object_id = Some(object_id);
-            return Ok(());
+            return super::response_validation::accept_result(pending, decoded, object_id);
         };
         if super::response_validation::response(pending, index, &bytes)? {
             pending.responses.insert(index, bytes);
         }
         Ok(())
-    }
-
-    /// A completion event arrived for `request_id`, or for a request whose
-    /// result has not arrived yet.
-    pub(super) fn completion_arrived(&mut self, event_id: [u8; 16]) -> Option<[u8; 16]> {
-        match self.by_completion.remove(&event_id) {
-            Some(request_id) => {
-                if let Some(pending) = self.pending.get_mut(&request_id) {
-                    pending.completion_seen = true;
-                }
-                Some(request_id)
-            }
-            None => {
-                self.covered.insert(event_id);
-                None
-            }
-        }
     }
 
     /// Renders the answer once the result, every response, and the
@@ -345,44 +381,81 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         request_id: [u8; 16],
     ) -> Result<Vec<ClientOutput>, Refusal> {
-        let ready = self.pending.get(&request_id).is_some_and(|pending| {
-            pending.result.as_ref().is_some_and(|result| {
-                let complete = result
-                    .descriptors
-                    .iter()
-                    .all(|descriptor| pending.responses.contains_key(&descriptor.response_index));
-                let covered = result.completion_event_id.is_none() || pending.completion_seen;
-                complete && covered && !pending.rendered
-            })
-        });
-        if !ready {
+        let Some(pending) = self.pending.get(&request_id) else {
+            return Ok(Vec::new());
+        };
+        let Some(result) = pending.result.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if pending.rendered
+            || !complete_descriptors(pending, result)
+            || (result.completion_event_id.is_some() && !pending.completion_seen)
+        {
             return Ok(Vec::new());
         }
+        if self.direct_probe == Some(request_id) {
+            let probe = self
+                .pending
+                .remove(&request_id)
+                .and_then(|p| p.result)
+                .ok_or(E2eeReplyCode::InvalidFragment)?;
+            self.direct_answer(request_id, &probe.value)?;
+            return Ok(Vec::new());
+        }
+        let (answer, output) = self.prepare_answer(context, pending, result)?;
         let Some(mut pending) = self.pending.remove(&request_id) else {
             return Ok(Vec::new());
         };
-        let Some(result) = pending.result.clone() else {
-            return Ok(Vec::new());
-        };
-        if self.direct_answer(request_id, &result.value)? {
-            return Ok(Vec::new());
+        self.release_answer(context, &mut pending, answer, output)
+    }
+
+    /// A query with object bodies can hold a committed completion, just as a
+    /// scalar answer can. The shared response allocations stay with this cursor.
+    pub(super) fn prepare_answer(
+        &self,
+        context: &mut StateCoreContext,
+        pending: &PendingRequest,
+        result: &DecodedResult,
+    ) -> Result<(super::completion::PreparedAnswer, Option<ClientOutput>), Refusal> {
+        let total = result
+            .descriptors
+            .iter()
+            .try_fold(0_usize, |sum, d| sum.checked_add(d.total_size as usize))
+            .ok_or(E2eeReplyCode::ObjectTooLarge)?;
+        if total > agenc_relay_e2ee::limits::MAX_FRAGMENT_RAW
+            && pending.reply_key.is_none()
+            && !matches!(result.value, ResultValue::Failed { .. })
+            && result.kind != ArcFederationResultKind::AcceptedEvent
+        {
+            let batch = self.client_batch(context, pending, result, |i| {
+                pending.responses.get(&i).cloned()
+            })?;
+            return Ok((
+                super::completion::PreparedAnswer::Stream(Box::new(batch)),
+                None,
+            ));
         }
-        let generation = pending.generation;
-        let lines = self.render_answer(context, &pending, &result)?;
-        let mut retry_outputs = self.publish_reply(context, &mut pending, &lines)?;
+        let lines = self.render_answer(context, pending, result)?;
         let frames = lines
             .iter()
             .map(|line| WireMessage::extension_line(line))
-            .collect::<Result<Vec<_>, _>>()
+            .collect::<Result<_, _>>()
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-        retry_outputs.insert(0, ClientOutput { generation, frames });
-        Ok(retry_outputs)
+        let output = ClientOutput {
+            generation: pending.generation,
+            frames,
+            batch: None,
+        };
+        Ok((
+            super::completion::PreparedAnswer::Frames(lines),
+            Some(output),
+        ))
     }
 
     /// The lines of one answer: a failure, a scalar success, or an object
     /// batch; an accepted event renders through its echo instead.
     pub(super) fn render_answer(
-        &mut self,
+        &self,
         context: &mut StateCoreContext,
         pending: &PendingRequest,
         result: &DecodedResult,
@@ -426,18 +499,34 @@ impl E2eeEdge {
     /// fragments (a mailbox child before each), and the close.
     // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one batch is opened, filled in descriptor order with its metadata children, and closed as one unit
     fn render_batch(
-        &mut self,
+        &self,
         context: &mut StateCoreContext,
         pending: &PendingRequest,
         result: &DecodedResult,
     ) -> Result<Vec<String>, Refusal> {
+        let mut batch = self.client_batch(context, pending, result, |index| {
+            pending.responses.get(&index).cloned()
+        })?;
+        let mut lines = Vec::new();
+        while let Some(line) = batch.next_line()? {
+            lines.push(line.into_text());
+        }
+        Ok(lines)
+    }
+
+    fn client_batch(
+        &self,
+        context: &mut StateCoreContext,
+        pending: &PendingRequest,
+        result: &DecodedResult,
+        mut take: impl FnMut(u16) -> Option<super::super::spool::CompanionBytes>,
+    ) -> Result<super::ClientBatch, Refusal> {
         let server = self.config.server_name.clone();
         let mut scope = [0; 16];
         context
             .entropy_mut()
             .fill_exact(&mut scope)
             .map_err(|_| E2eeReplyCode::RateLimited)?;
-        self.counters.results_rendered = self.counters.results_rendered.saturating_add(0);
         let batch_id = batch_id_for(&scope);
         let first = result
             .descriptors
@@ -455,23 +544,23 @@ impl E2eeEdge {
             snapshot: result.snapshot_token.unwrap_or([0; 32]),
             next_cursor: result.next_cursor,
         };
-        let mut lines = vec![
+        let backing = context
+            .reserve_output_backing(batch_backing(&result.descriptors)?)
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
+        let mut batch = super::ClientBatch::new(server.clone(), batch_id.clone(), scope, backing);
+        batch.line(
             opener
                 .render(&server)
                 .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-        ];
+        )?;
         if let Some(child) = metadata_child(result) {
-            lines.push(
+            batch.line(
                 child
                     .render(&server, &batch_id)
                     .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-            );
+            )?;
         }
         for descriptor in &result.descriptors {
-            let bytes = pending
-                .responses
-                .get(&descriptor.response_index)
-                .ok_or(E2eeReplyCode::InvalidFragment)?;
             if let (Some(token), Some(device)) = (
                 optional::<32>(descriptor.delivery_token.as_slice())
                     .map_err(|_| E2eeReplyCode::InvalidFragment)?,
@@ -479,26 +568,46 @@ impl E2eeEdge {
                     .map_err(|_| E2eeReplyCode::InvalidFragment)?,
             ) {
                 let child = BatchChild::Mailbox(token, device, descriptor.object_id);
-                lines.push(
+                batch.line(
                     child
                         .render(&server, &batch_id)
                         .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-                );
+                )?;
             }
-            for fragment in fragment_object(bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
-                lines.push(
-                    render_eobject(&server, &batch_id, &fragment, descriptor.wire_kind, &scope)
-                        .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-                );
-            }
+            let bytes = take(descriptor.response_index).ok_or(E2eeReplyCode::InvalidFragment)?;
+            batch.object(descriptor.wire_kind, bytes)?;
         }
-        lines.push(
+        batch.line(
             opener
                 .render_close(&server)
                 .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-        );
-        Ok(lines)
+        )?;
+        Ok(batch)
     }
+}
+
+pub(super) fn complete_descriptors(pending: &PendingRequest, result: &DecodedResult) -> bool {
+    result
+        .descriptors
+        .iter()
+        .all(|d| pending.responses.contains_key(&d.response_index))
+}
+
+/// Each authenticated source retains its own original storage permit. This
+/// additional window covers descriptor metadata, framing and lexer scratch.
+fn batch_backing(descriptors: &[ArcFederationResponseDescriptor]) -> Result<usize, E2eeReplyCode> {
+    let mut bytes = 8192_usize;
+    let mut largest = 0;
+    for descriptor in descriptors {
+        let size = descriptor.total_size as usize;
+        bytes = bytes
+            .checked_add(2048)
+            .ok_or(E2eeReplyCode::ObjectTooLarge)?;
+        largest = largest.max(size.min(agenc_relay_e2ee::limits::MAX_FRAGMENT_RAW));
+    }
+    bytes
+        .checked_add(16 * largest)
+        .ok_or(E2eeReplyCode::ObjectTooLarge)
 }
 
 /// The client command name a failure line names.

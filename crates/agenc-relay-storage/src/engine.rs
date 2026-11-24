@@ -57,6 +57,8 @@ const BACKUP_RECORD_LENGTH_PREFIX_BYTES: u64 = 8;
 /// Bounded state reconstructed before the storage owner accepts requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecoveredStorageState {
+    pub(crate) companion_disk: crate::CompanionDiskAccounting,
+    pub(crate) companion_disk_enabled: bool,
     table_record_counts: [u64; 27],
     state_generation: u64,
     account_service_response_count: u64,
@@ -204,6 +206,16 @@ pub enum CheckpointOutcome {
 }
 
 impl RecoveredStorageState {
+    /// Verified allocation baseline when this database uses companion disk
+    /// admission, including when a legacy database has no aggregate row yet.
+    pub const fn companion_disk_accounting(&self) -> Option<crate::CompanionDiskAccounting> {
+        if self.companion_disk_enabled || self.companion_disk.persisted() {
+            Some(self.companion_disk)
+        } else {
+            None
+        }
+    }
+
     /// Returns the exact committed logical database charge.
     #[must_use]
     pub const fn logical_database_bytes(&self) -> u64 {
@@ -919,6 +931,7 @@ struct TrackedStateReconstruction {
 }
 
 pub(crate) struct StorageEngine {
+    pub(crate) companion_disk: Option<crate::companion_disk::DiskWriter>,
     store: RedbStore,
     state_directory: EngineStateDirectory,
     master_key: StorageMasterKey,
@@ -1137,6 +1150,7 @@ impl StorageEngine {
         let store = config.state_directory.open_store(limits.redb_cache_bytes)?;
         let authenticated = authenticate_open_state(&config, &store, limits)?;
         let engine = Self {
+            companion_disk: None,
             store,
             state_directory: config.state_directory,
             master_key: config.storage_master_key,
@@ -1623,11 +1637,31 @@ impl StorageEngine {
     }
 
     pub(crate) fn commit(&mut self, batch: StorageMutationBatch) -> CommitOutcome {
+        if self.companion_disk.is_none()
+            && batch.mutations().iter().any(|m| {
+                m.table() == TableId::E2eeState
+                    && m.key().as_bytes() == crate::companion_disk::accounting::KEY
+            })
+        {
+            return CommitOutcome::Rejected(StorageError::StaleState);
+        }
+        let accounting = match self
+            .companion_disk
+            .as_ref()
+            .map(|disk| disk.stage(batch.mutations(), batch.resulting_state_generation()))
+            .transpose()
+        {
+            Ok(pending) => pending,
+            Err(error) => return CommitOutcome::Rejected(error),
+        };
         let outcome = match self.commit_inner(&batch) {
             Ok(receipt) => CommitOutcome::Committed(receipt),
             Err(EngineCommitFailure::Rejected(error)) => CommitOutcome::Rejected(error),
             Err(EngineCommitFailure::Indeterminate) => CommitOutcome::Indeterminate,
         };
+        if let Some(pending) = accounting {
+            pending.finish(&outcome);
+        }
         if matches!(outcome, CommitOutcome::Committed(_)) {
             self.publish_runtime_facts();
         }
@@ -2734,6 +2768,7 @@ impl StorageEngine {
         let previous_login_generation = login_key_state.previous();
         let mut previous_login_entries = 0_u64;
         let mut table_record_counts = [0_u64; 27];
+        let mut companion_disk = crate::companion_disk::accounting::Scan::default();
         let mut maximum_record_revision = 0_u64;
         let mut history_inventory =
             crate::history_records::HistoryInventory::new(self.limits.database_max_bytes / 4);
@@ -2758,6 +2793,12 @@ impl StorageEngine {
                         plaintext.expose_for_storage_codec(),
                     )?;
                     history_inventory.observe(
+                        table,
+                        &stored_key,
+                        encoded.len(),
+                        plaintext.expose_for_storage_codec(),
+                    )?;
+                    companion_disk.observe(
                         table,
                         &stored_key,
                         encoded.len(),
@@ -2909,6 +2950,8 @@ impl StorageEngine {
             .state_directory
             .capacity(self.limits.fixed_reserve_bytes, self.limits.reserve_percent)?;
         Ok(RecoveredStorageState {
+            companion_disk: companion_disk.finish()?,
+            companion_disk_enabled: false,
             table_record_counts,
             state_generation: self.state_meta.tbs().state_generation,
             account_service_response_count: self.state_meta.tbs().account_service_response_count,

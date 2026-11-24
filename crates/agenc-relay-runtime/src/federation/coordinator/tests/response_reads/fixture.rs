@@ -334,7 +334,6 @@ fn objects() -> TestResult<FixtureObjects> {
         request_object_id: *ObjectId::compute(&bytes).as_bytes(),
         request,
         payload: None,
-        payload_bytes: None,
     };
     let mut outcome = Outcome::scalar(ResultBody::ObjectPage);
     outcome.snapshot_token = Some([19; 32]);

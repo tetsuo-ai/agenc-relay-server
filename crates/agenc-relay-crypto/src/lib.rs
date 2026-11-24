@@ -12,6 +12,7 @@ mod error;
 mod hash;
 mod secret;
 mod signature;
+mod spool;
 mod storage;
 mod storage_integrity;
 mod tls_ticket;
@@ -36,6 +37,7 @@ pub use signature::{
     Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain, sign_canonical,
     verify_canonical,
 };
+pub use spool::{SPOOL_PART_OVERHEAD, SpoolCipher};
 pub use storage::{
     DATABASE_BINDING_BYTES, DatabaseBinding, MAX_STORAGE_CIPHERTEXT_BYTES, MAX_STORAGE_KEY_BYTES,
     MAX_STORAGE_PLAINTEXT_BYTES, OpenedStoragePlaintext, SealedStorageRecord, StorageIndex,

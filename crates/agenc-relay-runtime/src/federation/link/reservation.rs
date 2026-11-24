@@ -13,6 +13,8 @@ pub(super) struct QueuedReservation {
     ledger: Arc<AtomicU64>,
     bytes: u64,
     _backing: Arc<MemoryPermit>,
+    // The cursor can finish before the final awaited socket write finishes.
+    _source: Option<Arc<crate::e2ee::outbound::Transfer>>,
 }
 
 impl Drop for QueuedReservation {
@@ -57,11 +59,13 @@ impl ReservedFrames {
             let bytes = u64::try_from(frame.line.len()).unwrap_or(u64::MAX);
             let _sender = frame.slot.send(LinkOutbound {
                 line: Some(frame.line),
-                _reservation: Some(QueuedReservation {
+                transfer: None,
+                _reservation: Some(Arc::new(QueuedReservation {
                     ledger: Arc::clone(&self.queued_bytes),
                     bytes,
                     _backing: Arc::clone(&self.backing),
-                }),
+                    _source: None,
+                })),
             });
             self.bytes = self.bytes.saturating_sub(bytes);
         }
@@ -78,6 +82,47 @@ impl Drop for ReservedFrames {
 }
 
 impl LinkHandle {
+    pub(crate) fn try_send_transfer(
+        &self,
+        transfer: &Arc<crate::e2ee::outbound::Transfer>,
+        backing: MemoryPermit,
+    ) -> Result<(), SendRefusal> {
+        if backing.bytes() < transfer.render_backing() {
+            return Err(SendRefusal::QueueFull);
+        }
+        let slot = self
+            .sender
+            .clone()
+            .try_reserve_owned()
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => SendRefusal::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => SendRefusal::Closed,
+            })?;
+        let bytes = transfer.window();
+        let closed = self.closed.lock().map_err(|_| SendRefusal::Closed)?;
+        if *closed {
+            return Err(SendRefusal::Closed);
+        }
+        self.queued_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                queued
+                    .checked_add(bytes)
+                    .filter(|total| *total <= self.capacity_bytes)
+            })
+            .map_err(|_| SendRefusal::QueueFull)?;
+        let _sender = slot.send(LinkOutbound {
+            line: None,
+            transfer: Some(transfer.cursor()),
+            _reservation: Some(Arc::new(QueuedReservation {
+                ledger: Arc::clone(&self.queued_bytes),
+                bytes,
+                _backing: Arc::new(backing),
+                _source: Some(Arc::clone(transfer)),
+            })),
+        });
+        Ok(())
+    }
+
     /// Owns complete short control frames until commit or rollback.
     pub(crate) fn reserve_frames(
         &self,
@@ -176,11 +221,13 @@ impl LinkHandle {
             .map_err(|_| SendRefusal::QueueFull)?;
         let _sender = slot.send(LinkOutbound {
             line: Some(frame.line),
-            _reservation: Some(QueuedReservation {
+            transfer: None,
+            _reservation: Some(Arc::new(QueuedReservation {
                 ledger: Arc::clone(&self.queued_bytes),
                 bytes,
                 _backing: frame.backing,
-            }),
+                _source: None,
+            })),
         });
         Ok(())
     }

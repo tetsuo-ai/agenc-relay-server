@@ -570,6 +570,14 @@ impl EdgeFederation {
     }
 
     /// Exact transport identity for companion receipt publication ownership.
+    pub(crate) fn companion_ingress_budget(
+        &self,
+    ) -> Option<std::sync::Arc<tokio::sync::Semaphore>> {
+        self.live
+            .as_ref()
+            .map(|live| std::sync::Arc::clone(&live.handle.ingress))
+    }
+
     pub(crate) fn current_companion_link_id(&self) -> Option<LinkId> {
         self.live.as_ref().map(|live| live.link)
     }
@@ -604,6 +612,25 @@ impl EdgeFederation {
         true
     }
 
+    /// Queues an ordered companion transfer in a single writer slot.
+    pub(crate) fn send_companion_transfer(
+        &mut self,
+        context: &mut StateCoreContext,
+        transfer: &std::sync::Arc<crate::e2ee::outbound::Transfer>,
+        backing: crate::budget::MemoryPermit,
+    ) -> bool {
+        let Some(live) = self.live.as_ref() else {
+            return false;
+        };
+        match live.handle.try_send_transfer(transfer, backing) {
+            Ok(()) => true,
+            Err(refusal) => {
+                self.send_failed(context, SendFailure::from(refusal));
+                false
+            }
+        }
+    }
+
     /// Closes the link after a companion violation.
     pub fn fail_companion_link(&mut self, context: &mut StateCoreContext) {
         self.fail_link(context, Violation::Companion(CompanionViolation::Request));
@@ -629,6 +656,15 @@ impl EdgeFederation {
         context: &mut StateCoreContext,
         part: agenc_relay_storage::e2ee_records::barrier::BarrierPart,
         payload: Option<Vec<u8>>,
+    ) -> bool {
+        self.companion_barrier_part_ref(context, part, payload.as_deref())
+    }
+
+    pub(crate) fn companion_barrier_part_ref(
+        &mut self,
+        context: &mut StateCoreContext,
+        part: agenc_relay_storage::e2ee_records::barrier::BarrierPart,
+        payload: Option<&[u8]>,
     ) -> bool {
         match barrier::companion_part(self, context, part, payload) {
             Ok(()) => true,

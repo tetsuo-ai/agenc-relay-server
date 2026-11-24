@@ -138,7 +138,7 @@ impl VerifiedSinks {
 
 pub(super) struct Delivery {
     open: OpenEvent,
-    payload: Option<Vec<u8>>,
+    payload: Option<crate::e2ee::spool::CompanionBytes>,
     sinks: Vec<Sink>,
     index: usize,
     awaiting: Option<([u8; 16], usize)>,
@@ -213,7 +213,7 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         open: OpenEvent,
-        payload: Option<Vec<u8>>,
+        payload: Option<crate::e2ee::spool::CompanionBytes>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         let conversation = <[u8; 32]>::try_from(open.event.conversation_id.as_slice())
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
@@ -234,7 +234,6 @@ impl E2eeEdge {
         let count = eligible().count();
         let bytes = count
             .checked_mul(std::mem::size_of::<Sink>())
-            .and_then(|size| size.checked_add(payload.as_ref().map_or(0, Vec::capacity)))
             .ok_or(E2eeReplyCode::RateLimited)?;
         let backing = context
             .reserve_output_backing(bytes.max(1))

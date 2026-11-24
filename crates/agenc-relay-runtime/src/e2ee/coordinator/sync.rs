@@ -113,6 +113,8 @@ pub(crate) enum Action {
     Execute(CompleteRequest),
     /// Sends lines on the peer's link.
     Send(Vec<FederationLineText>),
+    /// Streams every retained result object under its original correlation.
+    Replay(crate::e2ee::outbound::Reply),
     /// Retains output backing until transfer to the authenticated link queue.
     SendPage(SnapshotPageOutput),
     /// Reads one exact immutable page under a submitted-result lease.
@@ -203,6 +205,8 @@ pub struct Snapshot {
 /// The synchronization state of one edge.
 #[derive(Default)]
 pub struct PeerSync {
+    /// Shared with the authenticated link reader and its base decoder.
+    pub(crate) ingress: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     /// The authenticated connection allowed to publish this process's replies.
     pub link: Option<LinkId>,
     /// The incarnation this scope belongs to.
@@ -371,7 +375,7 @@ impl CompanionCoordinator {
             scope: None,
             object_id: agenc_relay_e2ee::ObjectId::from_bytes(descriptor.object_id),
         };
-        let bytes = match self.ingest(key.clone(), peer, command, &fragment, now_millis)? {
+        let bytes = match self.ingest(key.clone(), peer, &fragment, now_millis)? {
             super::Ingested::Complete(bytes) => bytes,
             super::Ingested::Pending => return Ok(Vec::new()),
             super::Ingested::Recent => return self.redeclared(peer, &descriptor),

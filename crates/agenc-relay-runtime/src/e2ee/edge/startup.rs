@@ -8,7 +8,7 @@ use agenc_relay_storage::e2ee_records::barrier::{BarrierPart, CrossProfileStream
 use agenc_relay_storage::e2ee_records::{DeliveryRow, RouteRow, SnapshotMarkerRow};
 use agenc_relay_storage::{StorageError, StoredKey};
 
-use super::{E2eeEdge, events::OpenEvent};
+use super::E2eeEdge;
 use crate::RuntimeError;
 use crate::federation::edge::EdgeFederation;
 
@@ -110,18 +110,21 @@ impl E2eeEdge {
         part: &BarrierPart,
         payload: Option<Vec<u8>>,
     ) -> Result<(), RuntimeError> {
-        let mut budget = DecodeBudget::new(1 << 16, 4096);
-        let object = ArcWireObject::decode_kind(
-            &part.encoded_event_object,
-            Some(ArcWireObjectKind::FederationEvent),
-            &mut budget,
-        )
-        .map_err(|_| invalid())?;
-        let event =
-            ArcFederationEvent::decode_exact(object.body(), &mut budget).map_err(|_| invalid())?;
-        let payload_id: Option<[u8; 32]> = event.payload_object_id.as_slice().try_into().ok();
-        if !valid_part_header(&self.config, part, &event)
-            || !valid_part_tuple(part, &event)
+        let position = DeliveryPosition {
+            server_id: *self.config.server_id.as_bytes(),
+            delivery_generation: part.delivery_generation,
+            delivery_sequence: part.delivery_sequence,
+            event_id: part.event_id,
+        };
+        let open = self
+            .decode_open_event(&part.encoded_event_object, position, None)
+            .map_err(|_| invalid())?;
+        let event = &open.event;
+        let payload_id = open.payload_object_id;
+        if part.stream != CrossProfileStream::Companion
+            || agenc_relay_e2ee::ObjectId::compute(&part.encoded_event_object).as_bytes()
+                != &part.event_object_id
+            || !valid_part_tuple(part, event)
             || payload_id != part.payload_object_id
             || payload
                 .as_ref()
@@ -130,37 +133,18 @@ impl E2eeEdge {
         {
             return Err(invalid());
         }
-        let open = OpenEvent {
-            position: DeliveryPosition {
-                server_id: *self.config.server_id.as_bytes(),
-                delivery_generation: part.delivery_generation,
-                delivery_sequence: part.delivery_sequence,
-                event_id: part.event_id,
-            },
-            event,
-            payload_object_id: payload_id,
-        };
+        let payload = payload
+            .map(|bytes| match &self.spool {
+                Some(spool) => spool.retain_restored(bytes).map_err(|_| invalid()),
+                None => Ok(bytes.into()),
+            })
+            .transpose()?;
         self.barrier_parts
             .entry(part.identity.mutation_id)
             .or_default()
-            .insert(part.part_index, (open, payload));
+            .insert(part.part_index, (open.into(), payload));
         Ok(())
     }
-}
-
-fn valid_part_header(
-    config: &super::E2eeEdgeConfig,
-    part: &BarrierPart,
-    event: &ArcFederationEvent,
-) -> bool {
-    part.stream == CrossProfileStream::Companion
-        && event.network_id == config.network_id
-        && event.target_server_id == *config.server_id.as_bytes()
-        && event.delivery_generation == part.delivery_generation
-        && event.delivery_sequence == part.delivery_sequence
-        && event.event_id == part.event_id
-        && agenc_relay_e2ee::ObjectId::compute(&part.encoded_event_object).as_bytes()
-            == &part.event_object_id
 }
 
 fn valid_part_tuple(part: &BarrierPart, event: &ArcFederationEvent) -> bool {

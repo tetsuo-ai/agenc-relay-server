@@ -7,12 +7,15 @@ use agenc_relay_e2ee::federation::frames::{CompanionFrame, Correlation};
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
 use agenc_relay_e2ee::objects::federation::{ArcFederationOpcode, ArcFederationRequest};
 use agenc_relay_e2ee::tls::{DecodeBudget, Opaque, TlsDecode, TlsEncode, Writer};
-use agenc_relay_e2ee::wire::assembly::{AssemblyKey, Direction, Ingest, QuotaScopes, Sender};
+use agenc_relay_e2ee::wire::assembly::{
+    AssemblyBacking, AssemblyError, AssemblyKey, Direction, Ingest, QuotaScopes, ReservedObject,
+    Sender,
+};
 use agenc_relay_e2ee::wire::carrier::CarrierCommand;
 use agenc_relay_e2ee::wire::command::{
     ClientCommand, EgroupCommand, EkeyCommand, MailboxKind, SubmitKind, parse_command,
 };
-use agenc_relay_e2ee::wire::fragment::{FragmentTag, fragment_object, fragment_tag_of};
+use agenc_relay_e2ee::wire::fragment::{FragmentTag, fragment_tag_of};
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 use agenc_relay_e2ee::wire::response::{render_fail, render_labeled_fail};
 use agenc_relay_types::ChannelInstanceId;
@@ -92,6 +95,10 @@ impl Resolved {
                     conversation_id, ..
                 },
             )) => *conversation_id,
+            Self::Command(ClientCommand::Ekey(EkeyCommand::DeliverWelcome {
+                conversation_id,
+                ..
+            })) => *conversation_id,
             _ => [0; 32],
         }
     }
@@ -168,6 +175,7 @@ impl E2eeEdge {
         match line {
             Some(frame) => vec![ClientOutput {
                 generation,
+                batch: None,
                 frames: vec![frame],
             }],
             None => Vec::new(),
@@ -403,7 +411,7 @@ impl E2eeEdge {
         carrier: CarrierCommand,
         tag: &FragmentTag,
         context: &StateCoreContext,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
+    ) -> Result<Option<ReservedObject>, Refusal> {
         let session_generation = self
             .origins
             .get(&generation)
@@ -433,11 +441,8 @@ impl E2eeEdge {
             route: Some(command.route_key()),
             peer: None,
         };
-        let now = context.now().get() / 1_000;
-        match self
-            .assembler
-            .ingest(key.clone(), scopes, carrier.limit(), tag, now)
-        {
+        let ingestion = self.ingest_backing(&key, scopes, tag, context);
+        match ingestion {
             Ok(Ingest::Complete(bytes)) => {
                 self.ingress.remove(&generation);
                 Ok(Some(bytes))
@@ -475,6 +480,57 @@ impl E2eeEdge {
         }
     }
 
+    fn ingest_backing(
+        &mut self,
+        key: &AssemblyKey,
+        scopes: QuotaScopes,
+        tag: &FragmentTag,
+        context: &StateCoreContext,
+    ) -> Result<Ingest<ReservedObject>, AssemblyError> {
+        let Sender::Connection { connection, .. } = key.sender else {
+            return Err(AssemblyError::InvalidFragment);
+        };
+        let generation = ConnectionGeneration::new(connection);
+        let carrier = key.command;
+        let now = context.now().get() / 1_000;
+        if let Some(spool) = &self.spool {
+            let origin = self
+                .origins
+                .get(&generation)
+                .ok_or(AssemblyError::ReassemblyLimit)?;
+            let admission = crate::e2ee::spool::Admission {
+                key: key.clone(),
+                carrier,
+                scopes,
+                authenticated_spool: scopes.account.is_some()
+                    && settled(origin)
+                    && origin.device.is_some(),
+            };
+            spool.ingest(
+                &mut self.assembler,
+                admission,
+                tag,
+                now,
+                Some(std::sync::Arc::clone(&origin.ingress)),
+            )
+        } else {
+            self.assembler.ingest_backed(
+                key.clone(),
+                scopes,
+                carrier.limit(),
+                tag,
+                now,
+                AssemblyBacking::Memory(&|bytes| {
+                    Ok(Box::new(
+                        context
+                            .reserve_output_backing(bytes)
+                            .map_err(|_| AssemblyError::ReassemblyLimit)?,
+                    ))
+                }),
+            )
+        }
+    }
+
     /// Encodes and sends one request under the connection's origin.
     // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=one request needs the context the edge the connection its account label command and payload together
     #[allow(clippy::too_many_arguments)]
@@ -486,7 +542,7 @@ impl E2eeEdge {
         account: [u8; 24],
         source: RequestSource,
         command: Resolved,
-        payload: Option<Vec<u8>>,
+        payload: Option<ReservedObject>,
     ) -> Result<[u8; 16], Refusal> {
         // A submission's reply is kept for its retries: its largest size is
         // reserved now, so keeping it never fails (companion 11.8, 16).
@@ -559,7 +615,6 @@ impl E2eeEdge {
             operation_sequence: origin.next_sequence,
             request_id,
         };
-        origin.next_sequence = origin.next_sequence.saturating_add(1);
         let request_object_id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
         let subject = subject_of(&command, payload.as_deref());
         let reply_scope = request_scope(&command)?;
@@ -571,28 +626,30 @@ impl E2eeEdge {
                 reply_scope,
             )
         });
-        let mut frames = Vec::new();
-        for fragment in fragment_object(&bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
-            frames.push(CompanionFrame::Request {
-                correlation,
-                object_id: request_object_id,
-                fragment,
-            });
-        }
-        if let Some(bytes) = &payload {
-            let object_id = *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes();
-            for fragment in fragment_object(bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
-                frames.push(CompanionFrame::Payload {
-                    correlation,
-                    object_id,
-                    fragment,
-                });
-            }
-        }
-        let lines = frames
-            .iter()
-            .map(|frame| self.line(frame))
-            .collect::<Result<Vec<_>, _>>()?;
+        // The completed ingress payload already owns its decoded-byte and
+        // process permits. Each retry shares that exact buffer. Only the new
+        // request envelope and cursor metadata need separate backing.
+        let charge = u64::try_from(bytes.capacity())
+            .ok()
+            .and_then(|n| n.checked_add(2048))
+            .ok_or(E2eeReplyCode::RateLimited)?;
+        let backing = context
+            .reserve_kept_output(charge)
+            .ok()
+            .and_then(|mut held| held.split_exact(charge))
+            .ok_or(E2eeReplyCode::RateLimited)?;
+        let _preflight = context
+            .reserve_output_backing(crate::e2ee::outbound::PREFLIGHT_BYTES)
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
+        let transfer = crate::e2ee::outbound::Transfer::request(
+            self.config.server_name.clone(),
+            correlation,
+            bytes,
+            payload,
+            Some(std::sync::Arc::new(backing)),
+        )?;
+        let writer = transfer.reserve_writer(context)?;
+        origin.next_sequence = origin.next_sequence.saturating_add(1);
         self.pending.insert(
             request_id,
             PendingRequest {
@@ -608,10 +665,11 @@ impl E2eeEdge {
                 request_object_id,
                 sequence: correlation.operation_sequence,
                 origin_generation: correlation.origin_generation,
-                frames,
+                transfer: Some(std::sync::Arc::clone(&transfer)),
                 result: None,
                 result_object_id: None,
                 responses: std::collections::BTreeMap::new(),
+                early_completion: None,
                 completion_seen: false,
                 rendered: false,
             },
@@ -620,7 +678,7 @@ impl E2eeEdge {
         if probe {
             self.direct_probe = Some(request_id);
         }
-        if !self.send(context, edge, lines) {
+        if !edge.send_companion_transfer(context, &transfer, writer) {
             return Err(E2eeReplyCode::Syncing.into());
         }
         Ok(request_id)
