@@ -1,4 +1,6 @@
 //! Companion 11.4 control boundaries and backing ownership on the daemon filesystem.
+#![forbid(unsafe_code)]
+
 use super::*;
 use crate::budget::MemoryBudget;
 use crate::test_support::{TestDirectory, TestResult, signed_test_qualification};

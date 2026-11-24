@@ -352,7 +352,6 @@ impl StorageShutdown {
 
 impl StorageOwner {
     /// Starts the sole storage thread and completes full startup validation before returning.
-    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=startup handshake owns every thread-success and join failure branch
     pub fn start(config: StorageOpenConfig) -> Result<Self, StorageError> {
         Self::start_with_companion_disk(config, None)
     }
@@ -360,6 +359,7 @@ impl StorageOwner {
     /// Starts storage with optional shared disk admission for sealed companion
     /// rows and anonymous spool files. The authenticated scan seeds the same
     /// allowance every write transaction uses.
+    // agenc-review: focus owner=storage reviewed=2026-08-27 reason=startup handshake owns every thread-success and join failure branch
     pub fn start_with_companion_disk(
         config: StorageOpenConfig,
         disk: Option<crate::CompanionDisk>,
