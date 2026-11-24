@@ -2078,9 +2078,17 @@ fn tag_value(line: &str, key: &str) -> Option<String> {
 /// Reads the labeled reply: one line, or a whole `agenc.ag/e2ee-objects`
 /// batch when the reply opens one.
 fn labeled_reply(client: &mut ArcClient, label: &str) -> TestResult<Vec<String>> {
+    labeled_reply_within(client, label, TRANSCRIPT_LINES)
+}
+
+fn labeled_reply_within(
+    client: &mut ArcClient,
+    label: &str,
+    limit: usize,
+) -> TestResult<Vec<String>> {
     let mut batch_id: Option<String> = None;
     client
-        .read_until(|line| {
+        .read_until_within(limit, |line| {
             if let Some(id) = &batch_id {
                 return line.contains(&format!(" BATCH -{id}"));
             }
@@ -4444,10 +4452,16 @@ mod real_clients {
 
         let label = target.label();
         receiver.send(&format!("@label={label} EKEY FETCH MAILBOX WELCOME *"))?;
-        let page = labeled_reply(receiver, &label)?;
+        let limit = TRANSCRIPT_LINES + object.len().div_ceil(e2ee::limits::MAX_FRAGMENT_RAW);
+        let page = labeled_reply_within(receiver, &label, limit)?;
         assert_contains(&page, " EKEY MAILBOX ")?;
         let token = hash_at(&page, "MAILBOX", 3)?;
-        assert_eq!(fragments_object(&page)?, object);
+        let fetched = fragments_object(&page)?;
+        if fetched != object {
+            return Err(failure(
+                "mailbox fetch did not reproduce the delivered Welcome",
+            ));
+        }
         let label = target.label();
         receiver.send(&format!(
             "@label={label} EKEY ACK MAILBOX {} {}",
@@ -4456,7 +4470,14 @@ mod real_clients {
         ))?;
         let acked = labeled_reply(receiver, &label)?;
         assert_contains(&acked, " EKEY ACKED ")?;
-        Ok(welcome.to_vec())
+        let mut budget = DecodeBudget::new(e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT, 1 << 16);
+        let envelope =
+            ArcWireObject::decode_kind(&fetched, Some(ArcWireObjectKind::WelcomeMls), &mut budget)?;
+        let delivered: ArcDeliveredWelcome = ArcDeliveredWelcome::decode_exact(
+            envelope.body(),
+            &mut DecodeBudget::new(e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT, 1 << 16),
+        )?;
+        Ok(delivered.welcome_bytes.as_slice().to_owned())
     }
 
     /// Sends real MLS application bytes on the bound channel and returns the

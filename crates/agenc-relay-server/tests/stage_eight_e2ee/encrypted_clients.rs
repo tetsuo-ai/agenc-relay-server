@@ -474,6 +474,20 @@ pub(super) fn join_through_welcome<C: MlsConfig>(
     expires_at: u64,
     nonce: [u8; 16],
 ) -> TestResult<mls_rs::Group<C>> {
+    join_with_group_info(live, joiner, package, expires_at, nonce, None)
+}
+
+/// Optional signed GroupInfo data travels inside the encrypted Welcome.
+fn join_with_group_info<C: MlsConfig>(
+    live: &mut Live,
+    joiner: &mls_rs::Client<C>,
+    package: &[u8],
+    expires_at: u64,
+    nonce: [u8; 16],
+    group_info_data: Option<&[u8]>,
+) -> TestResult<mls_rs::Group<C>> {
+    use openmls::prelude::{Extension, OpenMlsProvider as _};
+    const EXTENSION: u16 = 0xfefe;
     let reference = {
         let Clients {
             bob,
@@ -489,9 +503,36 @@ pub(super) fn join_through_welcome<C: MlsConfig>(
     };
     let imported = live.creator.import_key_package(package)?;
     live.arm_commit()?;
-    let (commit, welcome, _info) =
-        live.group
-            .add_members(&live.creator.provider, &live.creator.signer, &[imported])?;
+    let provider = &live.creator.provider;
+    let (commit, welcome) = if let Some(data) = group_info_data {
+        let (commit, welcome, _) = live
+            .group
+            .commit_builder()
+            .propose_adds([imported])
+            .force_self_update(true)
+            .load_psks(provider.storage())?
+            .create_group_info_with_extensions([Extension::Unknown(
+                EXTENSION,
+                openmls::extensions::UnknownExtension(data.to_vec()),
+            )])?
+            .build(
+                provider.rand(),
+                provider.crypto(),
+                &live.creator.signer,
+                |_| true,
+            )?
+            .stage_commit(provider)?
+            .into_messages();
+        (
+            commit,
+            welcome.ok_or("the ordinary MLS Add omitted its Welcome")?,
+        )
+    } else {
+        let (commit, welcome, _) =
+            live.group
+                .add_members(provider, &live.creator.signer, &[imported])?;
+        (commit, welcome)
+    };
     let policies = live.clients.policies;
     let added = live.certify(
         &commit.to_bytes()?,
@@ -499,6 +540,10 @@ pub(super) fn join_through_welcome<C: MlsConfig>(
         (policies.1, policies.1),
     )?;
     let welcome_bytes = welcome.to_bytes()?;
+    if let Some(data) = group_info_data {
+        assert!(welcome_bytes.len() > data.len());
+        assert!(welcome_bytes.len() <= e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT);
+    }
     let delivered = {
         let Clients {
             alice,
@@ -519,7 +564,51 @@ pub(super) fn join_through_welcome<C: MlsConfig>(
             &welcome_bytes,
         )?
     };
-    let (group, _info) = joiner.join_group(None, &MlsMessage::from_bytes(&delivered)?, None)?;
+    let (group, info) = joiner.join_group(None, &MlsMessage::from_bytes(&delivered)?, None)?;
+    if let Some(data) = group_info_data {
+        let extension = info
+            .group_info_extensions()
+            .get(EXTENSION.into())
+            .ok_or("recipient did not authenticate the large GroupInfo extension")?;
+        assert!(extension.extension_data.as_slice() == data);
+    }
     assert_eq!(group.current_epoch(), live.head.0);
     Ok(group)
+}
+
+/// SC-011. Both client and federation writers transfer over 1,024 fragments
+/// in each direction. The recipient authenticates the complete MLS GroupInfo
+/// and uses the joined state for application decryption.
+#[test]
+fn a_large_certified_welcome_crosses_two_edges_and_joins_the_recipient() -> TestResult {
+    run_network(|network, _, _, _| {
+        let mut live = Live::open(bind_channel(network)?)?;
+        let policies = live.clients.policies;
+        activate_bootstrap(&mut live, policies)?;
+        let interval = live.clients.bob_interval();
+        let joiner =
+            real_clients::mls_rs_client_with_leaf(&live.clients.bob_keys, interval, BOB_LEAF)?;
+        let package = joiner
+            .generate_key_package_message(
+                Default::default(),
+                Default::default(),
+                Some(MlsTime::from(interval.0)),
+            )?
+            .to_bytes()?;
+        let group_info = vec![0xa5; 3 * 1024 * 1024];
+        let mut joined = join_with_group_info(
+            &mut live,
+            &joiner,
+            &package,
+            interval.1,
+            [77; 16],
+            Some(&group_info),
+        )?;
+        let message = live.relay("after the large Welcome", 1)?;
+        assert_eq!(
+            mls_rs_text(&mut joined, &message)?.as_deref(),
+            Some("after the large Welcome")
+        );
+        Ok(())
+    })
 }
