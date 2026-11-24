@@ -210,8 +210,16 @@ impl<'a> AdminSession<'a> {
     /// Reads one STATS selector into ordered field and value pairs.
     pub(crate) fn stats(&mut self, selector: &str) -> AdminResult<Vec<(String, u64)>> {
         let lines = self.command_batch(&format!("STATS {selector}"))?;
+        Self::stats_values(selector, &lines)
+    }
+
+    /// Reads field and value pairs from an already collected STATS response.
+    pub(crate) fn stats_values(
+        selector: &str,
+        lines: &[String],
+    ) -> AdminResult<Vec<(String, u64)>> {
         let mut values = Vec::new();
-        for line in &lines {
+        for line in lines {
             let Some((head, _)) = line.split_once(" :") else {
                 continue;
             };
