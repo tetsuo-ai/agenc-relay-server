@@ -45,6 +45,7 @@ dependencies = [
  "agenc-relay-federation-wire",
  "agenc-relay-types",
  "base64",
+ "zeroize",
 ]
 
 [[package]]
