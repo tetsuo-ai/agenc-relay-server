@@ -9,6 +9,7 @@
 mod client_batch;
 pub use client_batch::{ClientBatch, ClientLine};
 mod completion;
+mod direct_delivery;
 mod entitlement;
 mod events;
 mod ingress;
@@ -121,8 +122,8 @@ pub(crate) struct LocalOrigin {
     pub(crate) declared: Option<u64>,
     /// The generation the coordinator acknowledged.
     pub(crate) acked: Option<u64>,
-    /// The acknowledged generation whose declaration predates the attached
-    /// device; requests wait until a later generation is acknowledged.
+    /// The last declared generation that predates the attached device.
+    /// Requests wait until a later declaration is acknowledged.
     pub(crate) predates_device: Option<u64>,
     /// The next companion operation sequence.
     pub(crate) next_sequence: u64,
@@ -197,6 +198,7 @@ pub(crate) enum PendingCommit {
         position: agenc_relay_e2ee::federation::frames::DeliveryPosition,
         /// The applied event's object identifier.
         object_id: [u8; 32],
+        direct: Option<direct_delivery::VerifiedSinks>,
         outputs: Vec<ClientOutput>,
     },
     /// The READY of a snapshot was recorded.
@@ -282,6 +284,8 @@ pub struct E2eeEdge {
     witness_resolution: Option<witness_resolution::OpenResolution>,
     witness_request_wake: Option<crate::state_core::timers::TimerEntry>,
     queued: VecDeque<(CompanionFrame, Option<super::spool::CompanionBytes>)>,
+    direct_delivery: Option<direct_delivery::Delivery>,
+    direct_probe: Option<[u8; 16]>,
     events_in: BTreeMap<[u8; 16], events::OpenEvent>,
     /// The delivery generation, sequence and Event ID of the event this
     /// edge applied last, with its object identifier: an exact duplicate at
@@ -379,6 +383,8 @@ impl E2eeEdge {
             witness_resolution: None,
             witness_request_wake: None,
             queued: VecDeque::new(),
+            direct_delivery: None,
+            direct_probe: None,
             applied_object: None,
             events_in: BTreeMap::new(),
             channel_names: BTreeMap::new(),
@@ -431,6 +437,7 @@ impl E2eeEdge {
         self.snapshot_link_down();
         self.held = None;
         self.queued.clear();
+        self.direct_delivery = None;
         self.events_in.clear();
         // The coordinator drops a closed link's queued requests.
         self.closed_requests.clear();

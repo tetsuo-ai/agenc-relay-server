@@ -339,12 +339,21 @@ impl E2eeEdge {
         bytes: impl Into<super::super::spool::CompanionBytes>,
     ) -> Result<(), Refusal> {
         let bytes = bytes.into();
+        let internal = self.direct_probe == Some(correlation.request_id);
+        if internal && index.is_some() {
+            return Err(E2eeReplyCode::InvalidFragment.into());
+        }
         let pending = self
             .pending
             .get_mut(&correlation.request_id)
             .ok_or(E2eeReplyCode::InvalidFragment)?;
         let Some(index) = index else {
             let decoded = decode_result(&bytes).map_err(|_| E2eeReplyCode::InvalidFragment)?;
+            if internal
+                && (decoded.completion_event_id.is_some() || !decoded.descriptors.is_empty())
+            {
+                return Err(E2eeReplyCode::InvalidFragment.into());
+            }
             let ordinary = match &self.commit {
                 Some(super::PendingCommit::Event { completion, .. }) => Some(completion),
                 _ => None,
@@ -395,6 +404,15 @@ impl E2eeEdge {
             || !complete_descriptors(pending, result)
             || (result.completion_event_id.is_some() && !pending.completion_seen)
         {
+            return Ok(Vec::new());
+        }
+        if self.direct_probe == Some(request_id) {
+            let probe = self
+                .pending
+                .remove(&request_id)
+                .and_then(|p| p.result)
+                .ok_or(E2eeReplyCode::InvalidFragment)?;
+            self.direct_answer(request_id, &probe.value)?;
             return Ok(Vec::new());
         }
         let (answer, output) = self.prepare_answer(context, pending, result)?;

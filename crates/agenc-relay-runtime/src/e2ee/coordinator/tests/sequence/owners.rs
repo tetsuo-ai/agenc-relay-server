@@ -1082,3 +1082,6 @@ fn a_foreign_reference_or_another_kind_discredits_a_stored_account() -> TestResu
     );
     Ok(())
 }
+
+#[path = "owners/mailbox.rs"]
+mod mailbox;

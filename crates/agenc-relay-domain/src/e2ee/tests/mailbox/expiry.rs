@@ -168,3 +168,53 @@ fn expired_item_is_invalid_while_its_grant_is_still_live() -> Result<(), Mailbox
     assert_eq!(mailboxes.item_count(), 1);
     Ok(())
 }
+
+#[test]
+fn staged_direct_delivery_expires_at_its_exact_boundary_and_overflow_leaves_the_slot_unused()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::e2ee::limits::WELCOME_RETENTION_SECONDS;
+    use crate::e2ee::mailbox::expiry::{Cursor, Plan};
+    use crate::e2ee::mailbox::{MailboxError, MailboxKind, Mailboxes, Target};
+    let mut boxes = Mailboxes::new();
+    let target = Target {
+        account_digest: [1; 32],
+        device_id: [2; 16],
+    };
+    let kind = MailboxKind::Application;
+    assert_eq!(
+        boxes.deliver(
+            target,
+            kind,
+            [6; 32],
+            [5; 32],
+            u64::MAX,
+            WELCOME_RETENTION_SECONDS
+        ),
+        Err(MailboxError::Overflow)
+    );
+    let (position, item) = boxes.prepare_delivery(
+        target,
+        kind,
+        [6; 32],
+        [5; 32],
+        10,
+        WELCOME_RETENTION_SECONDS,
+    )?;
+    assert_eq!(position, 0);
+    assert_eq!(boxes.item_count(), 0);
+    boxes.restore_item(target, kind, position, item);
+    let deadline = 10 + WELCOME_RETENTION_SECONDS;
+    assert!(Plan::capture(&boxes, Cursor::default(), deadline - 1).is_empty());
+    let expiry = Plan::capture(&boxes, Cursor::default(), deadline);
+    assert_eq!(expiry.changes().count(), 1);
+    assert_eq!(boxes.item_count(), 1);
+    expiry.apply(&mut boxes)?;
+    assert_eq!(boxes.item_count(), 0);
+    assert_eq!(
+        boxes
+            .prepare_delivery(target, kind, [7; 32], [5; 32], deadline, 1)?
+            .0,
+        1
+    );
+    Ok(())
+}

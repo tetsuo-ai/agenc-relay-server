@@ -56,6 +56,10 @@ impl E2eeEdge {
         let Some((request_id, pending)) = pending else {
             return Ok((PreparedCompletion(None), Vec::new()));
         };
+        // An internal WHOAMI is a scalar read and never owns a client completion.
+        if self.direct_probe == Some(request_id) {
+            return Err(E2eeReplyCode::InvalidFragment.into());
+        }
         if event.request_origin_generation != pending.origin_generation
             || event.request_operation_sequence != pending.sequence
             || pending

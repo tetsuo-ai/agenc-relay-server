@@ -283,9 +283,10 @@ impl E2eeEdge {
             origin.device = Some((device, session_generation));
             // The attachment holds while its principal does (companion 11.6).
             origin.device_principal = Some((origin.user_id, origin.account));
-            // The acknowledged declaration predates the device; requests wait
-            // for the declaration the advanced base generation carries.
-            origin.predates_device = origin.acked;
+            // Every declaration already sent predates this attachment, even
+            // if its ACK is still in flight. Only a newer declaration can
+            // authorize this device on the coordinator.
+            origin.predates_device = origin.declared.or(origin.acked);
         }
         edge.advance_origin(context, generation);
     }

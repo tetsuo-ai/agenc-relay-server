@@ -4345,3 +4345,26 @@ This public-only API has no runtime or maintenance caller. It accepts no full
 MLS context or private topic, grants no terminal capability and clears no
 recovery gate. Complete historical ancestry, context transitions, finality,
 evidence ingestion and atomic Closed or Conflict installation remain open.
+
+### SC-006 encrypted direct offline delivery
+
+The Stage Eight `direct_offline` TLS fixture uses two registered accounts, two
+edges and a coordinator with durable storage. Alice submits a real OpenMLS
+application ciphertext while Bob's primary device is disconnected and Bob's
+second roster-active device is attached to the other edge. The live device
+receives the same bytes. After a coordinator restart the primary device fetches
+the exact object and decrypts it with its existing group state. A different
+account, a different device of the same account, a superseded attachment and
+an obsolete grant cannot acknowledge that item. Repeating the original
+submission produces one queued item, and repeating its successful ACK leaves
+the mailbox empty. A second send after an ordinary disconnect exercises the
+same fetch and decrypt without restarting a daemon.
+
+Run `cargo test --locked -p agenc-relay-server --test stage_eight_e2ee direct_offline::`
+for this fixture. The runtime mailbox tests cover configured per-account
+charging across devices and mailbox kinds, aggregate application limits,
+reconstruction and reclamation. Domain mailbox tests exercise the expiry
+boundary and sequence overflow. The two OpenMLS endpoints keep their private
+decryption state locally. This test qualifies opaque delivery for their current
+epoch. Full private bootstrap and recovery of previously erased epoch keys
+have separate evidence requirements.
