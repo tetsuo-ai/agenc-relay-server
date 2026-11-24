@@ -1175,9 +1175,11 @@ fn carry_payload(edge: &mut E2eeEdge) -> TestResult<Vec<String>> {
         .values_mut()
         .next()
         .ok_or("one unanswered request")?;
-    let Some(CompanionFrame::Request { correlation, .. }) = pending.frames.first().cloned() else {
-        return Err("the request's first frame".into());
-    };
+    let correlation = pending
+        .transfer
+        .as_ref()
+        .ok_or("missing original transfer")?
+        .correlation;
     let request = ArcFederationRequest {
         profile_version: 1,
         network_id,
@@ -1211,7 +1213,16 @@ fn carry_payload(edge: &mut E2eeEdge) -> TestResult<Vec<String>> {
                 fragment,
             }),
     );
-    pending.frames = frames.clone();
+    pending.transfer = Some(
+        crate::e2ee::outbound::Transfer::request(
+            edge.config.server_name.clone(),
+            correlation,
+            bytes,
+            Some(payload),
+            None,
+        )
+        .map_err(|_| "invalid reference transfer")?,
+    );
     pending.request_object_id = request_object_id;
     frames
         .iter()

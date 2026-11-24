@@ -899,7 +899,11 @@ impl E2eeEdge {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| E2eeReplyCode::InvalidFragment)?;
             if !frames.is_empty() {
-                outputs.push(ClientOutput { generation, frames });
+                outputs.push(ClientOutput {
+                    generation,
+                    frames,
+                    batch: None,
+                });
             }
         }
         Ok(outputs)

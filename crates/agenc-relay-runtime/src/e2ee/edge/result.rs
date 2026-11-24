@@ -15,11 +15,11 @@ use agenc_relay_e2ee::tls::{DecodeBudget, Reader, TlsDecode};
 use agenc_relay_e2ee::wire::assembly::{AssemblyKey, Direction, Ingest, QuotaScopes, Sender};
 use agenc_relay_e2ee::wire::carrier::CarrierCommand;
 use agenc_relay_e2ee::wire::command::ClientCommand;
-use agenc_relay_e2ee::wire::fragment::{FragmentTag, fragment_object};
+use agenc_relay_e2ee::wire::fragment::FragmentTag;
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 use agenc_relay_e2ee::wire::response::{
     BatchChild, BatchOpener, EmptyGroupKind, PendingKind, StoreKind, SuccessLine, render_broadcast,
-    render_eobject, render_fail, render_labeled, render_labeled_fail,
+    render_fail, render_labeled, render_labeled_fail,
 };
 
 use super::router::{Refusal, Resolved};
@@ -365,6 +365,30 @@ impl E2eeEdge {
             return Ok(Vec::new());
         };
         let generation = pending.generation;
+        // Object-carrying submissions retain their scalar or live echo for
+        // retries. Large result objects come from already-authorized queries
+        // with neither a submission replay entry nor an open event barrier.
+        let total = result
+            .descriptors
+            .iter()
+            .try_fold(0_usize, |total, d| total.checked_add(d.total_size as usize))
+            .ok_or(E2eeReplyCode::ObjectTooLarge)?;
+        if total > agenc_relay_e2ee::limits::MAX_FRAGMENT_RAW
+            && pending.reply_key.is_none()
+            && result.completion_event_id.is_none()
+        {
+            let mut responses = std::mem::take(&mut pending.responses);
+            let batch =
+                self.client_batch(context, &pending, &result, |index| responses.remove(&index))?;
+            // This query has no object-submission slot. Record its normal
+            // completion with no retry-body allocation.
+            let _retries = self.publish_reply(context, &mut pending, &[])?;
+            return Ok(vec![ClientOutput {
+                generation,
+                frames: Vec::new(),
+                batch: Some(Box::new(batch)),
+            }]);
+        }
         let lines = self.render_answer(context, &pending, &result)?;
         let mut retry_outputs = self.publish_reply(context, &mut pending, &lines)?;
         let frames = lines
@@ -372,7 +396,14 @@ impl E2eeEdge {
             .map(|line| WireMessage::extension_line(line))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-        retry_outputs.insert(0, ClientOutput { generation, frames });
+        retry_outputs.insert(
+            0,
+            ClientOutput {
+                generation,
+                frames,
+                batch: None,
+            },
+        );
         Ok(retry_outputs)
     }
 
@@ -428,13 +459,29 @@ impl E2eeEdge {
         pending: &PendingRequest,
         result: &DecodedResult,
     ) -> Result<Vec<String>, Refusal> {
+        let mut batch = self.client_batch(context, pending, result, |index| {
+            pending.responses.get(&index).cloned()
+        })?;
+        let mut lines = Vec::new();
+        while let Some(line) = batch.next_line()? {
+            lines.push(line);
+        }
+        Ok(lines)
+    }
+
+    fn client_batch<T: AsRef<[u8]> + Send + Sync + 'static>(
+        &mut self,
+        context: &mut StateCoreContext,
+        pending: &PendingRequest,
+        result: &DecodedResult,
+        mut take: impl FnMut(u16) -> Option<T>,
+    ) -> Result<super::ClientBatch, Refusal> {
         let server = self.config.server_name.clone();
         let mut scope = [0; 16];
         context
             .entropy_mut()
             .fill_exact(&mut scope)
             .map_err(|_| E2eeReplyCode::RateLimited)?;
-        self.counters.results_rendered = self.counters.results_rendered.saturating_add(0);
         let batch_id = batch_id_for(&scope);
         let first = result
             .descriptors
@@ -452,23 +499,23 @@ impl E2eeEdge {
             snapshot: result.snapshot_token.unwrap_or([0; 32]),
             next_cursor: result.next_cursor,
         };
-        let mut lines = vec![
+        let backing = context
+            .reserve_output_backing(batch_backing(&result.descriptors)?)
+            .map_err(|_| E2eeReplyCode::RateLimited)?;
+        let mut batch = super::ClientBatch::new(server.clone(), batch_id.clone(), scope, backing);
+        batch.line(
             opener
                 .render(&server)
                 .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-        ];
+        )?;
         if let Some(child) = metadata_child(result) {
-            lines.push(
+            batch.line(
                 child
                     .render(&server, &batch_id)
                     .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-            );
+            )?;
         }
         for descriptor in &result.descriptors {
-            let bytes = pending
-                .responses
-                .get(&descriptor.response_index)
-                .ok_or(E2eeReplyCode::InvalidFragment)?;
             if let (Some(token), Some(device)) = (
                 optional::<32>(descriptor.delivery_token.as_slice())
                     .map_err(|_| E2eeReplyCode::InvalidFragment)?,
@@ -476,26 +523,40 @@ impl E2eeEdge {
                     .map_err(|_| E2eeReplyCode::InvalidFragment)?,
             ) {
                 let child = BatchChild::Mailbox(token, device, descriptor.object_id);
-                lines.push(
+                batch.line(
                     child
                         .render(&server, &batch_id)
                         .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-                );
+                )?;
             }
-            for fragment in fragment_object(bytes).map_err(|_| E2eeReplyCode::ObjectTooLarge)? {
-                lines.push(
-                    render_eobject(&server, &batch_id, &fragment, descriptor.wire_kind, &scope)
-                        .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-                );
-            }
+            let bytes = take(descriptor.response_index).ok_or(E2eeReplyCode::InvalidFragment)?;
+            batch.object(descriptor.wire_kind, bytes)?;
         }
-        lines.push(
+        batch.line(
             opener
                 .render_close(&server)
                 .map_err(|_| E2eeReplyCode::InvalidFragment)?,
-        );
-        Ok(lines)
+        )?;
+        Ok(batch)
     }
+}
+
+/// The source and metadata outlive a physical write. The largest segment
+/// also bounds the base64, tag, text and lexer validation temporaries.
+fn batch_backing(descriptors: &[ArcFederationResponseDescriptor]) -> Result<usize, E2eeReplyCode> {
+    let mut bytes = 8192_usize;
+    let mut largest = 0;
+    for descriptor in descriptors {
+        let size = descriptor.total_size as usize;
+        bytes = bytes
+            .checked_add(size)
+            .and_then(|n| n.checked_add(2048))
+            .ok_or(E2eeReplyCode::ObjectTooLarge)?;
+        largest = largest.max(size.min(agenc_relay_e2ee::limits::MAX_FRAGMENT_RAW));
+    }
+    bytes
+        .checked_add(16 * largest)
+        .ok_or(E2eeReplyCode::ObjectTooLarge)
 }
 
 /// The client command name a failure line names.

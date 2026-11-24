@@ -50,6 +50,7 @@ async fn handle_pop<W: AsyncWrite + Unpin>(
 ) -> Option<CloseReason> {
     match popped {
         QueuePop::Frame(frame) => write_queued_frame(transport, queue, frame.as_bytes()).await,
+        QueuePop::Companion(line) => write_queued_frame(transport, queue, line.as_bytes()).await,
         QueuePop::Closed(reason) => {
             finish(transport).await;
             queue.acknowledge_flush();

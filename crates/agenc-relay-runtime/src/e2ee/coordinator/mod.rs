@@ -868,7 +868,14 @@ impl CompanionCoordinator {
                 correlation,
                 object_id,
                 fragment,
-            } => self.on_request_fragment(peer, correlation, object_id, fragment, now_millis),
+            } => self.on_request_fragment(
+                peer,
+                correlation,
+                object_id,
+                fragment,
+                now_millis,
+                |capacity| host.reserve_cut_backing(capacity).ok(),
+            ),
             CompanionFrame::Payload {
                 correlation,
                 object_id,
@@ -962,6 +969,7 @@ impl CompanionCoordinator {
         object_id: [u8; 32],
         fragment: agenc_relay_e2ee::wire::fragment::FragmentTag,
         now_millis: u64,
+        reserve: impl FnOnce(usize) -> Option<crate::budget::MemoryPermit>,
     ) -> Result<Vec<sync::Action>, CompanionFault> {
         if correlation.peer_server_id != *self.server_id.as_bytes() {
             return Err(CompanionFault::Protocol);
@@ -977,7 +985,7 @@ impl CompanionCoordinator {
         let bytes = match self.ingest(key.clone(), peer, command, &fragment, now_millis)? {
             Ingested::Complete(bytes) => bytes,
             Ingested::Pending => return Ok(Vec::new()),
-            Ingested::Recent => return self.replay_recent(peer, &correlation, object_id),
+            Ingested::Recent => return self.replay_recent(peer, &correlation, object_id, reserve),
         };
         let payload_object_id =
             request::payload_object_id(&bytes).map_err(|_| CompanionFault::Protocol)?;
@@ -1015,6 +1023,7 @@ impl CompanionCoordinator {
         peer: ServerId,
         correlation: &Correlation,
         object_id: [u8; 32],
+        reserve: impl FnOnce(usize) -> Option<crate::budget::MemoryPermit>,
     ) -> Result<Vec<sync::Action>, CompanionFault> {
         let home = *peer.as_bytes();
         let key = agenc_relay_storage::e2ee_records::ReplayKey {
@@ -1040,7 +1049,7 @@ impl CompanionCoordinator {
         let responses = stored
             .responses
             .iter()
-            .map(|id| self.state.objects.get(id).cloned())
+            .map(|id| self.state.objects.get(id).map(Vec::as_slice))
             .collect::<Option<Vec<_>>>();
         let Some(responses) = responses else {
             return Ok(vec![sync::Action::ReadResponses(response_read::Identity {
@@ -1049,9 +1058,16 @@ impl CompanionCoordinator {
                 request_object_id: object_id,
             })]);
         };
-        let lines = execute::replay_lines(self, correlation, home, &stored.result, &responses)
-            .map_err(|_| CompanionFault::Protocol)?;
-        Ok(vec![sync::Action::Send(lines)])
+        let reply = crate::e2ee::outbound::Reply::retained(
+            &self.server_name,
+            *correlation,
+            home,
+            &stored.result,
+            &responses,
+            reserve,
+        )
+        .map_err(|_| CompanionFault::Ceiling)?;
+        Ok(vec![sync::Action::Replay(reply)])
     }
 
     /// EPAYLOAD: completes the open request; a retransmitted payload the

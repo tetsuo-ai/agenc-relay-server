@@ -720,6 +720,17 @@ pub trait ClientSink: Send + Sync {
     /// Enqueues the frames into the prepared slots without allocating.
     fn commit(&self, reservation: ClientQueueReservation, frames: BoundedSharedClientFrames);
 
+    /// Hands an admitted bulk reply to a transport writer in FIFO order.
+    /// Embedding sinks without streaming support refuse the whole batch.
+    fn commit_companion(
+        &self,
+        _reservation: ClientQueueReservation,
+        batch: Box<crate::e2ee::edge::ClientBatch>,
+    ) -> Result<(), SinkReserveError> {
+        drop(batch);
+        Err(SinkReserveError::Full)
+    }
+
     /// Arms the one shared `ERROR` line a slow-consumer close delivers from
     /// the reserved control slot. Embedding sinks without a transport ignore
     /// it.

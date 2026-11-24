@@ -487,11 +487,11 @@ pub fn replay_key(home: [u8; 16], request: &ArcFederationRequest) -> ReplayKey {
 
 /// How a request relates to the replay namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Classified {
+pub enum Classified<'a> {
     /// A fresh request at the next sequence.
     Fresh,
     /// An exact duplicate; the stored result is resent.
-    Replay(Vec<u8>, Vec<Vec<u8>>),
+    Replay(&'a [u8], Vec<&'a [u8]>),
     /// A gap, a reused request identifier, or different bytes at the key.
     Violation,
     /// A request without a replay row under an origin its deletion or a
@@ -500,7 +500,11 @@ pub enum Classified {
 }
 
 /// Classifies a request against the origin's sequence and retained rows.
-pub fn classify(state: &CompanionState, home: [u8; 16], decoded: &Decoded) -> Classified {
+pub fn classify<'a>(
+    state: &'a CompanionState,
+    home: [u8; 16],
+    decoded: &Decoded,
+) -> Classified<'a> {
     let key = replay_key(home, &decoded.request);
     if let Some(row) = state.replays.get(&key) {
         if row.request_object_id != decoded.request_object_id
@@ -514,12 +518,12 @@ pub fn classify(state: &CompanionState, home: [u8; 16], decoded: &Decoded) -> Cl
         let Some(responses) = stored
             .responses
             .iter()
-            .map(|id| state.objects.get(id).cloned())
+            .map(|id| state.objects.get(id).map(Vec::as_slice))
             .collect::<Option<Vec<_>>>()
         else {
             return Classified::Violation;
         };
-        return Classified::Replay(stored.result.clone(), responses);
+        return Classified::Replay(&stored.result, responses);
     }
     let origin_key = CompanionOriginKey {
         home_server_id: home,
