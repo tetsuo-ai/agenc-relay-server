@@ -161,6 +161,7 @@ impl SpoolResources {
         let total = usize::try_from(tag.total).map_err(|_| AssemblyError::ObjectTooLarge)?;
         let limit = carrier.limit();
         if total > limit.max_bytes || tag.count > limit.max_fragments {
+            assembler.discard(&key);
             return Err(AssemblyError::ObjectTooLarge);
         }
         let memory = IngressMemory {
@@ -171,14 +172,15 @@ impl SpoolResources {
         let open = |bytes| self.open(tag, bytes, memory.clone());
         let backing = if total > MAX_LIVE_REASSEMBLY_BYTES_PER_CONNECTION {
             if !authenticated_spool || carrier.is_live() {
+                assembler.discard(&key);
                 return Err(REFUSED);
             }
-            if tag.part == 0 {
-                let (kind, _) = ArcWireObject::peek_header(&tag.segment, total)
-                    .map_err(|_| AssemblyError::InvalidFragment)?;
-                if !carrier.accepts(kind) {
-                    return Err(AssemblyError::InvalidFragment);
-                }
+            if tag.part == 0
+                && !ArcWireObject::peek_header(&tag.segment, total)
+                    .is_ok_and(|(kind, _)| carrier.accepts(kind))
+            {
+                assembler.discard(&key);
+                return Err(AssemblyError::InvalidFragment);
             }
             AssemblyBacking::Spool(&open)
         } else {

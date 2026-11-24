@@ -559,7 +559,14 @@ impl E2eeAssembler {
         now: u64,
         backing: AssemblyBacking<'_>,
     ) -> Result<Ingest<ReservedObject>, AssemblyError> {
-        if tag.object_id != key.object_id {
+        if usize::try_from(tag.total).map_or(true, |total| total > limit.max_bytes)
+            || tag.count > limit.max_fragments
+        {
+            self.discard(&key);
+            return Err(AssemblyError::ObjectTooLarge);
+        }
+        if tag.object_id != key.object_id || tag.check_consistency().is_err() {
+            self.discard(&key);
             return Err(AssemblyError::InvalidFragment);
         }
         if !self.open.contains_key(&key)
@@ -625,9 +632,6 @@ impl E2eeAssembler {
             backing,
         } = first;
         let total = usize::try_from(tag.total).map_err(|_| AssemblyError::ObjectTooLarge)?;
-        if total > limit.max_bytes || tag.count > limit.max_fragments {
-            return Err(AssemblyError::ObjectTooLarge);
-        }
         if key.direction == Direction::LocalIngress && tag.part != 0 {
             return Err(AssemblyError::InvalidFragment);
         }
@@ -639,7 +643,8 @@ impl E2eeAssembler {
         let live_bytes = match &backing {
             AssemblyBacking::Memory(_) => total,
             AssemblyBacking::Spool(_)
-                if limit.deadline == crate::wire::carrier::DeadlineClass::Mailbox =>
+                if !key.command.is_live()
+                    && limit.deadline == crate::wire::carrier::DeadlineClass::Mailbox =>
             {
                 0
             }

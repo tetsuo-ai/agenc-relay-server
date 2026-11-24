@@ -95,7 +95,7 @@ impl FragmentTag {
         Ok(tag)
     }
 
-    fn check_consistency(&self) -> Result<(), E2eeError> {
+    pub(super) fn check_consistency(&self) -> Result<(), E2eeError> {
         if self.count == 0 || self.part >= self.count || self.total == 0 {
             return Err(E2eeError::InvalidValue);
         }
