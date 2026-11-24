@@ -1,10 +1,9 @@
 //! Canonical scalar parsers shared by every table module.
 
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use agenc_relay_types::ServerName;
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use agenc_relay_client_support::{ClientSupportError, endpoint};
 
 use crate::error::ConfigError;
 
@@ -51,23 +50,19 @@ impl Bound {
 
 /// Parses a 43-character canonical unpadded base64url encoding of 32 bytes.
 pub(crate) fn base64url_32(text: &str) -> Result<[u8; 32], ConfigError> {
-    if text.len() != 43 {
-        return Err(ConfigError::InvalidValue);
-    }
-    let mut bytes = [0_u8; 32];
-    let decoded = URL_SAFE_NO_PAD
-        .decode_slice(text, &mut bytes)
-        .map_err(|_| ConfigError::InvalidValue)?;
-    if decoded != bytes.len() || URL_SAFE_NO_PAD.encode(bytes) != text {
-        return Err(ConfigError::InvalidValue);
-    }
-    Ok(bytes)
+    endpoint::base64url_32(text).map_err(ConfigError::from)
 }
 
-/// Encodes 32 bytes as the 43-character canonical unpadded base64url text.
-#[must_use]
-pub fn encode_base64url_32(bytes: &[u8; 32]) -> String {
-    URL_SAFE_NO_PAD.encode(bytes)
+pub use endpoint::encode_base64url_32;
+
+impl From<ClientSupportError> for ConfigError {
+    fn from(error: ClientSupportError) -> Self {
+        match error {
+            ClientSupportError::InvalidDocument => Self::InvalidDocument,
+            ClientSupportError::MissingValue => Self::MissingValue,
+            ClientSupportError::InvalidValue => Self::InvalidValue,
+        }
+    }
 }
 
 /// Validates an ASCII identifier of `[A-Za-z0-9._-]` within a byte range.
@@ -90,20 +85,27 @@ pub(crate) fn ascii_identifier(
 }
 
 /// A validated lowercase DNS name (Section 7.4 server name grammar, spec 458-460).
-#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct DnsName(String);
+#[derive(Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct DnsName(pub(crate) endpoint::DnsName);
+
+impl fmt::Debug for DnsName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 impl DnsName {
     /// Parses through the shared `ServerName` grammar.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
-        ServerName::parse(text).map_err(|_| ConfigError::InvalidValue)?;
-        Ok(Self(text.to_owned()))
+        endpoint::DnsName::parse(text)
+            .map(Self)
+            .map_err(ConfigError::from)
     }
 
     /// Borrows the name.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -113,32 +115,29 @@ pub(crate) fn dns_name(text: &str) -> Result<DnsName, ConfigError> {
 }
 
 /// A validated version-3 onion address: 56 lowercase base32 characters and `.onion`.
-#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct OnionAddress(String);
+#[derive(Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct OnionAddress(pub(crate) endpoint::OnionAddress);
 
-/// Length of the base32 label of a version-3 onion address (spec 8897).
-pub const ONION_LABEL_BYTES: usize = 56;
+impl fmt::Debug for OnionAddress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+pub use endpoint::ONION_LABEL_BYTES;
 
 impl OnionAddress {
     /// Parses the exact lowercase `<56 base32>.onion` form (spec 8897, 309-312).
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
-        let label = text
-            .strip_suffix(".onion")
-            .ok_or(ConfigError::InvalidValue)?;
-        if label.len() != ONION_LABEL_BYTES
-            || !label
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
-        {
-            return Err(ConfigError::InvalidValue);
-        }
-        Ok(Self(text.to_owned()))
+        endpoint::OnionAddress::parse(text)
+            .map(Self)
+            .map_err(ConfigError::from)
     }
 
     /// Borrows the full address including `.onion`.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -161,10 +160,7 @@ fn is_unicast_literal(ip: IpAddr) -> bool {
 
 /// Parses a port in `1..=65_535`.
 pub(crate) fn port(value: u64) -> Result<u16, ConfigError> {
-    match u16::try_from(value) {
-        Ok(port) if port > 0 => Ok(port),
-        _ => Err(ConfigError::InvalidValue),
-    }
+    endpoint::port(value).map_err(ConfigError::from)
 }
 
 /// A validated exact HTTPS origin such as `https://chat.example` (spec 8935, 531).

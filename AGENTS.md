@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-AgenC Relay (ARCD) is a safe-Rust federated chat daemon organized as thirteen crates under `crates/`. The sole `arcd` binary composes configuration and runtime. Domain logic, client/federation codecs, authentication, cryptography, E2EE, and storage have separate owning crates. Keep `agenc-relay-domain` free of I/O, clocks, and random generators.
+AgenC Relay (ARCD) is a safe-Rust federated chat daemon organized as fourteen crates under `crates/`. The sole `arcd` binary composes configuration and runtime. Domain logic, client/federation codecs, authentication, cryptography, E2EE, and storage have separate owning crates. Keep `agenc-relay-domain` free of I/O, clocks, and random generators.
 
 Unit tests live beside modules; integration tests live in each crate's `tests/`. `agenc-relay-testkit` provides shared test support. Deterministic fixtures belong in `test-data/`, fuzz targets in `fuzz/`, and evidence in `conformance/`. `docs/` and `rfcs/` contain specifications; `scripts/` contains validation tools; `deploy/` holds service templates; `assets/` holds artwork.
 
