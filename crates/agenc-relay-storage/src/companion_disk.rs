@@ -1,6 +1,10 @@
 //! Logical disk admission shared by sealed companion rows and authenticated
 //! transient spool extents (architecture Appendix C.7).
 
+pub(crate) mod accounting;
+pub use accounting::CompanionDiskAccounting;
+
+use agenc_relay_crypto::DatabaseBinding;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::{CommitOutcome, RecordMutation, StorageError, TableId};
@@ -29,7 +33,9 @@ pub(crate) fn row_charge(table: TableId, key: usize, envelope: usize) -> Result<
 
 #[derive(Debug, Default)]
 struct Usage {
-    sealed: u64,
+    accounting: CompanionDiskAccounting,
+    binding: Option<DatabaseBinding>,
+    writer_attached: bool,
     reserved: u64,
     uncertain: bool,
 }
@@ -59,12 +65,30 @@ impl CompanionDisk {
         self.usage.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(crate) fn restore(&self, sealed: u64) -> Result<(), StorageError> {
-        if sealed > self.limit {
+    pub(crate) fn attach(
+        &self,
+        accounting: CompanionDiskAccounting,
+        binding: DatabaseBinding,
+    ) -> Result<DiskWriter, StorageError> {
+        let mut usage = self.lock();
+        if usage.writer_attached || usage.binding.is_some_and(|previous| previous != binding) {
+            return Err(StorageError::StaleState);
+        }
+        if accounting
+            .sealed
+            .checked_add(usage.reserved)
+            .ok_or(StorageError::Overflow)?
+            > self.limit
+        {
             return Err(StorageError::LimitExceeded);
         }
-        self.lock().sealed = sealed;
-        Ok(())
+        usage.accounting = accounting;
+        usage.binding = Some(binding);
+        usage.writer_attached = true;
+        // Only a complete authenticated startup scan can settle an
+        // indeterminate durable write and admit new allocations again.
+        usage.uncertain = false;
+        Ok(DiskWriter(self.clone()))
     }
 
     fn reserve_locked(&self, usage: &mut Usage, charge: u64) -> Result<(), StorageError> {
@@ -76,6 +100,7 @@ impl CompanionDisk {
             .checked_add(charge)
             .ok_or(StorageError::Overflow)?;
         if usage
+            .accounting
             .sealed
             .checked_add(reserved)
             .ok_or(StorageError::Overflow)?
@@ -96,45 +121,32 @@ impl CompanionDisk {
             charge,
         })
     }
+}
 
+/// A startup scan is valid for one serialized storage writer and database.
+pub(crate) struct DiskWriter(CompanionDisk);
+
+impl DiskWriter {
     pub(crate) fn stage(
         &self,
         mutations: &[RecordMutation],
+        revision: u64,
     ) -> Result<PendingDiskWrite, StorageError> {
-        let mut removed = 0u64;
-        let mut added = 0u64;
-        for m in mutations
-            .iter()
-            .filter(|m| matches!(m.table(), TableId::E2eeObject | TableId::E2eeState))
-        {
-            let key = m.key().as_bytes().len();
-            if let Some(before) = m.before() {
-                let bytes = usize::try_from(before.sealed_record_bytes())
-                    .map_err(|_| StorageError::Overflow)?;
-                removed = removed
-                    .checked_add(row_charge(m.table(), key, bytes)?)
-                    .ok_or(StorageError::Overflow)?;
-            }
-            if let Some(bytes) = m.resulting_sealed_bytes()? {
-                added = added
-                    .checked_add(row_charge(m.table(), key, bytes)?)
-                    .ok_or(StorageError::Overflow)?;
-            }
-        }
-        let mut usage = self.lock();
-        let sealed_after = usage
-            .sealed
-            .checked_sub(removed)
-            .ok_or(StorageError::StaleState)?
-            .checked_add(added)
-            .ok_or(StorageError::Overflow)?;
-        let growth = added.saturating_sub(removed);
-        self.reserve_locked(&mut usage, growth)?;
+        let mut usage = self.0.lock();
+        let sealed_after = usage.accounting.checked_update(mutations, revision)?;
+        let growth = sealed_after.sealed.saturating_sub(usage.accounting.sealed);
+        self.0.reserve_locked(&mut usage, growth)?;
         Ok(PendingDiskWrite {
-            disk: self.clone(),
+            disk: self.0.clone(),
             growth,
             sealed_after,
         })
+    }
+}
+
+impl Drop for DiskWriter {
+    fn drop(&mut self) {
+        self.0.lock().writer_attached = false;
     }
 }
 
@@ -156,7 +168,7 @@ impl Drop for ExtentReservation {
 pub(crate) struct PendingDiskWrite {
     disk: CompanionDisk,
     growth: u64,
-    sealed_after: u64,
+    sealed_after: CompanionDiskAccounting,
 }
 
 impl PendingDiskWrite {
@@ -165,7 +177,7 @@ impl PendingDiskWrite {
     pub(crate) fn finish(self, outcome: &CommitOutcome) {
         let mut usage = self.disk.lock();
         match outcome {
-            CommitOutcome::Committed(_) => usage.sealed = self.sealed_after,
+            CommitOutcome::Committed(_) => usage.accounting = self.sealed_after,
             CommitOutcome::Rejected(_) => {}
             CommitOutcome::Indeterminate => usage.uncertain = true,
         }

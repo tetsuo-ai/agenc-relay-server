@@ -26,6 +26,11 @@ pub(super) fn select_e2ee_restore(
 ) -> Result<Option<StorageConstructionAction>, StorageError> {
     let state = decode_e2ee_restore(key, plaintext)?;
     match state.record_kind() {
+        // Recovery changes the retained record set. A verified legacy
+        // baseline seeds a new aggregate at the target's first live write.
+        crate::companion_disk::accounting::KIND => {
+            crate::CompanionDiskAccounting::check_record(key, &state)?;
+        }
         REPLAY_ROW_KIND => validate_replay_key(key, state.body())?,
         DELIVERY_ROW_KIND => validate_delivery_key(key, state.body())?,
         BARRIER_ROW_KIND => validate_barrier_key(key, state.body())?,

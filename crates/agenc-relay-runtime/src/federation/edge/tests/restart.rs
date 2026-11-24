@@ -460,7 +460,7 @@ async fn retention_waits_for_the_deadline_and_bounds_a_resumable_cleanup() -> Te
     fixture.context_mut()?.set_wall_for_test(604_800);
     base.retain_barriers(fixture.context_mut()?, false);
     let writes = fixture.context_mut()?.staged_rows_for_test()?;
-    assert_eq!(writes.len(), 1000); // 999 deletions plus the peer cursor row.
+    assert_eq!(writes.len(), 999); // The projector may add the sealed disk counter.
     assert!(!writes.iter().any(
         |write| matches!(write, AccountServiceDurableWrite::Delete { key, .. }
         if identity(2048).head_key().is_ok_and(|head| *key == head))
@@ -469,8 +469,8 @@ async fn retention_waits_for_the_deadline_and_bounds_a_resumable_cleanup() -> Te
     fixture.commit_and_restore_edge(writes, &mut restarted, Some(&mut companion))?;
     assert!(restarted.barrier_applied(&MUTATION));
     assert!(fixture.stored_row_exists(TableId::E2eeState, identity(2048).head_key()?)?);
-    assert!(!fixture.stored_row_exists(TableId::E2eeState, identity(2048).part_key(998)?)?);
-    assert!(fixture.stored_row_exists(TableId::E2eeState, identity(2048).part_key(999)?)?);
+    assert!(!fixture.stored_row_exists(TableId::E2eeState, identity(2048).part_key(997)?)?);
+    assert!(fixture.stored_row_exists(TableId::E2eeState, identity(2048).part_key(998)?)?);
     assert_eq!(restarted.cursor, base.cursor);
     assert_eq!(restarted.companion_cursor(), base.companion_cursor());
     Ok(())

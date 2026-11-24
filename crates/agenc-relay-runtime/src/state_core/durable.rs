@@ -240,6 +240,8 @@ pub(crate) enum AdminMutationAfterImage {
 /// One change the index applies after the batch it belongs to commits.
 #[derive(Clone, Eq, PartialEq)]
 pub enum IndexUpdate {
+    /// The aggregate valid at this batch's committed cut.
+    CompanionDisk(agenc_relay_storage::CompanionDiskAccounting),
     /// A row was written; its sealed identity must be read back.
     Put {
         /// The touched table.
@@ -289,6 +291,7 @@ pub enum IndexUpdate {
 /// Before-images and secondary-row ownership for every durable row.
 #[derive(Default)]
 pub struct DurableIndex {
+    pub(super) companion_disk: Option<agenc_relay_storage::CompanionDiskAccounting>,
     rows: BTreeMap<(TableId, StoredKey), IndexedRow>,
     nicknames: BTreeMap<AccountId, BTreeMap<String, StoredKey>>,
     channel_names: BTreeMap<ChannelInstanceId, StoredKey>,
@@ -365,6 +368,7 @@ impl DurableIndex {
 
     fn apply_one(&mut self, update: &IndexUpdate) {
         match update {
+            IndexUpdate::CompanionDisk(value) => self.companion_disk = Some(*value),
             IndexUpdate::Put {
                 table,
                 key,
@@ -815,6 +819,7 @@ pub(super) fn preflight_checkpoint(
     for write in writes {
         projection.project_account_service_write(write, revision)?;
     }
+    projection.project_companion_disk(revision)?;
     StorageMutationBatch::preflight_contents(
         StorageAccountingLimits {
             current_logical_database_bytes: head.logical_database_bytes,
@@ -872,6 +877,11 @@ pub fn project_batch(
     if projection.mutations.is_empty() {
         return Ok(None);
     }
+    projection.project_companion_disk(
+        head.state_generation
+            .checked_add(u64::from(advancing))
+            .ok_or(RuntimeError::Overflow)?,
+    )?;
     let batch = StorageMutationBatch::new(
         StorageMutationHead {
             transaction_id,
@@ -968,6 +978,11 @@ fn project_admin_event(
         touched: BTreeSet::new(),
     };
     let advancing_plans = project_admin_after_image(&mut projection, after_image)?;
+    projection.project_companion_disk(
+        head.state_generation
+            .checked_add(u64::from(advancing_plans))
+            .ok_or(RuntimeError::Overflow)?,
+    )?;
     projection.put(TableId::Audit, key, value)?;
     let batch = StorageMutationBatch::new(
         StorageMutationHead {
@@ -1109,6 +1124,21 @@ pub(crate) fn project_admin_audit_retention(
 }
 
 impl Projection<'_> {
+    fn project_companion_disk(&mut self, revision: u64) -> Result<(), RuntimeError> {
+        let Some(current) = self.index.companion_disk else {
+            return Ok(());
+        };
+        if let Some(next) = current.project(&self.mutations)? {
+            self.put(
+                TableId::E2eeState,
+                agenc_relay_storage::CompanionDiskAccounting::key()?,
+                next.record(revision)?,
+            )?;
+            self.updates.push(IndexUpdate::CompanionDisk(next));
+        }
+        Ok(())
+    }
+
     fn project_account_service_write(
         &mut self,
         write: &AccountServiceDurableWrite,

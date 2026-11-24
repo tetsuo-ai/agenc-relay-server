@@ -440,6 +440,7 @@ pub fn reconstruct(
     utc_now: UtcSecond,
 ) -> Result<Reconstruction, RuntimeError> {
     let mut scan = Scan::default();
+    scan.index.companion_disk = seed.storage().companion_disk_accounting();
     for table in RECONSTRUCTED_TABLES {
         scan_table(port, table, |key, sealed| {
             scan.admit(keys, table, key, &sealed)
