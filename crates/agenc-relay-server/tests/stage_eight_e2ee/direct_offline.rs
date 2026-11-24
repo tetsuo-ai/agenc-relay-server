@@ -177,10 +177,31 @@ fn party(
     identity: (u8, u8),
     now: u64,
 ) -> TestResult<Party> {
-    let (client, account) = authenticated_client(fixture, nickname, login, seed)?;
+    let account = {
+        let mut creation = ArcClient::connect(fixture)?;
+        creation.negotiate_sasl()?;
+        create_live_account(&mut creation, fixture, login, seed)?
+    };
+    let mut client = ArcClient::connect(fixture)?;
+    client.send("CAP LS 302")?;
+    client.read_until(|line| line.contains(" CAP * LS ") && !line.contains(" CAP * LS * :"))?;
+    client.send_until(&format!("CAP REQ :{E2EE_CAPS}"), " CAP * ACK ")?;
+    client.complete_registration(nickname)?;
+    let mut owner = Principal::new_valid_at(identity.0, identity.1, account, now)?;
+    settle("the active companion origin before login", || {
+        assert_contains(&fetch(&mut client, &mut owner)?, "E2EE_ACCOUNT_REQUIRED")
+    })?;
+    authenticate_live_account(
+        &mut client,
+        fixture,
+        login,
+        ACCOUNT_PASSWORD,
+        seed + 2,
+        account,
+    )?;
     let mut party = Party {
         client,
-        keys: Principal::new_valid_at(identity.0, identity.1, account, now)?,
+        keys: owner,
         nickname,
         login,
         account,
