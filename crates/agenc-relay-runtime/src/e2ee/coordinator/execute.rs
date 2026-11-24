@@ -1118,8 +1118,8 @@ pub fn replay_lines(
     Ok(lines)
 }
 
-/// The lines a committed batch sends: the result and responses to the home
-/// edge and every event copy to its target, keyed by target.
+/// Renders event copies at their delivery positions. The requesting link
+/// receives the result and its response objects in a separate ordered transfer.
 pub(crate) fn committed_events(
     coordinator: &CompanionCoordinator,
     pending: &PendingCompanion,
@@ -1137,12 +1137,11 @@ pub(crate) fn committed_events(
     Ok(lines)
 }
 
-/// One line a committed request sends: the answer to the requester, or an
-/// event copy at its delivery sequence.
+/// One line of a committed event copy, addressed to its target edge.
 pub struct CommittedLine {
     /// The target edge.
     pub target: ServerId,
-    /// The delivery sequence of an event copy; `None` for the answer.
+    /// The delivery sequence of this event copy.
     pub sequence: u64,
     /// The line.
     pub line: agenc_relay_federation_wire::FederationLineText,

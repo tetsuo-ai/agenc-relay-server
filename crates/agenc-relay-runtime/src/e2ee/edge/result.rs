@@ -366,20 +366,7 @@ impl E2eeEdge {
                 return Err(E2eeReplyCode::InvalidFragment.into());
             }
             let object_id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
-            super::response_validation::result(pending, &decoded, object_id)?;
-            if pending.result_object_id.is_some() {
-                return Ok(());
-            }
-            if let Some(event) = pending.early_completion {
-                if decoded.completion_event_id != Some(event) {
-                    return Err(E2eeReplyCode::InvalidFragment.into());
-                }
-                pending.completion_seen = true;
-                pending.early_completion = None;
-            }
-            pending.result = Some(decoded);
-            pending.result_object_id = Some(object_id);
-            return Ok(());
+            return super::response_validation::accept_result(pending, decoded, object_id);
         };
         if super::response_validation::response(pending, index, &bytes)? {
             pending.responses.insert(index, bytes);

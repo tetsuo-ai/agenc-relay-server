@@ -40,6 +40,26 @@ impl PreparedCompletion {
     }
 }
 
+impl PendingRequest {
+    fn validate_completion(&self, event: &ArcFederationEvent) -> Result<(), Refusal> {
+        if event.request_origin_generation != self.origin_generation
+            || event.request_operation_sequence != self.sequence
+            || self
+                .transfer
+                .as_ref()
+                .is_some_and(|t| event.request_origin_id.as_slice() != t.correlation.origin_id)
+            || self.early_completion.is_some_and(|id| id != event.event_id)
+            || self
+                .result
+                .as_ref()
+                .is_some_and(|r| r.completion_event_id != Some(event.event_id))
+        {
+            return Err(E2eeReplyCode::InvalidFragment.into());
+        }
+        Ok(())
+    }
+}
+
 impl E2eeEdge {
     pub(super) fn prepare_completion(
         &self,
@@ -60,22 +80,7 @@ impl E2eeEdge {
         if self.direct_probe == Some(request_id) {
             return Err(E2eeReplyCode::InvalidFragment.into());
         }
-        if event.request_origin_generation != pending.origin_generation
-            || event.request_operation_sequence != pending.sequence
-            || pending
-                .transfer
-                .as_ref()
-                .is_some_and(|t| event.request_origin_id.as_slice() != t.correlation.origin_id)
-            || pending
-                .early_completion
-                .is_some_and(|id| id != event.event_id)
-            || pending
-                .result
-                .as_ref()
-                .is_some_and(|r| r.completion_event_id != Some(event.event_id))
-        {
-            return Err(E2eeReplyCode::InvalidFragment.into());
-        }
+        pending.validate_completion(event)?;
         let mut local = LocalCompletion {
             event_id: event.event_id,
             request_id,

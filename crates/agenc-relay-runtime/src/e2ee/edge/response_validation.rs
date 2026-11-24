@@ -48,6 +48,29 @@ pub(super) fn result(
     Ok(())
 }
 
+/// Records a verified result once. A completion already committed for this
+/// request must identify the same event before the result can be installed.
+pub(super) fn accept_result(
+    pending: &mut PendingRequest,
+    decoded: DecodedResult,
+    object_id: [u8; 32],
+) -> Result<(), Refusal> {
+    result(pending, &decoded, object_id)?;
+    if pending.result_object_id.is_some() {
+        return Ok(());
+    }
+    if let Some(event) = pending.early_completion {
+        if decoded.completion_event_id != Some(event) {
+            return Err(E2eeReplyCode::InvalidFragment.into());
+        }
+        pending.completion_seen = true;
+        pending.early_completion = None;
+    }
+    pending.result = Some(decoded);
+    pending.result_object_id = Some(object_id);
+    Ok(())
+}
+
 /// Returns whether these bytes add a new response. Exact duplicates consume
 /// no extra quota; conflicting replacements are refused without mutation.
 pub(super) fn response(
