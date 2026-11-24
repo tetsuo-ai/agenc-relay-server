@@ -615,7 +615,8 @@ async fn a_closed_connection_forgets_its_recent_submissions() -> TestResult {
 #[tokio::test]
 async fn outstanding_requests_are_bounded_per_connection_account_and_edge() -> TestResult {
     let generations: Vec<ConnectionGeneration> = (1..=4).map(ConnectionGeneration::new).collect();
-    let mut core = StateCoreFixture::new(vec![0; 4_096])?;
+    let entropy = (0_u8..=u8::MAX).cycle().take(4_096).collect();
+    let mut core = StateCoreFixture::new(entropy)?;
     let mut base = base_edge();
     let first = *generations.first().ok_or("first")?;
     let mut edge = active_edge(first)?;
@@ -666,8 +667,8 @@ async fn outstanding_requests_are_bounded_per_connection_account_and_edge() -> T
         !refused_with(&admitted, "E2EE_RATE_LIMITED"),
         "{admitted:?}"
     );
-    // The test's entropy names every sent request alike, so fill the rest
-    // of the edge's bound by count.
+    assert_eq!(edge.pending.len(), 9);
+    // Fill the remaining slots across several independent connections.
     let mut connection = 10_u64;
     while edge.pending.len() < 32 {
         let room = 32 - edge.pending.len();
