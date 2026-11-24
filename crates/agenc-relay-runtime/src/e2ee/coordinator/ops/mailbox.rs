@@ -65,9 +65,29 @@ fn deliver(
     store: StoreKind,
 ) -> Result<Outcome, Fail> {
     let object_id = *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes();
-    let mut mailboxes = exec.coordinator.state.mailboxes.clone();
-    let sequence = mailboxes
-        .deliver(
+    let mut outcome = Outcome::scalar(ResultBody::Stored(store, object_id));
+    outcome
+        .writes
+        .push(CompanionCoordinator::object_write(bytes)?);
+    stage_item(exec, &mut outcome, target, kind, object_id, conversation_id)?;
+    Ok(outcome)
+}
+
+/// Each distinct device mailbox gets its own sequence in the submitting
+/// request's transaction. Only a successful commit exposes any item or live event.
+pub(super) fn stage_item(
+    exec: &Exec<'_>,
+    outcome: &mut Outcome,
+    target: Target,
+    kind: MailboxKind,
+    object_id: [u8; 32],
+    conversation_id: [u8; 32],
+) -> Result<(), Fail> {
+    let (sequence, item) = exec
+        .coordinator
+        .state
+        .mailboxes
+        .prepare_delivery(
             target,
             kind,
             object_id,
@@ -76,10 +96,6 @@ fn deliver(
             WELCOME_RETENTION_SECONDS,
         )
         .map_err(|_| Fail::from(E2eeReplyCode::RateLimited))?;
-    let mut outcome = Outcome::scalar(ResultBody::Stored(store, object_id));
-    outcome
-        .writes
-        .push(CompanionCoordinator::object_write(bytes)?);
     outcome.writes.push(sequence_write(target, kind, sequence)?);
     outcome.writes.push(state_row(
         TableId::E2eeState,
@@ -94,17 +110,17 @@ fn deliver(
         MailboxRow::Item {
             object_id,
             conversation_id,
-            inserted_at: exec.now,
-            expires_at: exec.now.saturating_add(WELCOME_RETENTION_SECONDS),
+            inserted_at: item.inserted_at,
+            expires_at: item.expires_at,
             grant: None,
         }
         .encode()
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     )?);
-    outcome.effects.push(Box::new(move |companion| {
-        companion.mailboxes = mailboxes;
+    outcome.effects.push(Box::new(move |state| {
+        state.mailboxes.restore_item(target, kind, sequence, item);
     }));
-    Ok(outcome)
+    Ok(())
 }
 
 fn sequence_write(

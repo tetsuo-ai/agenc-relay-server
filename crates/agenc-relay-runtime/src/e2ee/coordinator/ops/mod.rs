@@ -25,6 +25,7 @@ mod mailbox_grant;
 mod mailbox_recovery;
 pub(crate) mod mailbox_snapshot;
 pub mod membership;
+mod offline_application;
 pub mod policy;
 mod recovery;
 mod recovery_read;

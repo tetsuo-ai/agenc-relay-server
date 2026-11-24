@@ -157,7 +157,7 @@ pub struct RegistrationRouter {
     pending_registrations: BTreeMap<ConnectionGeneration, PendingRegistration>,
     pending_closures: Vec<PendingClosure>,
     pending_observations: BTreeMap<(ConnectionGeneration, u64), CommandObservation>,
-    federation: Option<FederationCoordinator>,
+    federation: Option<Box<FederationCoordinator>>,
     edge: Option<EdgeFederation>,
     e2ee: Option<crate::e2ee::edge::E2eeEdge>,
     edge_carriers: BTreeMap<ConnectionGeneration, EdgeCarrier>,
@@ -492,14 +492,14 @@ impl RegistrationRouter {
     /// this router's safe points.
     #[must_use]
     pub fn with_federation(mut self, coordinator: FederationCoordinator) -> Self {
-        self.federation = Some(coordinator);
+        self.federation = Some(Box::new(coordinator));
         self
     }
 
     /// Borrows the coordinator role when attached.
     #[must_use]
     pub fn federation(&self) -> Option<&FederationCoordinator> {
-        self.federation.as_ref()
+        self.federation.as_deref()
     }
 
     fn access_policy(&self) -> AccessTokenPolicy {
@@ -1037,7 +1037,7 @@ impl RegistrationRouter {
                         &mut state.nickname,
                         handoff,
                         observation,
-                        encrypted_routes(self.federation.as_ref()),
+                        encrypted_routes(self.federation.as_deref()),
                     )
                     .map(ActionStep::from);
             }
@@ -3194,7 +3194,7 @@ impl CommandRouter for RegistrationRouter {
             return Some(e2ee.stats());
         }
         self.federation
-            .as_ref()
+            .as_deref()
             .and_then(|federation| federation.companion_executor())
             .map(crate::e2ee::coordinator::CompanionCoordinator::stats)
     }
@@ -3221,7 +3221,7 @@ impl CommandRouter for RegistrationRouter {
             return Some(edge.federation_stats());
         }
         self.federation
-            .as_ref()
+            .as_deref()
             .map(FederationCoordinator::federation_stats)
     }
 
@@ -3403,7 +3403,7 @@ impl CommandRouter for RegistrationRouter {
 
     fn reload_ready(&self) -> bool {
         self.federation
-            .as_ref()
+            .as_deref()
             .is_none_or(FederationCoordinator::reload_ready)
             && self.edge.as_ref().is_none_or(EdgeFederation::reload_ready)
             && self.pending_registrations.is_empty()

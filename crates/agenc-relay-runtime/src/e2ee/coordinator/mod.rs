@@ -534,6 +534,7 @@ pub struct CompanionCoordinator {
     key_set: Option<SequencerKeySet>,
     current_credential: Option<agenc_relay_e2ee::objects::conversation::ArcSequencerCredential>,
     global_disk_bytes: u64,
+    mailbox_bytes_per_account: u64,
     /// What startup ownership reconstruction concluded without evidence.
     pub owner_reconstruction: owners::Diagnostics,
     /// The ownership accounts of the batch in flight, installed on commit.
@@ -604,6 +605,7 @@ impl CompanionCoordinator {
             signer_report: SignerReport::default(),
             key_set: None,
             global_disk_bytes: 0,
+            mailbox_bytes_per_account: agenc_relay_e2ee::limits::MAX_MAILBOX_BYTES_PER_ACCOUNT,
             owner_reconstruction: owners::Diagnostics::default(),
             pending_owners: None,
             current_credential: None,
@@ -693,6 +695,17 @@ impl CompanionCoordinator {
     /// Records the configured logical E2EE disk ceiling for `STATS E2EE`.
     pub fn set_global_disk_bytes(&mut self, bytes: u64) {
         self.global_disk_bytes = bytes;
+    }
+
+    pub(crate) fn set_storage_limits(&mut self, config: &agenc_relay_config::E2eeConfig) {
+        self.set_global_disk_bytes(config.global_disk_bytes);
+        self.set_mailbox_bytes_per_account(config.mailbox_bytes_per_account);
+    }
+
+    /// Limits the sum of all mailbox item bytes of one account across its devices and kinds.
+    pub fn set_mailbox_bytes_per_account(&mut self, bytes: u64) {
+        self.mailbox_bytes_per_account =
+            bytes.min(agenc_relay_e2ee::limits::MAX_MAILBOX_BYTES_PER_ACCOUNT);
     }
 
     /// The nine `STATS E2EE` values (spec 22.3, companion 17): counts and
@@ -1201,6 +1214,7 @@ impl CompanionCoordinator {
             now,
             security_mutation,
             self.global_disk_bytes,
+            self.mailbox_bytes_per_account,
         )?;
         for write in staged.writes.drain(..) {
             writes.push(

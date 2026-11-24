@@ -190,7 +190,12 @@ pub fn application(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     outcome
         .writes
         .push(CompanionCoordinator::object_write(bytes)?);
-    for target in audience(exec, &conversation_id)? {
+    let targets = if channel {
+        audience(exec, &conversation_id)?
+    } else {
+        super::offline_application::prepare(exec, &mut outcome, conversation_id, bytes)?
+    };
+    for target in targets {
         outcome.events.push(exec.event(
             kind,
             Some(conversation_id),

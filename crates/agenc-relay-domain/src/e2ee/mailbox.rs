@@ -267,6 +267,38 @@ impl Mailboxes {
         Ok(())
     }
 
+    /// Prepares the next item without changing its mailbox. The coordinator adds its
+    /// sequence and item to the same transaction, then applies it with `restore_item`.
+    pub fn prepare_delivery(
+        &self,
+        target: Target,
+        kind: MailboxKind,
+        object_id: Id,
+        conversation_id: Id,
+        now: u64,
+        retention_seconds: u64,
+    ) -> Result<(u64, Item), MailboxError> {
+        let sequence = self
+            .next_sequence
+            .get(&(target, kind))
+            .copied()
+            .unwrap_or(0);
+        sequence.checked_add(1).ok_or(MailboxError::Overflow)?;
+        let expires_at = now
+            .checked_add(retention_seconds)
+            .ok_or(MailboxError::Overflow)?;
+        Ok((
+            sequence,
+            Item {
+                object_id,
+                conversation_id,
+                inserted_at: now,
+                expires_at,
+                grant: None,
+            },
+        ))
+    }
+
     /// Queues an object for `target`; returns its sequence.
     pub fn deliver(
         &mut self,
@@ -277,25 +309,15 @@ impl Mailboxes {
         now: u64,
         retention_seconds: u64,
     ) -> Result<u64, MailboxError> {
-        let next = self.next_sequence.entry((target, kind)).or_insert(0);
-        let sequence = *next;
-        *next = next.checked_add(1).ok_or(MailboxError::Overflow)?;
-        self.items.insert(
-            ItemKey {
-                target,
-                kind,
-                sequence,
-            },
-            Item {
-                object_id,
-                conversation_id,
-                inserted_at: now,
-                expires_at: now
-                    .checked_add(retention_seconds)
-                    .ok_or(MailboxError::Overflow)?,
-                grant: None,
-            },
-        );
+        let (sequence, item) = self.prepare_delivery(
+            target,
+            kind,
+            object_id,
+            conversation_id,
+            now,
+            retention_seconds,
+        )?;
+        self.restore_item(target, kind, sequence, item);
         Ok(sequence)
     }
 

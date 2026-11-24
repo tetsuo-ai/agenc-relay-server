@@ -364,6 +364,9 @@ impl E2eeEdge {
         let Some(result) = pending.result.clone() else {
             return Ok(Vec::new());
         };
+        if self.direct_answer(request_id, &result.value)? {
+            return Ok(Vec::new());
+        }
         let generation = pending.generation;
         let lines = self.render_answer(context, &pending, &result)?;
         let mut retry_outputs = self.publish_reply(context, &mut pending, &lines)?;

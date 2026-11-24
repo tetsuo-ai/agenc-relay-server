@@ -377,10 +377,17 @@ impl E2eeEdge {
             Some(PendingCommit::Event { position, .. }) => Some(position.delivery_sequence),
             _ => None,
         };
-        queued.or(committing).map_or_else(
-            || self.delivery.next_sequence(),
-            |sequence| sequence.saturating_add(1),
-        )
+        queued
+            .or(committing)
+            .or_else(|| {
+                self.direct_delivery
+                    .as_ref()
+                    .map(super::direct_delivery::Delivery::sequence)
+            })
+            .map_or_else(
+                || self.delivery.next_sequence(),
+                |sequence| sequence.saturating_add(1),
+            )
     }
 
     /// Whether an event must wait: this profile's own slot is taken or a
@@ -388,7 +395,8 @@ impl E2eeEdge {
     /// any router, so its plan could not be staged now; events drain in
     /// order after every commit.
     pub(crate) fn holds_events(&self, context: &StateCoreContext) -> bool {
-        self.commit.is_some()
+        self.direct_delivery.is_some()
+            || self.commit.is_some()
             || self.held.is_some()
             || context.in_flight()
             || context.pending_len() != 0
@@ -547,7 +555,7 @@ impl E2eeEdge {
                 ArcFederationEventKind::RequestCompleted => {}
                 _ => {
                     self.witness(event)?;
-                    outputs.extend(self.fanout(context, edge, &open, payload.as_deref())?);
+                    outputs.extend(self.fanout(context, edge, &open, payload.as_deref(), None)?);
                 }
             }
             let (completion, rendered) = self.prepare_completion(context, event)?;
@@ -673,8 +681,22 @@ impl E2eeEdge {
         open: OpenEvent,
         payload: Option<Vec<u8>>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
+        if open.event.event_kind == ArcFederationEventKind::DirectApplication {
+            return self.check_direct_delivery(context, edge, open, payload);
+        }
+        self.project_ordinary(context, edge, open, payload, None)
+    }
+
+    pub(super) fn project_ordinary(
+        &mut self,
+        context: &mut StateCoreContext,
+        edge: &mut EdgeFederation,
+        open: OpenEvent,
+        payload: Option<Vec<u8>>,
+        direct: Option<super::direct_delivery::VerifiedSinks>,
+    ) -> Result<Vec<ClientOutput>, Refusal> {
         self.begin_projection(None)?;
-        let result = self.apply_event_projection(context, edge, open, payload);
+        let result = self.apply_event_projection(context, edge, open, payload, direct);
         if result.is_err() {
             self.rollback_projection();
         }
@@ -687,6 +709,7 @@ impl E2eeEdge {
         edge: &mut EdgeFederation,
         open: OpenEvent,
         payload: Option<Vec<u8>>,
+        direct: Option<super::direct_delivery::VerifiedSinks>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         let event = &open.event;
         let conversation = optional::<32>(event.conversation_id.as_slice());
@@ -704,7 +727,13 @@ impl E2eeEdge {
             ArcFederationEventKind::RequestCompleted => {}
             _ => {
                 self.witness(event)?;
-                outputs.extend(self.fanout(context, edge, &open, payload.as_deref())?);
+                outputs.extend(self.fanout(
+                    context,
+                    edge,
+                    &open,
+                    payload.as_deref(),
+                    direct.as_ref().map(|proof| proof.sinks.as_slice()),
+                )?);
             }
         }
         // The home copy of a semantic event is its request's completion; a
@@ -723,6 +752,7 @@ impl E2eeEdge {
             PendingCommit::Event {
                 position,
                 object_id,
+                direct,
                 outputs,
                 completion,
             },
@@ -824,11 +854,20 @@ impl E2eeEdge {
         edge: &EdgeFederation,
         open: &OpenEvent,
         payload: Option<&[u8]>,
+        direct: Option<&[super::direct_delivery::Sink]>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         let event = &open.event;
         let conversation = optional::<32>(event.conversation_id.as_slice())
             .ok_or(E2eeReplyCode::InvalidFragment)?;
-        let recipients = self.recipients(context, edge, conversation);
+        let recipients = if event.event_kind == ArcFederationEventKind::DirectApplication {
+            direct
+                .ok_or(E2eeReplyCode::InvalidFragment)?
+                .iter()
+                .filter_map(|sink| sink.recipient(self, edge, context))
+                .collect()
+        } else {
+            self.recipients(context, edge, conversation)
+        };
         let source = self.source_prefix(event);
         let kind = event.event_kind;
         let requester = self.requester_of(event);
@@ -1112,6 +1151,7 @@ impl E2eeEdge {
                 object_id,
                 outputs: rendered,
                 completion,
+                direct,
             }) => {
                 self.commit_projection();
                 self.delivery.advance(position);
@@ -1127,6 +1167,9 @@ impl E2eeEdge {
                 self.counters.events_applied = self.counters.events_applied.saturating_add(1);
                 self.acknowledge_applied(context, edge, position);
                 outputs.extend(rendered);
+                if let Some(proof) = direct {
+                    outputs.retain(|output| proof.permits(output, self, edge, context));
+                }
             }
             Some(PendingCommit::SnapshotPage { cursor }) => {
                 self.snapshot_page_committed(context, edge, cursor);
@@ -1172,7 +1215,10 @@ impl E2eeEdge {
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
     ) -> Vec<ClientOutput> {
-        let mut outputs = Vec::new();
+        let Ok(mut outputs) = self.advance_direct_delivery(context, edge) else {
+            self.fail_frame(context, edge);
+            return Vec::new();
+        };
         while !self.holds_events(context) {
             let Some((frame, payload)) = self.queued.pop_front() else {
                 break;

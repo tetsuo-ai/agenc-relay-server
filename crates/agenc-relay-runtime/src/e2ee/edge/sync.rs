@@ -363,15 +363,16 @@ impl E2eeEdge {
                 origin_generation,
                 object_id,
                 ..
-            } => self
-                .origin_acked(
+            } => {
+                self.origin_acked(
                     context,
                     edge,
                     origin_id,
                     origin_generation,
                     object_id.is_some(),
-                )
-                .map(|()| Vec::new()),
+                )?;
+                self.advance_direct_delivery(context, edge)
+            }
             CompanionFrame::WitnessBegin {
                 target_server_id,
                 conversation_id,
@@ -418,7 +419,9 @@ impl E2eeEdge {
                 )
                 .map(|()| Vec::new()),
             CompanionFrame::Result { .. } | CompanionFrame::Response { .. } => {
-                self.on_result_frame(context, frame)
+                let mut outputs = self.on_result_frame(context, frame)?;
+                outputs.extend(self.advance_direct_delivery(context, edge)?);
+                Ok(outputs)
             }
             CompanionFrame::Event {
                 position,
