@@ -1430,7 +1430,7 @@ fn e2ee_setup_with_hook(
             if let Some(seed) = sequencer.retired {
                 executor.configure_retired_key(Ed25519SecretKey::from_bytes(*seed));
             }
-            executor.set_global_disk_bytes(config.e2ee.global_disk_bytes);
+            executor.set_storage_limits(&config.e2ee);
             Some(executor)
         }
         NodeRole::Edge => None,

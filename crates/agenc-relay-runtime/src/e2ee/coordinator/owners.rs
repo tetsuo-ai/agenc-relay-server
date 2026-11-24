@@ -35,6 +35,8 @@
 
 #![forbid(unsafe_code)]
 
+mod mailbox;
+
 use super::CompanionState;
 use crate::state_core::durable::AccountServiceDurableWrite as Write;
 use agenc_relay_crypto::SemanticHashDomain;
@@ -115,6 +117,7 @@ pub(crate) struct Ledger {
     accounts: BTreeMap<[u8; 32], Account>,
     by_owner: BTreeMap<OwnerKey, BTreeSet<[u8; 32]>>,
     conversation_bytes: BTreeMap<[u8; 32], u64>,
+    mailbox: mailbox::Usage,
     total_bytes: u64,
 }
 
@@ -166,6 +169,7 @@ impl Ledger {
     /// Installs one account, replacing the previous one and its indexes.
     pub(crate) fn install(&mut self, id: [u8; 32], account: Account) {
         self.retire_indexes(&id);
+        self.mailbox.install(&account);
         for owner in account.owners.keys() {
             self.by_owner.entry(owner.clone()).or_default().insert(id);
         }
@@ -181,6 +185,7 @@ impl Ledger {
         let Some(previous) = self.accounts.remove(id) else {
             return;
         };
+        self.mailbox.retire(&previous);
         for owner in previous.owners.keys() {
             // Every owner of an installed account is indexed.
             let emptied = self.by_owner.get_mut(owner).is_some_and(|ids| {
@@ -606,10 +611,12 @@ pub(crate) fn stage(
     now: u64,
     security_mutation: bool,
     global_limit: u64,
+    mailbox_limit: u64,
 ) -> Result<Staged, Code> {
     let invalid = |_| Code::InvalidFragment;
     let touched = derive(state, network_id, writes, now)?;
     check_quotas(state, &touched, security_mutation, global_limit)?;
+    mailbox::check(&state.owners, &touched, mailbox_limit)?;
     let mut staged_writes = Vec::with_capacity(touched.len());
     for (id, account) in &touched {
         if account.owners.len() > MAX_RECORD_REFERENCES {
