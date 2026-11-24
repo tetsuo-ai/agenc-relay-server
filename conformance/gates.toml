@@ -208,7 +208,7 @@ argv = ["python3", "scripts/check-stage-six.py", "check"]
 argv = ["python3", "scripts/check-stage-six.py", "self-test"]
 
 [[gate.stage-six-implementation.command]]
-argv = ["cargo", "nextest", "run", "-p", "agenc-relay-config", "--all-features", "--locked"]
+argv = ["cargo", "nextest", "run", "-p", "agenc-relay-client-support", "-p", "agenc-relay-config", "--all-features", "--locked"]
 
 [[gate.stage-six-implementation.command]]
 argv = ["cargo", "nextest", "run", "-p", "agenc-relay-admin", "--all-features", "--locked"]

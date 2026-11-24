@@ -3,6 +3,7 @@ members = [
     "crates/agenc-relay-server",
     "crates/agenc-relay-admin",
     "crates/agenc-relay-auth",
+    "crates/agenc-relay-client-support",
     "crates/agenc-relay-client-wire",
     "crates/agenc-relay-config",
     "crates/agenc-relay-crypto",
@@ -26,6 +27,7 @@ publish = false
 [workspace.dependencies]
 agenc-relay-admin = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-admin" }
 agenc-relay-auth = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-auth" }
+agenc-relay-client-support = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-client-support" }
 agenc-relay-client-wire = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-client-wire" }
 agenc-relay-config = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-config" }
 agenc-relay-crypto = { version = "=1.0.0-rc.3", path = "crates/agenc-relay-crypto" }
