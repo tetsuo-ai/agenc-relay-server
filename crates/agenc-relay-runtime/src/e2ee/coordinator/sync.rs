@@ -113,6 +113,8 @@ pub(crate) enum Action {
     Execute(CompleteRequest),
     /// Sends lines on the peer's link.
     Send(Vec<FederationLineText>),
+    /// Streams every retained result object under its original correlation.
+    Replay(crate::e2ee::outbound::Reply),
     /// Retains output backing until transfer to the authenticated link queue.
     SendPage(SnapshotPageOutput),
     /// Reads one exact immutable page under a submitted-result lease.

@@ -61,7 +61,14 @@ impl E2eeEdge {
             .collect::<Result<_, _>>()
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
         completion.reply = Some((request_id, lines));
-        Ok((completion, vec![ClientOutput { generation, frames }]))
+        Ok((
+            completion,
+            vec![ClientOutput {
+                generation,
+                frames,
+                batch: None,
+            }],
+        ))
     }
 
     pub(super) fn commit_completion(

@@ -172,6 +172,8 @@ pub enum ClosePolicy {
 pub enum QueuePop {
     /// The next frame in output order.
     Frame(SharedClientFrame),
+    /// One line rendered from an admitted companion object batch.
+    Companion(crate::e2ee::edge::ClientLine),
     /// The queue is closed and holds nothing more to write.
     Closed(CloseReason),
     /// Nothing is queued yet.
@@ -182,6 +184,7 @@ pub enum QueuePop {
 enum DemandFrames {
     /// A single frame held in the ring entry; no backing allocation.
     Inline(Option<SharedClientFrame>),
+    Companion(Box<crate::e2ee::edge::ClientBatch>),
     /// A larger demand in the exact-capacity storage `prepare` created.
     // Fields drop in declaration order: free the storage before its permit.
     Stored {
@@ -191,15 +194,25 @@ enum DemandFrames {
 }
 
 impl DemandFrames {
-    fn pop_front(&mut self) -> Option<SharedClientFrame> {
+    fn pop_front(&mut self) -> Option<QueuePop> {
         match self {
-            Self::Inline(frame) => frame.take(),
-            Self::Stored { frames, .. } => frames.pop_front(),
+            Self::Inline(frame) => frame.take().map(QueuePop::Frame),
+            Self::Stored { frames, .. } => frames.pop_front().map(QueuePop::Frame),
+            Self::Companion(batch) => Some(batch.next_output()),
+        }
+    }
+
+    fn released(&self, item: &QueuePop) -> (usize, usize) {
+        match (self, item) {
+            (Self::Companion(batch), _) if batch.empty() => (1, batch.window()),
+            (_, QueuePop::Frame(frame)) => (1, frame.as_bytes().len()),
+            _ => (0, 0),
         }
     }
 
     fn is_empty(&self) -> bool {
         match self {
+            Self::Companion(batch) => batch.empty(),
             Self::Inline(frame) => frame.is_none(),
             Self::Stored { frames, .. } => frames.is_empty(),
         }
@@ -452,13 +465,14 @@ impl QueueState {
     /// Takes the next frame of the oldest overflow demand; its cell, frame
     /// storage, permit, batch count, and query snapshot leave with its final
     /// frame.
-    fn pop_overflow_frame(&mut self) -> Option<SharedClientFrame> {
+    fn pop_overflow_frame(&mut self) -> Option<QueuePop> {
         let response = self.overflow.front_response()?;
         let frame = response.frames.pop_front()?;
         let drained = response.frames.is_empty();
         let snapshot = drained.then(|| response.query_snapshot.take()).flatten();
-        self.normal_items = self.normal_items.saturating_sub(1);
-        self.normal_bytes = self.normal_bytes.saturating_sub(frame.as_bytes().len());
+        let (items, bytes) = response.frames.released(&frame);
+        self.normal_items = self.normal_items.saturating_sub(items);
+        self.normal_bytes = self.normal_bytes.saturating_sub(bytes);
         if drained {
             self.normal_batches = self.normal_batches.saturating_sub(1);
             self.overflow.remove_front();
@@ -471,7 +485,7 @@ impl QueueState {
 
     /// Dequeues the next frame in output order and releases its logical
     /// counts exactly once.
-    fn pop_frame(&mut self) -> Option<SharedClientFrame> {
+    fn pop_frame(&mut self) -> Option<QueuePop> {
         if self.oldest_is_beyond() {
             return self.pop_overflow_frame();
         }
@@ -479,7 +493,7 @@ impl QueueState {
             Entry::Control(_, frame) => {
                 self.control_items = self.control_items.saturating_sub(1);
                 self.control_bytes = self.control_bytes.saturating_sub(frame.as_bytes().len());
-                Some(frame)
+                Some(QueuePop::Frame(frame))
             }
             Entry::Response(response) => self.pop_response_frame(response),
         }
@@ -500,12 +514,13 @@ impl QueueState {
     /// Takes a response's next frame. The response returns to the front of
     /// the ring while frames remain; its storage, permit, batch slot, and
     /// query snapshot leave with its final frame.
-    fn pop_response_frame(&mut self, mut response: Response) -> Option<SharedClientFrame> {
+    fn pop_response_frame(&mut self, mut response: Response) -> Option<QueuePop> {
         // Every placed response holds at least one frame: `assemble` takes a
         // nonempty bound group and a drained response is never restored.
         let frame = response.frames.pop_front()?;
-        self.normal_items = self.normal_items.saturating_sub(1);
-        self.normal_bytes = self.normal_bytes.saturating_sub(frame.as_bytes().len());
+        let (items, bytes) = response.frames.released(&frame);
+        self.normal_items = self.normal_items.saturating_sub(items);
+        self.normal_bytes = self.normal_bytes.saturating_sub(bytes);
         if response.frames.is_empty() {
             self.normal_batches = self.normal_batches.saturating_sub(1);
             if let Some(snapshot) = response.query_snapshot.as_ref() {
@@ -689,7 +704,7 @@ impl WriterQueue {
     pub fn pop(&self) -> QueuePop {
         let mut state = lock(&self.shared.state);
         if let Some(frame) = state.pop_frame() {
-            return QueuePop::Frame(frame);
+            return frame;
         }
         match state.closed {
             Some(reason) => QueuePop::Closed(reason),
@@ -827,6 +842,38 @@ impl ClientSink for WriterQueue {
         drop(state);
         drop(transfer);
         self.shared.notify.notify_one();
+    }
+
+    fn commit_companion(
+        &self,
+        reservation: ClientQueueReservation,
+        batch: Box<crate::e2ee::edge::ClientBatch>,
+    ) -> Result<(), SinkReserveError> {
+        if reservation.demand().frame_count() != 1
+            || reservation.demand().total_bytes() != batch.window()
+        {
+            return Err(SinkReserveError::Full);
+        }
+        let mut transfer = reservation.into_transfer();
+        let mut state = lock(&self.shared.state);
+        if state.closed.is_some() || transfer.generation() != self.generation {
+            drop(state);
+            transfer.discard();
+            return Err(SinkReserveError::Closed);
+        }
+        let response = Response {
+            sequence: state.take_sequence(),
+            frames: DemandFrames::Companion(batch),
+            query_snapshot: None,
+        };
+        if !state.place(&mut transfer, response) {
+            drop(state);
+            transfer.discard();
+            return Err(SinkReserveError::Full);
+        }
+        drop(state);
+        self.shared.notify.notify_one();
+        Ok(())
     }
 
     fn begin_forced_close(&self) {

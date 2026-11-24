@@ -449,6 +449,12 @@ fn apply_complete(
     let (upserted, removed) =
         apply_base_events(edge, context, &open, &mut fanout, &mut join_echoes)?;
     for output in companion_outputs {
+        // Committed barrier events and submission acknowledgements have a
+        // bounded eager representation. A bulk query never belongs to a
+        // barrier or its durable event/acknowledgement fanout.
+        if output.batch.is_some() {
+            return Err(Violation::Consistency);
+        }
         fanout.append(context, output.generation, output.frames)?;
     }
     let receipt = applied_receipt(context, &open)?;

@@ -8,10 +8,13 @@ use agenc_relay_domain::e2ee::projection::{
 };
 use agenc_relay_domain::federation::OriginKey as BaseOriginKey;
 use agenc_relay_domain::federation::{MutationContext, session_record_from};
-use agenc_relay_e2ee::federation::frames::{CompanionFrame, Correlation};
+#[cfg(test)]
+use agenc_relay_e2ee::federation::frames::CompanionFrame;
+use agenc_relay_e2ee::federation::frames::Correlation;
 use std::collections::BTreeMap;
 
 use agenc_relay_e2ee::limits::S2S_IDEMPOTENCY_RETENTION_SECONDS;
+#[cfg(test)]
 use agenc_relay_e2ee::wire::fragment::fragment_object;
 use agenc_relay_e2ee::wire::reply::E2eeReplyCode;
 use agenc_relay_federation_wire::CanonicalEncode;
@@ -94,7 +97,7 @@ pub enum Staged {
     /// The batch is staged; the owner marks its pending commit.
     Batch,
     /// An exact replay; the lines to resend immediately.
-    Replay(Vec<agenc_relay_federation_wire::FederationLineText>),
+    Replay(crate::e2ee::outbound::Reply),
     /// A retained response set needs exact object reads before any output.
     ReadResponses(super::response_read::Identity),
     /// A fresh authorized object lookup must complete before its result is staged.
@@ -230,13 +233,15 @@ pub(crate) fn run_with_object(
     match classified {
         Classified::Fresh | Classified::Fenced => {}
         Classified::Replay(result, responses) => {
-            return Ok(Staged::Replay(replay_lines(
-                coordinator,
-                &complete.correlation,
+            let reply = crate::e2ee::outbound::Reply::retained(
+                &coordinator.server_name,
+                complete.correlation,
                 home,
-                &result,
+                result,
                 &responses,
-            )?));
+                |capacity| view.context.reserve_output_backing(capacity).ok(),
+            )?;
+            return Ok(Staged::Replay(reply));
         }
         Classified::Violation => {
             let identity = super::response_read::Identity {
@@ -1070,12 +1075,13 @@ fn request_conversation(decoded: &Decoded) -> Option<[u8; 32]> {
 }
 
 /// The `ERESULT` and `ERESPONSE` lines of one stored result.
+#[cfg(test)]
 pub fn replay_lines(
     coordinator: &CompanionCoordinator,
     correlation: &Correlation,
     home: [u8; 16],
     result: &[u8],
-    responses: &[Vec<u8>],
+    responses: &[impl AsRef<[u8]>],
 ) -> Result<Vec<agenc_relay_federation_wire::FederationLineText>, E2eeReplyCode> {
     let correlation = Correlation {
         peer_server_id: home,
@@ -1094,6 +1100,7 @@ pub fn replay_lines(
         )?);
     }
     for (index, response) in responses.iter().enumerate() {
+        let response = response.as_ref();
         let object_id = *agenc_relay_e2ee::ObjectId::compute(response).as_bytes();
         for fragment in fragment_object(response).map_err(|_| E2eeReplyCode::InvalidFragment)? {
             lines.push(events::line(
@@ -1113,32 +1120,17 @@ pub fn replay_lines(
 
 /// The lines a committed batch sends: the result and responses to the home
 /// edge and every event copy to its target, keyed by target.
-pub fn committed_lines(
+pub(crate) fn committed_events(
     coordinator: &CompanionCoordinator,
     pending: &PendingCompanion,
 ) -> Result<Vec<CommittedLine>, E2eeReplyCode> {
     let mut lines = Vec::new();
-    for line in replay_lines(
-        coordinator,
-        &pending.correlation,
-        *pending.peer.as_bytes(),
-        &pending.result,
-        &pending.responses,
-    )? {
-        lines.push(CommittedLine {
-            target: pending.peer,
-            sequence: None,
-            line,
-            backing: pending.object_backing.clone(),
-        });
-    }
     for copy in &pending.events {
         for line in events::render_copy(&coordinator.server_name, copy)? {
             lines.push(CommittedLine {
                 target: copy.target,
-                sequence: Some(copy.row.sequence),
+                sequence: copy.row.sequence,
                 line,
-                backing: None,
             });
         }
     }
@@ -1151,9 +1143,7 @@ pub struct CommittedLine {
     /// The target edge.
     pub target: ServerId,
     /// The delivery sequence of an event copy; `None` for the answer.
-    pub sequence: Option<u64>,
+    pub sequence: u64,
     /// The line.
     pub line: agenc_relay_federation_wire::FederationLineText,
-    /// Keeps a cold response charged while the link writer owns its lines.
-    pub(crate) backing: Option<std::sync::Arc<crate::budget::MemoryPermit>>,
 }

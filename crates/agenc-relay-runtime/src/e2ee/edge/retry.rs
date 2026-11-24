@@ -232,6 +232,7 @@ impl Replies {
             .collect::<Result<_, _>>()?;
         Ok(Some(ClientOutput {
             generation: ConnectionGeneration::new(key.0),
+            batch: None,
             frames,
         }))
     }

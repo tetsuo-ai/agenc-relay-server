@@ -169,7 +169,7 @@ impl EdgePeer {
                     &self.sync.harness.coordinator,
                     &complete.correlation,
                     HOME,
-                    &result,
+                    result,
                     &responses,
                 )
                 .map_err(|_| CompanionFault::Protocol)?;

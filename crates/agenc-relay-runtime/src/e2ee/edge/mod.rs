@@ -6,6 +6,8 @@
 //! apply; and until the companion link reaches `STATE_ACTIVE` every E2EE
 //! command fails with `E2EE_SYNCING`.
 
+mod client_batch;
+pub use client_batch::{ClientBatch, ClientLine};
 mod completion;
 mod entitlement;
 mod events;
@@ -85,6 +87,8 @@ pub struct ClientOutput {
     pub generation: ConnectionGeneration,
     /// The frames in order.
     pub frames: Vec<WireMessage>,
+    /// Owned bulk query output, rendered by its connection writer.
+    pub(crate) batch: Option<Box<ClientBatch>>,
 }
 
 /// Where the companion link stands (12.5 STATE_ACTIVE).
@@ -168,7 +172,7 @@ pub(crate) struct PendingRequest {
     pub(crate) origin_generation: u64,
     /// The request and payload frames exactly as first sent, resent after
     /// a resume while the result is outstanding.
-    pub(crate) frames: Vec<agenc_relay_e2ee::federation::frames::CompanionFrame>,
+    pub(crate) transfer: Option<std::sync::Arc<crate::e2ee::outbound::Transfer>>,
     pub(crate) result: Option<DecodedResult>,
     /// Exact result envelope identity, retained to reject conflicting duplicates.
     pub(super) result_object_id: Option<[u8; 32]>,
