@@ -13,6 +13,8 @@ pub(super) struct QueuedReservation {
     ledger: Arc<AtomicU64>,
     bytes: u64,
     _backing: Arc<MemoryPermit>,
+    // The cursor can finish before the final awaited socket write finishes.
+    _source: Option<Arc<crate::e2ee::outbound::Transfer>>,
 }
 
 impl Drop for QueuedReservation {
@@ -62,6 +64,7 @@ impl ReservedFrames {
                     ledger: Arc::clone(&self.queued_bytes),
                     bytes,
                     _backing: Arc::clone(&self.backing),
+                    _source: None,
                 })),
             });
             self.bytes = self.bytes.saturating_sub(bytes);
@@ -114,6 +117,7 @@ impl LinkHandle {
                 ledger: Arc::clone(&self.queued_bytes),
                 bytes,
                 _backing: Arc::new(backing),
+                _source: Some(Arc::clone(transfer)),
             })),
         });
         Ok(())
@@ -222,6 +226,7 @@ impl LinkHandle {
                 ledger: Arc::clone(&self.queued_bytes),
                 bytes,
                 _backing: frame.backing,
+                _source: None,
             })),
         });
         Ok(())
