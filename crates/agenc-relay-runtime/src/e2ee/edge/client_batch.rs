@@ -6,7 +6,8 @@ use agenc_relay_e2ee::wire::{reply::E2eeReplyCode, response::render_eobject};
 use std::collections::VecDeque;
 
 use crate::budget::MemoryPermit;
-use crate::e2ee::outbound::Segments;
+use crate::e2ee::outbound::{ObjectBytes, Segments};
+use std::sync::Arc;
 
 enum Part {
     Line(String),
@@ -25,7 +26,7 @@ pub struct ClientBatch {
     scope: [u8; 16],
     parts: VecDeque<Part>,
     window: usize,
-    backing: std::sync::Arc<MemoryPermit>,
+    backing: Arc<MemoryPermit>,
 }
 
 impl std::fmt::Debug for ClientBatch {
@@ -50,7 +51,7 @@ impl ClientBatch {
             scope,
             parts: VecDeque::new(),
             window: 0,
-            backing: std::sync::Arc::new(backing),
+            backing: Arc::new(backing),
         }
     }
 
@@ -101,10 +102,7 @@ impl ClientBatch {
 
     pub(crate) fn next_output(&mut self) -> crate::connection::queue::QueuePop {
         match self.next_line() {
-            Ok(Some(line)) => crate::connection::queue::QueuePop::Companion(ClientLine {
-                line,
-                _backing: std::sync::Arc::clone(&self.backing),
-            }),
+            Ok(Some(line)) => crate::connection::QueuePop::Companion(line),
             _ => {
                 self.parts.clear();
                 crate::connection::queue::QueuePop::Closed(
@@ -120,10 +118,10 @@ impl ClientBatch {
     }
 
     /// Renders the next physical line in wire order, including CRLF.
-    pub fn next_line(&mut self) -> Result<Option<String>, E2eeReplyCode> {
+    pub fn next_line(&mut self) -> Result<Option<ClientLine>, E2eeReplyCode> {
         match self.parts.pop_front() {
             None => Ok(None),
-            Some(Part::Line(line)) => Ok(Some(line)),
+            Some(Part::Line(line)) => Ok(Some(self.line_owner(line, None))),
             Some(Part::Object {
                 kind,
                 segments,
@@ -132,17 +130,26 @@ impl ClientBatch {
         }
     }
 
+    fn line_owner(&self, line: String, source: Option<ObjectBytes>) -> ClientLine {
+        ClientLine {
+            line,
+            _source: source,
+            _backing: Arc::clone(&self.backing),
+        }
+    }
+
     fn render_part(
         &mut self,
         kind: ArcWireObjectKind,
         segments: Segments,
         next: u32,
-    ) -> Result<String, E2eeReplyCode> {
+    ) -> Result<ClientLine, E2eeReplyCode> {
         let fragment = segments
             .fragment(next)
             .ok_or(E2eeReplyCode::InvalidFragment)?;
         let line = render_eobject(&self.server, &self.batch_id, &fragment, kind, &self.scope)
             .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+        let source = Arc::clone(&segments.bytes);
         if next + 1 < segments.count {
             self.parts.push_front(Part::Object {
                 kind,
@@ -150,19 +157,97 @@ impl ClientBatch {
                 next: next + 1,
             });
         }
-        Ok(line)
+        Ok(self.line_owner(line, Some(source)))
     }
 }
 
 /// One UTF-8 companion line whose permitted storage survives the socket write.
 pub struct ClientLine {
     line: String,
-    _backing: std::sync::Arc<MemoryPermit>,
+    _source: Option<ObjectBytes>,
+    _backing: Arc<MemoryPermit>,
 }
 
 impl ClientLine {
+    pub(crate) fn into_text(self) -> String {
+        self.line
+    }
+
     /// Complete physical bytes, including CRLF.
     pub fn as_bytes(&self) -> &[u8] {
         self.line.as_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::budget::{BackingReservationPort, MemoryBudget};
+    use crate::cancel::CancellationToken;
+    use crate::connection::{
+        ClientQueueDemand, ClientSink, ConnectionGeneration, QueueLimits, WriterQueue,
+    };
+    use crate::test_support::TestResult;
+    use std::future::Future as _;
+    use std::task::Poll;
+
+    struct ChargedObject {
+        bytes: Vec<u8>,
+        _backing: MemoryPermit,
+    }
+
+    impl AsRef<[u8]> for ChargedObject {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+
+    #[tokio::test]
+    async fn the_final_client_write_keeps_the_only_remaining_source_receipt() -> TestResult {
+        let source = Arc::new(MemoryBudget::new(1 << 20));
+        let source_port = BackingReservationPort::new(Arc::clone(&source));
+        let working = Arc::new(MemoryBudget::new(1 << 20));
+        let working_port = BackingReservationPort::new(Arc::clone(&working));
+        let mut batch = ClientBatch::new(
+            "edge.example".to_owned(),
+            "x".to_owned(),
+            [3; 16],
+            working_port.reserve(8704)?,
+        );
+        batch
+            .object(
+                ArcWireObjectKind::WelcomeMls,
+                ChargedObject {
+                    bytes: vec![19; 128],
+                    _backing: source_port.reserve(128)?,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let queue = WriterQueue::new(ConnectionGeneration::new(3), QueueLimits::DEFAULT)?;
+        let logical = queue.try_reserve(ClientQueueDemand::new(vec![batch.window()])?)?;
+        assert_eq!(logical.backing_charge(), 0);
+        queue.commit_companion(queue.prepare(logical, None)?, Box::new(batch))?;
+        let (stream, stalled) = tokio::io::duplex(1);
+        let mut writer = Box::pin(crate::connection::run_writer(
+            stream,
+            Arc::clone(&queue),
+            CancellationToken::root(),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(matches!(writer.as_mut().poll(cx), Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(queue.queue_snapshot().queued_bytes(), 0);
+        assert!(source.charged() >= 128);
+        assert!(working.charged() >= 8704);
+        drop(stalled);
+        assert_eq!(
+            writer.await,
+            crate::state_core::inbox::CloseReason::TransportLoss
+        );
+        assert_eq!(source.charged(), 0);
+        assert_eq!(working.charged(), 0);
+        Ok(())
     }
 }
