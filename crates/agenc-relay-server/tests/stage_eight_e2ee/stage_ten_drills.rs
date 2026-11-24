@@ -783,13 +783,8 @@ pub(super) fn wait_for_account_authority(fixture: &NodeFixture) -> TestResult {
     let identity = admin_identity(fixture);
     let deadline = Instant::now() + NETWORK_WAIT;
     while Instant::now() < deadline {
-        let active = AdminSession::connect(&identity)?
-            .stats("FEDERATION")?
-            .into_iter()
-            .find(|(name, _)| name == "active_peers")
-            .ok_or_else(|| failure("federation readiness counter missing"))?
-            .1;
-        if active == 1 {
+        let lines = AdminSession::connect(&identity)?.command_batch("STATS FEDERATION")?;
+        if federation_ready(&lines)? {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
@@ -797,6 +792,41 @@ pub(super) fn wait_for_account_authority(fixture: &NodeFixture) -> TestResult {
     Err(failure(
         "edge did not finish synchronization before account authentication",
     ))
+}
+
+fn federation_ready(lines: &[String]) -> TestResult<bool> {
+    // The admin socket can accept signed commands before the edge has a federation sample.
+    let unavailable = agenc_relay_admin::render_stats_unavailable(StatsSelector::Federation);
+    if matches!(lines, [line] if line == &unavailable) {
+        return Ok(false);
+    }
+    AdminSession::stats_values("FEDERATION", lines)?
+        .into_iter()
+        .find(|(name, _)| name == "active_peers")
+        .map(|(_, active)| active == 1)
+        .ok_or_else(|| failure("federation readiness counter missing"))
+}
+
+#[test]
+fn federation_readiness_waits_for_a_sample_and_rejects_other_failures() -> TestResult {
+    let selector = StatsSelector::Federation;
+    assert!(!federation_ready(&[
+        agenc_relay_admin::render_stats_unavailable(selector)
+    ])?);
+    assert!(
+        federation_ready(&[agenc_relay_admin::render_stats_storage_unavailable(
+            selector
+        )])
+        .is_err()
+    );
+    assert!(
+        federation_ready(&[agenc_relay_admin::render_stats_unavailable(
+            StatsSelector::Queues
+        )])
+        .is_err()
+    );
+    assert!(federation_ready(&[]).is_err());
+    Ok(())
 }
 
 /// Joins the drill channel and checks its topic through an explicit query.
