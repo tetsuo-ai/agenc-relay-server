@@ -3,6 +3,7 @@
 
 pub mod endpoint;
 pub mod onboarding;
+pub mod socks;
 
 use std::fmt;
 
