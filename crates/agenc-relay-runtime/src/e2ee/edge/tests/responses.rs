@@ -22,6 +22,9 @@ use crate::federation::PeerIdentity;
 use crate::federation::edge::{EdgeConfig, EdgeFederation};
 use crate::test_support::StateCoreFixture;
 
+#[path = "responses/completion.rs"]
+mod completion;
+
 const REQUEST: [u8; 16] = [5; 16];
 
 fn waiting() -> E2eeEdge {
@@ -65,6 +68,14 @@ fn result(
     descriptors: Vec<ArcFederationResponseDescriptor>,
     state_generation: u64,
 ) -> TestResult<Vec<u8>> {
+    result_with_completion(descriptors, state_generation, None)
+}
+
+fn result_with_completion(
+    descriptors: Vec<ArcFederationResponseDescriptor>,
+    state_generation: u64,
+    completion: Option<[u8; 16]>,
+) -> TestResult<Vec<u8>> {
     let mailbox = descriptors
         .iter()
         .any(|d| !d.delivery_token.as_slice().is_empty());
@@ -79,7 +90,7 @@ fn result(
         request_id: REQUEST,
         request_object_id: [7; 32],
         coordinator_state_generation: state_generation,
-        completion_event_id: Opaque::new(Vec::new())?,
+        completion_event_id: Opaque::new(completion.map_or_else(Vec::new, |id| id.to_vec()))?,
         result_kind: if mailbox {
             ArcFederationResultKind::MailboxPage
         } else {
@@ -465,12 +476,17 @@ async fn a_large_mailbox_reply_reaches_the_attached_client_in_order() -> TestRes
     let mut described = descriptor(0, &bytes)?;
     described.delivery_token = Opaque::new(vec![5; 32])?;
     described.target_device_id = Opaque::new(vec![4; 16])?;
-    let result = result(vec![described], 1)?;
+    let event = super::result_kinds::completion_event()?;
+    let result = result_with_completion(vec![described], 1, Some(event.event_id))?;
     assert!(receive(&mut edge, &mut fixture, None, &result)?.is_empty());
-    let outputs = receive(&mut edge, &mut fixture, Some(0), &bytes)?;
+    assert!(receive(&mut edge, &mut fixture, Some(0), &bytes)?.is_empty());
+    let mut base = super::projection::base_edge();
+    completion::stage(&mut edge, &mut fixture, &mut base, &event)?;
+    assert_eq!(queue.queue_snapshot().queued_bytes(), 0);
+    assert!(link_ingress.available_permits() <= link_capacity - bytes.len());
+    fixture.commit_staged_batch().await?;
+    let outputs = edge.batch_applied(fixture.context_mut()?, &mut base);
     assert_eq!(outputs.len(), 1);
-    // The physical writer owns the same completed allocation through the
-    // privacy floor. Its original link ingress receipt stays occupied.
     assert!(link_ingress.available_permits() <= link_capacity - bytes.len());
     let context = fixture.context_mut()?;
     for output in outputs {

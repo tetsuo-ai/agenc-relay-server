@@ -47,11 +47,16 @@ fn a_result_arriving_during_completion_staging_is_released_at_commit() -> TestRe
         .prepare_completion(fixture.context_mut()?, &open.event)
         .map_err(|e| e.code.to_string())?;
     assert!(before.is_empty());
-    assert!(!edge.covered.contains(&open.position.event_id));
+    assert_eq!(
+        edge.pending
+            .get(&[5; 16])
+            .ok_or("pending")?
+            .early_completion,
+        None
+    );
     let mut result = pending(1, 0, true).result.ok_or("result")?;
     result.completion_event_id = Some(open.position.event_id);
     edge.pending.get_mut(&[5; 16]).ok_or("pending")?.result = Some(result);
-    edge.by_completion.insert(open.position.event_id, [5; 16]);
     assert!(
         edge.render_ready(fixture.context_mut()?, [5; 16])
             .map_err(|e| e.code.to_string())?
@@ -88,7 +93,6 @@ async fn refused_storage_does_not_complete_or_cache_a_request() -> TestResult {
     let command = request.command.clone();
     request.result.as_mut().ok_or("result")?.completion_event_id = Some(open.position.event_id);
     edge.pending.insert([5; 16], request);
-    edge.by_completion.insert(open.position.event_id, [5; 16]);
     fixture
         .state_mut()?
         .step_message(crate::state_core::inbox::StateCoreMessage::Signal(
@@ -118,7 +122,13 @@ async fn refused_storage_does_not_complete_or_cache_a_request() -> TestResult {
             .ok_or("request remains pending")?
             .completion_seen
     );
-    assert!(!edge.covered.contains(&open.position.event_id));
+    assert_eq!(
+        edge.pending
+            .get(&[5; 16])
+            .ok_or("pending")?
+            .early_completion,
+        None
+    );
     assert!(
         edge.replies
             .replay(key, &command, None)
