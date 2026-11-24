@@ -710,6 +710,9 @@ fn check_descriptors(
     let ok = match rule {
         DescriptorRule::None => count == 0,
         DescriptorRule::ExactlyOne(kind) => count == 1 && kinds.first() == Some(kind),
+        DescriptorRule::FetchedObject(allowed) => {
+            matches!(kinds.as_slice(), [kind] if allowed.contains(kind))
+        }
         DescriptorRule::Page(allowed) => {
             (1..=agenc_relay_domain::e2ee::limits::MAX_BATCH_OBJECTS).contains(&count)
                 && kinds.iter().all(|kind| allowed.contains(kind))

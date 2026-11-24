@@ -511,6 +511,8 @@ pub enum DescriptorRule {
     /// Exactly one object of the named wire kind (companion discriminant)
     /// with a fresh response snapshot token and an empty cursor.
     ExactlyOne(u8),
+    /// One retained object from the named fetchable wire kinds.
+    FetchedObject(&'static [u8]),
     /// One to `MAX_BATCH_OBJECTS` objects of the named wire kinds.
     Page(&'static [u8]),
     /// One to `MAX_BATCH_OBJECTS` mailbox objects, each with a token.
@@ -532,11 +534,11 @@ const KIND_SEQUENCER_RECORD: u8 = 25;
 const KIND_DEVICE_ATTACH_CHALLENGE: u8 = 26;
 const KIND_ROOT_BINDING_LOCK: u8 = 28;
 
-/// Every non-S2S kind, for the `fetch_object` page rule; the retained
-/// leaf-membership proof (37) is fetched only through `fetch_object`.
-const CLIENT_KINDS: [u8; 29] = [
+/// Retained kinds available through the ordinary object lookup. Policy (34) and
+/// leaf-membership proof (37) have conversation-scoped access checks in the owner.
+const FETCHABLE_KINDS: [u8; 30] = [
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 37,
+    27, 28, 34, 37,
 ];
 
 /// The descriptor rule for a successful `(opcode, result)`.
@@ -555,7 +557,9 @@ pub fn descriptor_rule(opcode: Opcode, result: ResultKind) -> Result<DescriptorR
         (Opcode::CLAIM_PACKAGE | Opcode::CLAIM_STATUS, ResultKind::Claimed) => {
             DescriptorRule::ExactlyOne(KIND_KEY_PACKAGE)
         }
-        (Opcode::FETCH_OBJECT, ResultKind::ObjectPage) => DescriptorRule::Page(&CLIENT_KINDS),
+        (Opcode::FETCH_OBJECT, ResultKind::ObjectPage) => {
+            DescriptorRule::FetchedObject(&FETCHABLE_KINDS)
+        }
         (Opcode::FETCH_AUTHORIZATIONS, ResultKind::ObjectPage) => {
             DescriptorRule::Page(&[KIND_COMMIT_APPROVAL])
         }

@@ -1381,6 +1381,18 @@ fn published_policies_follow_the_binding_chain() -> TestResult {
     assert_eq!(state.policies.len(), 2);
     assert_eq!(state.current_policy_id, policy_id_of(&initial)?);
     assert!(state.policies.contains_key(&policy_id_of(&operational)?));
+    for policy in [&initial, &operational] {
+        let bytes = wire(ArcWireObjectKind::Policy, policy)?;
+        let fetch = [
+            conversation,
+            *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes(),
+        ]
+        .concat();
+        let outcome = ok(harness.run(Op::FetchObject, &fetch, None)?)?;
+        assert_eq!(outcome.result, ResultBody::ObjectPage);
+        assert_eq!(outcome.responses.len(), 1);
+        assert_eq!(outcome.responses[0].bytes, bytes);
+    }
     Ok(())
 }
 

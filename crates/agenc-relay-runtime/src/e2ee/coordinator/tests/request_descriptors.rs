@@ -39,6 +39,17 @@ fn each_descriptor_rule_bounds_count_kind_and_delivery_tokens() {
         "delivery tokens belong to mailbox pages only"
     );
 
+    let fetch = agenc_relay_domain::e2ee::projection::descriptor_rule(
+        agenc_relay_domain::e2ee::projection::Opcode::FETCH_OBJECT,
+        agenc_relay_domain::e2ee::projection::ResultKind::ObjectPage,
+    )
+    .unwrap();
+    let policy = || response(ArcWireObjectKind::Policy, false);
+    assert!(check_descriptors(&fetch, &[policy()]).is_ok());
+    assert!(check_descriptors(&fetch, &[policy(), policy()]).is_err());
+    assert!(check_descriptors(&fetch, &[event()]).is_err());
+    assert!(check_descriptors(&fetch, &[mailbox()]).is_err());
+
     let page = DescriptorRule::Page(MLS);
     assert!(check_descriptors(&page, &[]).is_err());
     assert!(check_descriptors(&page, &[event()]).is_err());
