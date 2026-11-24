@@ -45,7 +45,7 @@ enum HeldOutput {
 /// Frame groups one connection may queue behind its floored response. A
 /// connection's own later commands are deferred, so this bounds only the
 /// control and event traffic that continues meanwhile.
-const MAX_QUEUED_GROUPS: usize = 64;
+pub(crate) const MAX_QUEUED_GROUPS: usize = 64;
 
 /// The floor owner: the configured floor, the current command's start, and
 /// the retained responses.
@@ -128,20 +128,6 @@ impl SecretFloor {
         due.then(|| self.holds.remove(&generation))
             .flatten()
             .map(|hold| hold.groups)
-    }
-
-    /// Queues one later frame group behind a floored response; reports
-    /// whether it was retained rather than published now.
-    fn queue_behind(
-        &mut self,
-        generation: ConnectionGeneration,
-        frames: Vec<WireMessage>,
-    ) -> Result<(), Vec<WireMessage>> {
-        let Some(hold) = self.room(generation) else {
-            return Err(frames);
-        };
-        hold.groups.push(HeldOutput::Frames(frames));
-        Ok(())
     }
 
     fn room(&mut self, generation: ConnectionGeneration) -> Option<&mut Hold> {
@@ -231,14 +217,35 @@ impl super::StateCoreContext {
         true
     }
 
-    /// Retains one later frame group behind a floored response so the
-    /// connection sees the two in the order the server produced them.
+    /// Publishes no part of a later group while this generation owes its
+    /// floored response. Reports the normal slow-consumer close on saturation.
     pub(crate) fn queue_behind_secret_floor(
         &mut self,
         generation: ConnectionGeneration,
         frames: Vec<WireMessage>,
-    ) -> Result<(), Vec<WireMessage>> {
-        self.secret_floor.queue_behind(generation, frames)
+    ) -> Result<super::fanout::FanoutCommitReport, Vec<WireMessage>> {
+        if !self.secret_floor.pending(generation) {
+            return Err(frames);
+        }
+        Ok(self.retain_behind_floor(generation, HeldOutput::Frames(frames)))
+    }
+
+    fn retain_behind_floor(
+        &mut self,
+        generation: ConnectionGeneration,
+        output: HeldOutput,
+    ) -> super::fanout::FanoutCommitReport {
+        if let Some(hold) = self.secret_floor.room(generation) {
+            hold.groups.push(output);
+            return super::fanout::FanoutCommitReport::retained();
+        }
+        // An exhausted hold cannot publish later traffic ahead of earlier
+        // groups. Drop every held source and close only this connection.
+        self.secret_floor.discard(generation);
+        let sink = self.sessions.sink_for_generation(generation);
+        self.commit_fanout(super::fanout::FanoutReservation::saturated(
+            generation, sink,
+        ))
     }
 
     /// Publishes ordinary replies and single-window bulk batches in the same
@@ -250,12 +257,7 @@ impl super::StateCoreContext {
             return;
         };
         if self.secret_floor.pending(generation) {
-            if let Some(hold) = self.secret_floor.room(generation) {
-                hold.groups.push(HeldOutput::Companion(batch));
-            } else if let Some(sink) = self.sessions.sink_for_generation(generation) {
-                sink.begin_slow_consumer_close();
-                self.sessions.mark_sink_gone(generation);
-            }
+            let _report = self.retain_behind_floor(generation, HeldOutput::Companion(batch));
         } else {
             self.send_companion_batch_now(generation, batch);
         }
