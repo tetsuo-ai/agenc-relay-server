@@ -1,6 +1,7 @@
 //! Authenticated temporary storage for large companion controls.
 
 #[cfg(test)]
+#[path = "spool/tests/boundaries.rs"]
 mod tests;
 
 use std::fmt;

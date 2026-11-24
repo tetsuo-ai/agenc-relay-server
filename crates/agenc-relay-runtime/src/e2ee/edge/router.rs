@@ -426,43 +426,7 @@ impl E2eeEdge {
             route: Some(command.route_key()),
             peer: None,
         };
-        let now = context.now().get() / 1_000;
-        let ingestion = if let Some(spool) = &self.spool {
-            let origin = self
-                .origins
-                .get(&generation)
-                .ok_or(E2eeReplyCode::AccountRequired)?;
-            let admission = crate::e2ee::spool::Admission {
-                key: key.clone(),
-                carrier,
-                scopes,
-                authenticated_spool: scopes.account.is_some()
-                    && settled(origin)
-                    && origin.device.is_some(),
-            };
-            spool.ingest(
-                &mut self.assembler,
-                admission,
-                tag,
-                now,
-                Some(std::sync::Arc::clone(&origin.ingress)),
-            )
-        } else {
-            self.assembler.ingest_backed(
-                key.clone(),
-                scopes,
-                carrier.limit(),
-                tag,
-                now,
-                AssemblyBacking::Memory(&|bytes| {
-                    Ok(Box::new(
-                        context
-                            .reserve_output_backing(bytes)
-                            .map_err(|_| AssemblyError::ReassemblyLimit)?,
-                    ))
-                }),
-            )
-        };
+        let ingestion = self.ingest_backing(&key, scopes, tag, context);
         match ingestion {
             Ok(Ingest::Complete(bytes)) => {
                 self.ingress.remove(&generation);
@@ -498,6 +462,57 @@ impl E2eeEdge {
                 self.ingress.remove(&generation);
                 Err(error.reply_code().into())
             }
+        }
+    }
+
+    fn ingest_backing(
+        &mut self,
+        key: &AssemblyKey,
+        scopes: QuotaScopes,
+        tag: &FragmentTag,
+        context: &StateCoreContext,
+    ) -> Result<Ingest<ReservedObject>, AssemblyError> {
+        let Sender::Connection { connection, .. } = key.sender else {
+            return Err(AssemblyError::InvalidFragment);
+        };
+        let generation = ConnectionGeneration::new(connection);
+        let carrier = key.command;
+        let now = context.now().get() / 1_000;
+        if let Some(spool) = &self.spool {
+            let origin = self
+                .origins
+                .get(&generation)
+                .ok_or(AssemblyError::ReassemblyLimit)?;
+            let admission = crate::e2ee::spool::Admission {
+                key: key.clone(),
+                carrier,
+                scopes,
+                authenticated_spool: scopes.account.is_some()
+                    && settled(origin)
+                    && origin.device.is_some(),
+            };
+            spool.ingest(
+                &mut self.assembler,
+                admission,
+                tag,
+                now,
+                Some(std::sync::Arc::clone(&origin.ingress)),
+            )
+        } else {
+            self.assembler.ingest_backed(
+                key.clone(),
+                scopes,
+                carrier.limit(),
+                tag,
+                now,
+                AssemblyBacking::Memory(&|bytes| {
+                    Ok(Box::new(
+                        context
+                            .reserve_output_backing(bytes)
+                            .map_err(|_| AssemblyError::ReassemblyLimit)?,
+                    ))
+                }),
+            )
         }
     }
 

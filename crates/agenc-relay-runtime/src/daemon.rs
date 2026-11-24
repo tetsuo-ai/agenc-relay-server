@@ -1406,8 +1406,6 @@ fn e2ee_setup_with_hook(
     sequencer: SequencerSecrets<'_>,
     after_initial_status: impl FnOnce(),
 ) -> Result<Option<E2eeSetup>, DaemonError> {
-    use agenc_relay_e2ee::profile::EcapTuple;
-    use agenc_relay_e2ee::wire::tokens::base64url_encode;
     if !config.e2ee.enabled {
         return Ok(None);
     }
@@ -1422,14 +1420,7 @@ fn e2ee_setup_with_hook(
         .e2ee
         .coordinator_server_id
         .ok_or(DaemonError::UnsupportedProfile)?;
-    let tuple = EcapTuple::local(
-        &base64url_encode(&network),
-        &base64url_encode(coordinator.as_bytes()),
-        key_set.set_generation,
-        &base64url_encode(&key_set.digest),
-    )
-    .map_err(|_| DaemonError::E2eeCredentials)?;
-    let profile = CompanionProfile { local: tuple };
+    let profile = companion_profile(&network, coordinator, &key_set)?;
     let negotiated = key_set.clone();
     let executor = match config.network.role {
         NodeRole::Coordinator => {
@@ -1473,6 +1464,23 @@ fn e2ee_setup_with_hook(
         executor,
         key_set: negotiated,
     }))
+}
+
+fn companion_profile(
+    network: &[u8; 32],
+    coordinator: agenc_relay_types::ServerId,
+    key_set: &agenc_relay_e2ee::sequencer::SequencerKeySet,
+) -> Result<CompanionProfile, DaemonError> {
+    use agenc_relay_e2ee::profile::EcapTuple;
+    use agenc_relay_e2ee::wire::tokens::base64url_encode;
+    let tuple = EcapTuple::local(
+        &base64url_encode(network),
+        &base64url_encode(coordinator.as_bytes()),
+        key_set.set_generation,
+        &base64url_encode(&key_set.digest),
+    )
+    .map_err(|_| DaemonError::E2eeCredentials)?;
+    Ok(CompanionProfile { local: tuple })
 }
 
 /// Attaches the coordinator or edge role to the registration router, with

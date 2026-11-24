@@ -383,15 +383,7 @@ impl StorageOwner {
         let Ok(thread) = thread::Builder::new()
             .name("arcd-storage-owner".to_owned())
             .spawn(move || {
-                let engine = StorageEngine::open_with_runtime_limits(config, limit_reader)
-                    .and_then(|mut engine| {
-                        let recovered = engine.startup_scan()?;
-                        if let Some(disk) = &disk {
-                            disk.restore(recovered.companion_disk_bytes)?;
-                        }
-                        engine.companion_disk = disk;
-                        Ok((engine, recovered))
-                    });
+                let engine = recover_owner(config, limit_reader, disk);
                 match engine {
                     Ok((mut engine, recovered)) => {
                         if startup_sender.send(Ok(recovered)).is_err() {
@@ -529,6 +521,20 @@ impl OwnerState {
 enum OwnerStep {
     Continue,
     Stop,
+}
+
+fn recover_owner(
+    config: StorageOpenConfig,
+    limits: crate::engine::StorageLimitReader,
+    disk: Option<crate::CompanionDisk>,
+) -> Result<(StorageEngine, RecoveredStorageState), StorageError> {
+    let mut engine = StorageEngine::open_with_runtime_limits(config, limits)?;
+    let recovered = engine.startup_scan()?;
+    if let Some(disk) = &disk {
+        disk.restore(recovered.companion_disk_bytes)?;
+    }
+    engine.companion_disk = disk;
+    Ok((engine, recovered))
 }
 
 fn run_owner(engine: &mut StorageEngine, requests: &Receiver<StorageRequest>) {
