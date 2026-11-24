@@ -36,6 +36,13 @@ const ACCOUNT_OUTSTANDING: usize = 8;
 /// payloads, so a conforming edge stays clear of both.
 const EDGE_OUTSTANDING: usize = crate::e2ee::coordinator::MAX_QUEUED_COMPANION_REQUESTS / 2;
 
+/// One internal attachment query has a dedicated slot on the edge. The
+/// published client outstanding limits still apply to every client command.
+pub(super) enum RequestSource {
+    Client(Option<String>),
+    Attachment,
+}
+
 /// One client command resolved against the edge's base replica: channel
 /// names became channel instances, and a bound-channel `TAGMSG` became the
 /// channel application carrier.
@@ -278,11 +285,11 @@ impl E2eeEdge {
                         edge,
                         generation,
                         account,
-                        label,
+                        RequestSource::Client(label),
                         command,
                         Some(bytes),
                     )
-                    .map(|()| Vec::new());
+                    .map(|_| Vec::new());
                 // A completed submission refused before it went out keeps no
                 // recent-object tuple, so its retry is admitted again.
                 if sent.is_err()
@@ -297,8 +304,16 @@ impl E2eeEdge {
             }
             (Some(_), None) | (None, Some(_)) => Err(E2eeReplyCode::InvalidFragment.into()),
             (None, None) => self
-                .send_request(context, edge, generation, account, label, command, None)
-                .map(|()| Vec::new()),
+                .send_request(
+                    context,
+                    edge,
+                    generation,
+                    account,
+                    RequestSource::Client(label),
+                    command,
+                    None,
+                )
+                .map(|_| Vec::new()),
         }
     }
 
@@ -463,16 +478,16 @@ impl E2eeEdge {
     /// Encodes and sends one request under the connection's origin.
     // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=one request needs the context the edge the connection its account label command and payload together
     #[allow(clippy::too_many_arguments)]
-    fn send_request(
+    pub(super) fn send_request(
         &mut self,
         context: &mut StateCoreContext,
         edge: &mut EdgeFederation,
         generation: ConnectionGeneration,
         account: [u8; 24],
-        label: Option<String>,
+        source: RequestSource,
         command: Resolved,
         payload: Option<Vec<u8>>,
-    ) -> Result<(), Refusal> {
+    ) -> Result<[u8; 16], Refusal> {
         // A submission's reply is kept for its retries: its largest size is
         // reserved now, so keeping it never fails (companion 11.8, 16).
         let reserve = if payload.is_some() {
@@ -480,9 +495,14 @@ impl E2eeEdge {
         } else {
             0
         };
-        if !self.admits_request(generation, &account, reserve) {
-            return Err(E2eeReplyCode::RateLimited.into());
-        }
+        let probe = matches!(source, RequestSource::Attachment);
+        let label = match source {
+            RequestSource::Client(label) if self.admits_request(generation, &account, reserve) => {
+                label
+            }
+            RequestSource::Attachment if self.direct_probe.is_none() => None,
+            _ => return Err(E2eeReplyCode::RateLimited.into()),
+        };
         let reservation = (reserve != 0)
             .then(|| context.reserve_kept_output(reserve))
             .transpose()
@@ -497,6 +517,10 @@ impl E2eeEdge {
             .entropy_mut()
             .fill_exact(&mut request_id)
             .map_err(|_| E2eeReplyCode::RateLimited)?;
+        if self.pending.contains_key(&request_id) || self.closed_requests.contains_key(&request_id)
+        {
+            return Err(E2eeReplyCode::RateLimited.into());
+        }
         let payload_id = payload
             .as_ref()
             .map(|bytes| {
@@ -593,10 +617,13 @@ impl E2eeEdge {
             },
         );
         self.counters.requests_sent = self.counters.requests_sent.saturating_add(1);
+        if probe {
+            self.direct_probe = Some(request_id);
+        }
         if !self.send(context, edge, lines) {
             return Err(E2eeReplyCode::Syncing.into());
         }
-        Ok(())
+        Ok(request_id)
     }
 
     /// Whether one more outstanding request of `generation` under

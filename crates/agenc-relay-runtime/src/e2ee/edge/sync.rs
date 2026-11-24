@@ -418,7 +418,9 @@ impl E2eeEdge {
                 )
                 .map(|()| Vec::new()),
             CompanionFrame::Result { .. } | CompanionFrame::Response { .. } => {
-                self.on_result_frame(context, frame)
+                let mut outputs = self.on_result_frame(context, frame)?;
+                outputs.extend(self.advance_direct_delivery(context, edge)?);
+                Ok(outputs)
             }
             CompanionFrame::Event {
                 position,

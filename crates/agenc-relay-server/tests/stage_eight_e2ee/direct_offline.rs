@@ -396,6 +396,31 @@ fn offline_direct_ciphertext_survives_restart_and_only_the_new_target_attachment
             &fetch(&mut mirror, &mut bob.keys)?,
             " EKEY EMPTY APPLICATION",
         )?;
+        // Both edges retain a current eligible device. Only those current sessions get this copy.
+        let mut second =
+            authenticated_session(&network.edge_b, "bobother", bob.login, 72, bob.account)?;
+        attach_when_active(&mut second, &mut second_bob)?;
+        empty(&mut second, &mut second_bob)?;
+        let (current, _) = send_when_ready(
+            &mut alice,
+            &direct,
+            terminal,
+            &sender,
+            &mut group,
+            2,
+            "current devices on both edges",
+        )?;
+        assert_eq!(receive_application(&mut mirror, &direct)?, current);
+        assert_eq!(receive_application(&mut second, &direct)?, current);
+        returning.send("PING :old-device-copy")?;
+        let quiet = returning
+            .read_until(|line| line.contains(" PONG ") && line.contains("old-device-copy"))?;
+        assert!(
+            !quiet
+                .iter()
+                .any(|line| line.contains(&direct.application_marker())),
+            "superseded attachment received a live direct application"
+        );
         // This ordinary disconnect has no coordinator or edge restart between QUIT and submit.
         mirror.send("JOIN #seen")?;
         mirror.read_until(|l| l.contains(" 366 bobmirror #seen "))?;
@@ -414,7 +439,7 @@ fn offline_direct_ciphertext_survives_restart_and_only_the_new_target_attachment
             terminal,
             &sender,
             &mut group,
-            2,
+            3,
             "offline without a restart",
         )?;
         attach_when_active(&mut returning, &mut bob.keys)?;

@@ -7,6 +7,7 @@
 //! command fails with `E2EE_SYNCING`.
 
 mod completion;
+mod direct_delivery;
 mod entitlement;
 mod events;
 mod ingress;
@@ -190,6 +191,7 @@ pub(crate) enum PendingCommit {
         position: agenc_relay_e2ee::federation::frames::DeliveryPosition,
         /// The applied event's object identifier.
         object_id: [u8; 32],
+        direct: Option<direct_delivery::VerifiedSinks>,
         outputs: Vec<ClientOutput>,
     },
     /// The READY of a snapshot was recorded.
@@ -269,6 +271,8 @@ pub struct E2eeEdge {
     witness_resolution: Option<witness_resolution::OpenResolution>,
     witness_request_wake: Option<crate::state_core::timers::TimerEntry>,
     queued: VecDeque<(CompanionFrame, Vec<u8>)>,
+    direct_delivery: Option<direct_delivery::Delivery>,
+    direct_probe: Option<[u8; 16]>,
     events_in: BTreeMap<[u8; 16], events::OpenEvent>,
     /// The delivery generation, sequence and Event ID of the event this
     /// edge applied last, with its object identifier: an exact duplicate at
@@ -366,6 +370,8 @@ impl E2eeEdge {
             witness_resolution: None,
             witness_request_wake: None,
             queued: VecDeque::new(),
+            direct_delivery: None,
+            direct_probe: None,
             applied_object: None,
             events_in: BTreeMap::new(),
             channel_names: BTreeMap::new(),
@@ -413,6 +419,7 @@ impl E2eeEdge {
         self.snapshot_link_down();
         self.held = None;
         self.queued.clear();
+        self.direct_delivery = None;
         self.events_in.clear();
         self.barrier_pending = None;
         // The coordinator drops a closed link's queued requests.
