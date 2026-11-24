@@ -43,7 +43,7 @@ pub use backup::{
     verify_backup,
 };
 pub use bounded::{LIVE_DATABASE_REGION_BYTES, guard_replacement_charge};
-pub use companion_disk::{CompanionDisk, ExtentReservation};
+pub use companion_disk::{CompanionDisk, CompanionDiskAccounting, ExtentReservation};
 pub use construction::{
     MAX_CONSTRUCTION_PLAN_BYTES, STORAGE_CONSTRUCTION_KEY, StorageConstruction,
     StorageConstructionAction, StorageConstructionCursor, StorageConstructionKind,

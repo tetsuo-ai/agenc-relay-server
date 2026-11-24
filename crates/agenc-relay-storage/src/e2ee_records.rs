@@ -35,6 +35,7 @@
 //! | `keyset/v1` | 11 | none | [`KeySetRow`] |
 //! | `cross-profile/head/v1/`, `cross-profile/part/v1/` | 12 | Section 20.8 layouts | [`barrier`] |
 //! | `witness/v1/` | 13 | conversation ID | [`WitnessRow`] |
+//! | `companion-disk/v1` | 23 | none | [`crate::CompanionDiskAccounting`] |
 
 use agenc_relay_e2ee::limits::{MAX_FEDERATION_CONTROL_OBJECT, MAX_FINALITY_PRINCIPALS};
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
@@ -186,7 +187,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 42] = [
+const PREFIX_KINDS: [(&[u8], u16); 43] = [
     (prefix::RECOVERY_SUBMISSION, RECOVERY_SUBMISSION_ROW_KIND),
     (prefix::RECOVERY_RECORD, RECOVERY_RECORD_ROW_KIND),
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
@@ -202,6 +203,10 @@ const PREFIX_KINDS: [(&[u8], u16); 42] = [
     (prefix::MEMBERSHIP, SEQUENCER_ROW_KIND),
     (prefix::OWNER, OWNER_ROW_KIND),
     (prefix::OBJECT_EXPIRY, EXPIRY_PROGRESS_ROW_KIND),
+    (
+        crate::companion_disk::accounting::KEY,
+        crate::companion_disk::accounting::KIND,
+    ),
     (prefix::IDENTITY, DIRECTORY_ROW_KIND),
     (prefix::ROSTER, DIRECTORY_ROW_KIND),
     (prefix::CAPABILITY, DIRECTORY_ROW_KIND),
@@ -2902,6 +2907,9 @@ pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageE
         MAILBOX_SEQUENCE_ROW_KIND => MailboxSequenceRow::decode(body).map(|_| ()),
         OWNER_ROW_KIND => ObjectOwnerRow::decode(body).map(|_| ()),
         EXPIRY_PROGRESS_ROW_KIND => ObjectExpiryProgressRow::decode(body).map(|_| ()),
+        crate::companion_disk::accounting::KIND => {
+            crate::CompanionDiskAccounting::decode(body).map(|_| ())
+        }
         RECOVERY_SUBMISSION_ROW_KIND => RecoverySubmissionRow::decode(body).map(|_| ()),
         RECOVERY_RECORD_ROW_KIND => RecoveryRecordRow::decode(body).map(|_| ()),
         _ => Err(StorageError::InvalidEncoding),

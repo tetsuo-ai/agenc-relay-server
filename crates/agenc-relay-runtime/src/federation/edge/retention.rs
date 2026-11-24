@@ -8,7 +8,8 @@ use super::{EdgeFederation, PendingCommit, Violation};
 use crate::state_core::StateCoreContext;
 use crate::state_core::durable::AccountServiceDurableWrite;
 
-const MAX_CLEANUP_ROWS: usize = 999; // One additional peer row accompanies the batch.
+// Leave one mutation for the peer cursor and one for the sealed disk counter.
+const MAX_CLEANUP_ROWS: usize = 998;
 const MAX_CLEANUP_BYTES: u64 = 16 * 1024 * 1024;
 
 pub(super) fn cursors_cover(edge: &EdgeFederation, receipt: &BarrierReceipt) -> bool {
@@ -176,7 +177,7 @@ fn bounded_deletions(
     candidates: Vec<(TableId, StoredKey)>,
 ) -> Result<(Vec<AccountServiceDurableWrite>, bool), Violation> {
     let mut writes = Vec::new();
-    let mut bytes = 1024_u64; // Reserve the small peer row in this checkpoint.
+    let mut bytes = 2 * 1024_u64; // Reserve the sealed peer and disk-counter rows.
     for (table, key) in candidates {
         let Some(existing) = context
             .index()

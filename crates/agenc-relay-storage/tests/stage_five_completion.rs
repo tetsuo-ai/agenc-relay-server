@@ -4,6 +4,8 @@
 
 #[path = "stage_five_completion/bounded_scratch.rs"]
 mod bounded_scratch;
+#[path = "stage_five_completion/companion_disk.rs"]
+mod companion_disk;
 #[path = "stage_five_completion/construction_admission.rs"]
 mod construction_admission;
 #[path = "stage_five_completion/recovery_provenance.rs"]
@@ -3347,11 +3349,31 @@ fn rekey_construction_commits_finalizes_installs_and_reopens() -> Result<(), Box
 
 #[test]
 fn stopped_daemon_restore_installs_and_reverifies_a_signed_backup() -> Result<(), Box<dyn Error>> {
+    stopped_daemon_restore(false)
+}
+
+fn stopped_daemon_restore(account_companion: bool) -> Result<(), Box<dyn Error>> {
     let source = initialized_live_fixture()?;
-    let owner = StorageOwner::start(live_open_config(StateDirectory::open(
-        source.directory.path(),
-        &[source.qualification],
-    )?))?;
+    let disk = account_companion
+        .then(|| agenc_relay_storage::CompanionDisk::new(64 * 1024))
+        .transpose()?;
+    let owner = StorageOwner::start_with_companion_disk(
+        live_open_config(StateDirectory::open(
+            source.directory.path(),
+            &[source.qualification],
+        )?),
+        disk,
+    )?;
+    if account_companion {
+        assert!(matches!(
+            companion_disk::put_both(&owner)?,
+            CommitOutcome::Committed(_)
+        ));
+        assert!(matches!(
+            owner.port().try_checkpoint()?.wait()?,
+            agenc_relay_storage::CheckpointOutcome::Installed(_)
+        ));
+    }
     let backup_directory = TestDirectory::create()?;
     let signing_key = Ed25519SecretKey::from_bytes([151; 32]);
     let public_key = signing_key.public_key();
@@ -3421,11 +3443,17 @@ fn stopped_daemon_restore_installs_and_reverifies_a_signed_backup() -> Result<()
         Err(StorageError::StaleState)
     );
 
-    let receipt = execute_restore_command(request(), &[source.qualification])?;
+    let receipt = execute_restore_command(request(), &[source.qualification])
+        .map_err(|e| format!("restore command failed: {e:?}"))?;
     assert_eq!(receipt.output_state_directory, output);
-    assert_eq!(receipt.current_state_generation, Some(0));
-    assert_eq!(receipt.source_state_generation, 0);
+    let expected_generation = u64::from(account_companion);
+    assert_eq!(receipt.current_state_generation, Some(expected_generation));
+    assert_eq!(receipt.source_state_generation, expected_generation);
     assert_eq!(receipt.target_state_generation, 0);
+    if account_companion {
+        companion_disk::verify_restored(&source, &output)
+            .map_err(|e| format!("restored aggregate failed: {e:?}"))?;
+    }
     assert_ne!(receipt.source_recovery_epoch, receipt.target_recovery_epoch);
     assert_ne!(
         receipt.source_server_incarnation,

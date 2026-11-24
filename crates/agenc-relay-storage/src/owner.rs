@@ -529,11 +529,18 @@ fn recover_owner(
     disk: Option<crate::CompanionDisk>,
 ) -> Result<(StorageEngine, RecoveredStorageState), StorageError> {
     let mut engine = StorageEngine::open_with_runtime_limits(config, limits)?;
-    let recovered = engine.startup_scan()?;
-    if let Some(disk) = &disk {
-        disk.restore(recovered.companion_disk_bytes)?;
-    }
-    engine.companion_disk = disk;
+    let mut recovered = engine.startup_scan()?;
+    let disk = if disk.is_none() && recovered.companion_disk.persisted() {
+        // A store opened without a deployment ceiling must still maintain an
+        // already installed authenticated accounting row.
+        Some(crate::CompanionDisk::new(u64::MAX)?)
+    } else {
+        disk
+    };
+    engine.companion_disk = disk
+        .map(|disk| disk.attach(recovered.companion_disk, recovered.database_binding()))
+        .transpose()?;
+    recovered.companion_disk_enabled = engine.companion_disk.is_some();
     Ok((engine, recovered))
 }
 
