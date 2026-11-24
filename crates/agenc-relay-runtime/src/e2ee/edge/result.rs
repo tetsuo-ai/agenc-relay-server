@@ -345,7 +345,15 @@ impl E2eeEdge {
             .ok_or(E2eeReplyCode::InvalidFragment)?;
         let Some(index) = index else {
             let decoded = decode_result(&bytes).map_err(|_| E2eeReplyCode::InvalidFragment)?;
-            if decoded.request_object_id != pending.request_object_id {
+            let ordinary = match &self.commit {
+                Some(super::PendingCommit::Event { completion, .. }) => Some(completion),
+                _ => None,
+            };
+            if decoded.request_object_id != pending.request_object_id
+                || self.barrier_completions.iter().chain(ordinary).any(|c| {
+                    c.rejects_result(correlation.request_id, pending, decoded.completion_event_id)
+                })
+            {
                 return Err(E2eeReplyCode::InvalidFragment.into());
             }
             let object_id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();

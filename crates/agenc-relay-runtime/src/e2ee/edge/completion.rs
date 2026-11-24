@@ -22,6 +22,24 @@ pub(super) enum PreparedAnswer {
     Stream(Box<super::ClientBatch>),
 }
 
+impl PreparedCompletion {
+    /// While a storage write is in flight, its correlated result must name
+    /// the same event even if the result would otherwise render immediately.
+    pub(super) fn rejects_result(
+        &self,
+        request_id: [u8; 16],
+        pending: &PendingRequest,
+        event_id: Option<[u8; 16]>,
+    ) -> bool {
+        self.0.as_ref().is_some_and(|local| {
+            local.request_id == request_id
+                && local.generation == pending.generation
+                && local.request_object_id == pending.request_object_id
+                && event_id != Some(local.event_id)
+        })
+    }
+}
+
 impl E2eeEdge {
     pub(super) fn prepare_completion(
         &self,
@@ -30,22 +48,23 @@ impl E2eeEdge {
     ) -> Result<(PreparedCompletion, Vec<ClientOutput>), Refusal> {
         let request_id = <[u8; 16]>::try_from(event.request_id.as_slice()).ok();
         let pending = request_id
-            .and_then(|id| self.pending.get(&id).map(|p| (id, p)))
-            .filter(|(_, p)| {
+            .filter(|_| {
                 event.request_home_server_id.as_slice() == self.config.server_id.as_bytes()
                     && event.request_server_incarnation.as_slice() == self.config.incarnation
-                    && event.request_origin_generation == p.origin_generation
-                    && event.request_operation_sequence == p.sequence
-                    && p.transfer.as_ref().is_none_or(|t| {
-                        event.request_origin_id.as_slice() == t.correlation.origin_id
-                    })
-            });
+            })
+            .and_then(|id| self.pending.get(&id).map(|p| (id, p)));
         let Some((request_id, pending)) = pending else {
             return Ok((PreparedCompletion(None), Vec::new()));
         };
-        if pending
-            .early_completion
-            .is_some_and(|id| id != event.event_id)
+        if event.request_origin_generation != pending.origin_generation
+            || event.request_operation_sequence != pending.sequence
+            || pending
+                .transfer
+                .as_ref()
+                .is_some_and(|t| event.request_origin_id.as_slice() != t.correlation.origin_id)
+            || pending
+                .early_completion
+                .is_some_and(|id| id != event.event_id)
             || pending
                 .result
                 .as_ref()
@@ -98,6 +117,7 @@ impl E2eeEdge {
             return Vec::new();
         };
         if result.completion_event_id != Some(local.event_id) {
+            self.link_down();
             return Vec::new();
         }
         pending.completion_seen = true;

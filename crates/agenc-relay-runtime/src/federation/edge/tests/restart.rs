@@ -21,6 +21,7 @@ use crate::state_core::durable::AccountServiceDurableWrite;
 const MUTATION: [u8; 16] = [77; 16];
 
 mod completion;
+mod mailbox;
 mod revisions;
 mod rollback;
 mod upgrade;
@@ -157,8 +158,17 @@ fn record(
 }
 
 fn crash_rows(received: usize, omit_payload: bool) -> TestResult<Vec<InitialStorageRecord>> {
-    let (base, _) = edges();
     let (parts, payload) = parts()?;
+    staged_rows(parts, payload, received, omit_payload)
+}
+
+fn staged_rows(
+    parts: Vec<BarrierPart>,
+    payload: Vec<u8>,
+    received: usize,
+    omit_payload: bool,
+) -> TestResult<Vec<InitialStorageRecord>> {
+    let (base, _) = edges();
     let mut assembly = BarrierAssembly::open(identity(2))?;
     let mut rows = Vec::new();
     let AccountServiceDurableWrite::Put {

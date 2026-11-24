@@ -6,6 +6,55 @@ use super::*;
 use agenc_relay_e2ee::federation::frames::DeliveryPosition;
 use agenc_relay_e2ee::objects::federation::ArcFederationEvent;
 
+impl E2eeEdge {
+    /// A locally owned mailbox fetch with its full result and response on the
+    /// federation wire. The supplied cross-profile event still needs a receipt.
+    pub(crate) fn waiting_barrier_mailbox_for_test(
+        &mut self,
+        fixture: &mut StateCoreFixture,
+        event: &ArcFederationEvent,
+    ) -> TestResult {
+        use agenc_relay_e2ee::wire::command::MailboxKind;
+        let local = Correlation {
+            peer_server_id: *self.config.server_id.as_bytes(),
+            server_incarnation: self.config.incarnation,
+            origin_id: event.request_origin_id.as_slice().try_into()?,
+            origin_generation: event.request_origin_generation,
+            operation_sequence: event.request_operation_sequence,
+            request_id: event.request_id.as_slice().try_into()?,
+        };
+        let mut request = pending(1, local.operation_sequence, false);
+        request.label = Some("joint".to_owned());
+        request.origin_generation = local.origin_generation;
+        request.command = Resolved::Command(ClientCommand::Ekey(EkeyCommand::FetchMailbox {
+            kind: MailboxKind::Welcome,
+            cursor: None,
+        }));
+        self.pending.insert(local.request_id, request);
+        let bytes = object(ArcWireObjectKind::WelcomeMls, 9011, 83)?;
+        let mut described = descriptor(0, &bytes)?;
+        described.delivery_token = Opaque::new(vec![5; 32])?;
+        described.target_device_id = Opaque::new(vec![4; 16])?;
+        let result = page_result(
+            self.config.network_id,
+            local,
+            vec![described],
+            event.coordinator_state_generation,
+            Some(event.event_id),
+        )?;
+        for (index, item) in [(None, &result), (Some(0), &bytes)] {
+            for frame in frames_for(local, index, item)? {
+                assert!(
+                    self.on_result_frame(fixture.context_mut()?, frame)
+                        .map_err(|e| e.code.to_string())?
+                        .is_empty()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Feed the actual EVENT envelope through the normal assembly and durable
 /// cursor owner. No client reply is visible while the write is staged.
 pub(super) fn stage(
@@ -154,6 +203,75 @@ async fn rejecting_the_cursor_or_disconnecting_the_recipient_never_publishes_its
                     .is_empty()
             );
         }
+        assert_eq!(edge.counters.results_rendered, 0);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_committed_event_for_another_pending_request_never_authorizes_these_response_bytes()
+-> TestResult {
+    let mut fixture = StateCoreFixture::new(vec![0; 4096])?;
+    let mut edge = waiting();
+    let mut base = super::super::projection::base_edge();
+    let other = [22; 16];
+    edge.pending.insert(other, pending(2, 0, false));
+    let mut event = super::super::result_kinds::completion_event()?;
+    event.request_id = Opaque::new(other.to_vec())?;
+    stage(&mut edge, &mut fixture, &mut base, &event)?;
+    fixture.commit_staged_batch().await?;
+    assert!(
+        edge.batch_applied(fixture.context_mut()?, &mut base)
+            .is_empty()
+    );
+    let bytes = object(ArcWireObjectKind::WelcomeMls, 5021, 32)?;
+    let result = result_with_completion(vec![descriptor(0, &bytes)?], 1, Some(event.event_id))?;
+    assert!(receive(&mut edge, &mut fixture, None, &result)?.is_empty());
+    assert!(receive(&mut edge, &mut fixture, Some(0), &bytes)?.is_empty());
+    assert_eq!(
+        edge.pending
+            .get(&other)
+            .ok_or("other request")?
+            .early_completion,
+        Some(event.event_id)
+    );
+    assert!(
+        !edge
+            .pending
+            .get(&REQUEST)
+            .ok_or("original request")?
+            .completion_seen
+    );
+    assert_eq!(edge.counters.results_rendered, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_result_disagreeing_with_its_staged_event_keeps_the_recipient_unanswered() -> TestResult {
+    let event = super::super::result_kinds::completion_event()?;
+    let bytes = object(ArcWireObjectKind::WelcomeMls, 5021, 33)?;
+    for different in [None, Some([81; 16])] {
+        let mut fixture = StateCoreFixture::new(vec![0; 4096])?;
+        let mut edge = waiting();
+        let mut base = super::super::projection::base_edge();
+        assert!(receive(&mut edge, &mut fixture, Some(0), &bytes)?.is_empty());
+        stage(&mut edge, &mut fixture, &mut base, &event)?;
+        let result = result_with_completion(vec![descriptor(0, &bytes)?], 1, different)?;
+        assert!(
+            edge.handle_frames(fixture.context_mut()?, &mut base, frames(None, &result)?)
+                .is_empty()
+        );
+        assert_eq!(edge.phase, Phase::Down);
+        fixture.commit_staged_batch().await?;
+        assert!(
+            edge.batch_applied(fixture.context_mut()?, &mut base)
+                .is_empty()
+        );
+        assert!(
+            edge.pending
+                .get(&REQUEST)
+                .is_some_and(|p| p.result.is_none())
+        );
         assert_eq!(edge.counters.results_rendered, 0);
     }
     Ok(())

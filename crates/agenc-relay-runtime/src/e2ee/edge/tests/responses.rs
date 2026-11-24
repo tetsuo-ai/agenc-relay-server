@@ -76,18 +76,34 @@ fn result_with_completion(
     state_generation: u64,
     completion: Option<[u8; 16]>,
 ) -> TestResult<Vec<u8>> {
+    page_result(
+        [1; 32],
+        correlation(),
+        descriptors,
+        state_generation,
+        completion,
+    )
+}
+
+fn page_result(
+    network: [u8; 32],
+    local: Correlation,
+    descriptors: Vec<ArcFederationResponseDescriptor>,
+    state_generation: u64,
+    completion: Option<[u8; 16]>,
+) -> TestResult<Vec<u8>> {
     let mailbox = descriptors
         .iter()
         .any(|d| !d.delivery_token.as_slice().is_empty());
     let result = ArcFederationResult {
         profile_version: 1,
-        network_id: [1; 32],
-        home_server_id: [2; 16],
-        server_incarnation: [4; 16],
-        origin_id: [8; 16],
-        origin_generation: 0,
-        operation_sequence: 0,
-        request_id: REQUEST,
+        network_id: network,
+        home_server_id: local.peer_server_id,
+        server_incarnation: local.server_incarnation,
+        origin_id: local.origin_id,
+        origin_generation: local.origin_generation,
+        operation_sequence: local.operation_sequence,
+        request_id: local.request_id,
         request_object_id: [7; 32],
         coordinator_state_generation: state_generation,
         completion_event_id: Opaque::new(completion.map_or_else(Vec::new, |id| id.to_vec()))?,
@@ -104,15 +120,26 @@ fn result_with_completion(
     Ok(ArcWireObject::new(ArcWireObjectKind::FederationResult, result.encode()?)?.encode()?)
 }
 
-fn frames(index: Option<u16>, bytes: &[u8]) -> TestResult<Vec<CompanionFrame>> {
-    let correlation = Correlation {
+fn correlation() -> Correlation {
+    Correlation {
         peer_server_id: [2; 16],
         server_incarnation: [4; 16],
         origin_id: [8; 16],
         origin_generation: 0,
         operation_sequence: 0,
         request_id: REQUEST,
-    };
+    }
+}
+
+fn frames(index: Option<u16>, bytes: &[u8]) -> TestResult<Vec<CompanionFrame>> {
+    frames_for(correlation(), index, bytes)
+}
+
+fn frames_for(
+    correlation: Correlation,
+    index: Option<u16>,
+    bytes: &[u8],
+) -> TestResult<Vec<CompanionFrame>> {
     let object_id = *ObjectId::compute(bytes).as_bytes();
     Ok(fragment_object(bytes)?
         .into_iter()

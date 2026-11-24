@@ -411,7 +411,11 @@ impl E2eeEdge {
     /// link are gone.
     pub fn link_down(&mut self) {
         self.ingress_link = None;
-        self.barrier_completions.clear();
+        // Once a joint cursor write is staged, its local storage receipt
+        // decides publication even if the federation transport closes.
+        if self.barrier_pending.is_none() {
+            self.barrier_completions.clear();
+        }
         self.phase = Phase::Down;
         // The next link carries every object again from its first fragment.
         let coordinator = Sender::Peer(*self.config.coordinator_server_id.as_bytes());
@@ -422,7 +426,6 @@ impl E2eeEdge {
         self.held = None;
         self.queued.clear();
         self.events_in.clear();
-        self.barrier_pending = None;
         // The coordinator drops a closed link's queued requests.
         self.closed_requests.clear();
         for origin in self.origins.values_mut() {
