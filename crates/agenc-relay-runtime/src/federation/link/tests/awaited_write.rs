@@ -299,3 +299,57 @@ async fn large_companion_transfers_keep_fifo_and_budget_through_the_socket() -> 
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn the_final_link_write_keeps_the_only_remaining_source_receipt() -> TestResult {
+    use crate::e2ee::outbound::Transfer;
+    use agenc_relay_e2ee::federation::frames::Correlation;
+    let source = std::sync::Arc::new(MemoryBudget::new(1 << 20));
+    let port = crate::budget::BackingReservationPort::new(std::sync::Arc::clone(&source));
+    let receipt = port.reserve(512)?;
+    let transfer = Transfer::request(
+        "edge.example".to_owned(),
+        Correlation {
+            peer_server_id: [2; 16],
+            server_incarnation: [3; 16],
+            origin_id: [1; 16],
+            origin_generation: 0,
+            operation_sequence: 0,
+            request_id: [6; 16],
+        },
+        vec![37; 128],
+        None::<Vec<u8>>,
+        Some(std::sync::Arc::new(receipt)),
+    )
+    .map_err(|e| e.to_string())?;
+    let window = transfer.window();
+    let writer_budget = MemoryBudget::new(1 << 20);
+    let charge = transfer.render_backing();
+    let writer_receipt = writer_budget
+        .try_acquire_batch(BoundedMemoryCharges::new(&[MemoryCharge::fixed(charge)])?)?
+        .split_exact(charge)
+        .ok_or("missing writer receipt")?;
+    let (handle, mut queue) = link_queue(window);
+    handle
+        .try_send_transfer(&transfer, writer_receipt)
+        .map_err(|_| "enqueue")?;
+    drop(transfer);
+    let item = queue.next_output().await.ok_or("missing final line")?;
+    let (stream, stalled) = tokio::io::duplex(1);
+    let mut link = writer(stream);
+    let mut write = Box::pin(link.on_outbound(item, &queue));
+    std::future::poll_fn(|cx| {
+        assert!(matches!(write.as_mut().poll(cx), Poll::Pending));
+        Poll::Ready(())
+    })
+    .await;
+    assert!(source.charged() >= 512);
+    assert_eq!(writer_budget.charged(), charge);
+    assert_eq!(handle.queued_bytes(), window);
+    drop(stalled);
+    assert_eq!(write.await, Err(LinkCloseReason::Transport));
+    assert_eq!(source.charged(), 0);
+    assert_eq!(writer_budget.charged(), 0);
+    assert_eq!(handle.queued_bytes(), 0);
+    Ok(())
+}

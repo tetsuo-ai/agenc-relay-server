@@ -24,8 +24,10 @@ pub(crate) enum Carrier {
     Response(u16),
 }
 
+pub(crate) type ObjectBytes = Arc<dyn AsRef<[u8]> + Send + Sync>;
+
 pub(crate) struct Segments {
-    bytes: Arc<dyn AsRef<[u8]> + Send + Sync>,
+    pub(crate) bytes: ObjectBytes,
     id: ObjectId,
     total: u32,
     pub(crate) count: u32,

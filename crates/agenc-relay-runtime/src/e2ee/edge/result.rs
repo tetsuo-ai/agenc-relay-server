@@ -464,7 +464,7 @@ impl E2eeEdge {
         })?;
         let mut lines = Vec::new();
         while let Some(line) = batch.next_line()? {
-            lines.push(line);
+            lines.push(line.into_text());
         }
         Ok(lines)
     }
