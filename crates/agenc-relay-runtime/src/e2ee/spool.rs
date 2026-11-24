@@ -1,5 +1,8 @@
 //! Authenticated temporary storage for large companion controls.
 
+#[cfg(test)]
+mod tests;
+
 use std::fmt;
 use std::fs::File;
 use std::os::unix::fs::FileExt as _;

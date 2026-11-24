@@ -4453,7 +4453,21 @@ mod real_clients {
         let label = target.label();
         receiver.send(&format!("@label={label} EKEY FETCH MAILBOX WELCOME *"))?;
         let limit = TRANSCRIPT_LINES + object.len().div_ceil(e2ee::limits::MAX_FRAGMENT_RAW);
-        let page = labeled_reply_within(receiver, &label, limit)?;
+        let page = if limit > 2 * TRANSCRIPT_LINES {
+            // A whole authenticated mailbox object crosses federation before
+            // the first client batch line. The normal overall deadline still applies.
+            let previous = receiver.reader.get_ref().sock.read_timeout()?;
+            receiver
+                .reader
+                .get_ref()
+                .sock
+                .set_read_timeout(Some(REPLY_DEADLINE))?;
+            let response = labeled_reply_within(receiver, &label, limit);
+            receiver.reader.get_ref().sock.set_read_timeout(previous)?;
+            response?
+        } else {
+            labeled_reply_within(receiver, &label, limit)?
+        };
         assert_contains(&page, " EKEY MAILBOX ")?;
         let token = hash_at(&page, "MAILBOX", 3)?;
         let fetched = fragments_object(&page)?;

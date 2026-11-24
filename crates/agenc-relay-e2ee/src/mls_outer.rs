@@ -293,21 +293,21 @@ fn parse_welcome(reader: &mut MlsReader<'_>) -> Result<WelcomeHeader, E2eeError>
     if !suite_is_enabled(cipher_suite) {
         return Err(E2eeError::ProfileMismatch);
     }
-    let secrets = reader.opaque_v()?;
+    let secrets = reader.borrowed_opaque_v()?;
     let mut inner = MlsReader::new(secrets, reader.budget);
     let mut new_member_refs = Vec::new();
     while inner.remaining() > 0 {
         inner.budget.claim_item()?;
         let reference = inner.opaque_v()?.to_vec();
         // HPKECiphertext { kem_output<V>, ciphertext<V> } stays opaque.
-        let _kem_output = inner.opaque_v()?;
-        let _ciphertext = inner.opaque_v()?;
+        let _kem_output = inner.borrowed_opaque_v()?;
+        let _ciphertext = inner.borrowed_opaque_v()?;
         new_member_refs
             .try_reserve(1)
             .map_err(|_| E2eeError::BudgetExceeded)?;
         new_member_refs.push(reference);
     }
-    let encrypted_group_info_len = reader.opaque_v()?.len();
+    let encrypted_group_info_len = reader.borrowed_opaque_v()?.len();
     Ok(WelcomeHeader {
         cipher_suite,
         new_member_refs,
@@ -576,9 +576,16 @@ impl<'a> MlsReader<'a> {
 
     /// Reads one `opaque<V>` field.
     pub fn opaque_v(&mut self) -> Result<&'a [u8], E2eeError> {
+        let bytes = self.borrowed_opaque_v()?;
+        self.budget.claim_copy(bytes.len())?;
+        Ok(bytes)
+    }
+
+    /// Counts one field and checks its full encoded span without reserving a
+    /// second allocation. Only callers that leave its contents borrowed use it.
+    fn borrowed_opaque_v(&mut self) -> Result<&'a [u8], E2eeError> {
         let length = self.varint()?;
         self.budget.claim_item()?;
-        self.budget.claim_copy(length)?;
         self.take(length)
     }
 }
