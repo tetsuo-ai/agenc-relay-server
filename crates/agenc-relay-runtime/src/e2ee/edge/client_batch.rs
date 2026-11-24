@@ -250,4 +250,90 @@ mod tests {
         assert_eq!(working.charged(), 0);
         Ok(())
     }
+    /// With a real large object held between commands, both forms of the
+    /// 65th group close only this sink and release all of its source receipts.
+    #[tokio::test]
+    async fn a_full_privacy_floor_never_publishes_a_later_group_before_a_large_reply() -> TestResult
+    {
+        use crate::connection::QueuePop;
+        use crate::state_core::inbox::{CloseReason, SourceAddressKey};
+        use crate::state_core::secret_floor::MAX_QUEUED_GROUPS;
+        for overflow_is_bulk in [false, true] {
+            let mut fixture = crate::test_support::StateCoreFixture::new(vec![0; 4096])?;
+            let context = fixture.context_mut()?;
+            let generation = ConnectionGeneration::new(73);
+            let queue = WriterQueue::new(generation, QueueLimits::DEFAULT)?;
+            context.set_monotonic_for_test(100);
+            let now = context.now();
+            context.sessions_mut().open(
+                generation,
+                crate::purpose::ListenerPurpose::ClientTls,
+                SourceAddressKey::onion_listener(),
+                Arc::clone(&queue) as Arc<dyn ClientSink>,
+                now,
+            )?;
+            let source = Arc::new(MemoryBudget::new(16 << 20));
+            let port = BackingReservationPort::new(Arc::clone(&source));
+            let bulk = |bytes: usize| -> TestResult<super::super::ClientOutput> {
+                let mut batch = ClientBatch::new(
+                    "edge.example".to_owned(),
+                    "x".to_owned(),
+                    [3; 16],
+                    port.reserve(64 << 10)?,
+                );
+                batch
+                    .object(
+                        ArcWireObjectKind::WelcomeMls,
+                        ChargedObject {
+                            bytes: vec![17; bytes],
+                            _backing: port.reserve(bytes)?,
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(super::super::ClientOutput {
+                    generation,
+                    batch: Some(Box::new(batch)),
+                    frames: Vec::new(),
+                })
+            };
+            let notice = || WireMessage::new("edge.example", "NOTICE", &["nick"], Some("later"));
+            context.begin_secret_floor(generation);
+            assert!(
+                context
+                    .hold_secret_floor(generation, vec![notice()?])
+                    .is_ok()
+            );
+            context.send_companion_output(bulk(3 << 20)?);
+            for _ in 2..MAX_QUEUED_GROUPS {
+                let retained = context.send_to(generation, vec![notice()?])?;
+                assert_eq!(retained.committed_sinks, 0);
+                assert_eq!(retained.slow_consumers_closed, 0);
+            }
+            assert!(!queue.is_closed());
+            assert!(matches!(queue.pop(), QueuePop::Empty));
+            assert!(source.charged() >= 3 << 20);
+            if overflow_is_bulk {
+                context.send_companion_output(bulk(5000)?);
+            } else {
+                let overflow = context.send_to(generation, vec![notice()?])?;
+                assert_eq!(overflow.committed_sinks, 0);
+                assert_eq!(overflow.slow_consumers_closed, 1);
+                assert_eq!(
+                    overflow.slow_consumer_generations().collect::<Vec<_>>(),
+                    vec![generation]
+                );
+            }
+            assert!(queue.is_closed());
+            assert!(matches!(
+                queue.pop(),
+                QueuePop::Closed(CloseReason::SlowConsumer)
+            ));
+            assert_eq!(source.charged(), 0);
+            assert!(context.sessions().sink_for_generation(generation).is_none());
+            assert!(!context.secret_floor_pending(generation));
+            context.set_monotonic_for_test(200);
+            assert!(!context.release_secret_floor(generation));
+        }
+        Ok(())
+    }
 }

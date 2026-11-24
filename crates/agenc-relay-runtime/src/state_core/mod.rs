@@ -861,7 +861,7 @@ impl StateCoreContext {
         // A connection owing a floored response sees everything the server
         // told it afterwards in that order, not before it.
         let frames = match self.queue_behind_secret_floor(generation, frames) {
-            Ok(()) => return Ok(FanoutCommitReport::retained()),
+            Ok(report) => return Ok(report),
             Err(frames) => frames,
         };
         let request = self.fanout_request_to(generation, frames)?;
