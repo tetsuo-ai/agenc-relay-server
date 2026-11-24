@@ -126,8 +126,14 @@ async fn failed_barrier_preparation_restores_prior_parts_and_keeps_violation_evi
     companion.barrier_parts.insert(
         MUTATION,
         BTreeMap::from([
-            (1, (part(ArcFederationEventKind::ClosedEvent, 5)?, None)),
-            (2, (part(ArcFederationEventKind::ClosedEvent, 7)?, None)),
+            (
+                1,
+                (part(ArcFederationEventKind::ClosedEvent, 5)?.into(), None),
+            ),
+            (
+                2,
+                (part(ArcFederationEventKind::ClosedEvent, 7)?.into(), None),
+            ),
         ]),
     );
     assert!(

@@ -169,3 +169,56 @@ fn the_filesystem_reserve_refuses_before_writing_and_releases_every_charge() -> 
     fixture.returned();
     Ok(())
 }
+
+#[test]
+fn a_completed_control_keeps_each_nested_allowance_until_dispatch_releases_it() -> TestResult {
+    use agenc_relay_e2ee::wire::assembly::QuotaLimits;
+    let total = MAX_LIVE_REASSEMBLY_BYTES_PER_CONNECTION + 1;
+    let bytes = welcome_envelope(total)?;
+    let fragments = fragment_object(&bytes)?;
+    let mut other = bytes;
+    *other.last_mut().ok_or("empty Welcome")? = 0x70;
+    let other_fragments = fragment_object(&other)?;
+    let next = other_fragments.first().ok_or("missing first fragment")?;
+    let ceiling = (8, total);
+    let defaults = QuotaLimits::default();
+    for limits in [
+        QuotaLimits {
+            account: ceiling,
+            ..defaults
+        },
+        QuotaLimits {
+            route: ceiling,
+            ..defaults
+        },
+        QuotaLimits {
+            peer: ceiling,
+            ..defaults
+        },
+        QuotaLimits {
+            global: ceiling,
+            ..defaults
+        },
+    ] {
+        let mut fixture = Fixture::new()?;
+        fixture.assembler = E2eeAssembler::new(limits);
+        let mut complete = None;
+        for fragment in &fragments {
+            if let Ingest::Complete(object) = fixture.ingest(fragment, true)? {
+                complete = Some(object);
+            }
+        }
+        let owner = complete.ok_or("missing completed Welcome")?;
+        assert_eq!(fixture.assembler.open_count(), 0);
+        assert_eq!(fixture.assembler.quotas().reserved_bytes(), total);
+        assert!(matches!(
+            fixture.ingest(next, true),
+            Err(AssemblyError::ReassemblyLimit)
+        ));
+        drop(owner);
+        assert!(matches!(fixture.ingest(next, true)?, Ingest::Incomplete));
+        assert_eq!(fixture.assembler.expire(u64::MAX).len(), 1);
+        fixture.returned();
+    }
+    Ok(())
+}

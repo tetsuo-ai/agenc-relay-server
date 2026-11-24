@@ -143,11 +143,30 @@ fn an_event_assembles_whatever_the_client_cache_holds() -> TestResult {
 fn a_lost_link_releases_the_coordinators_partial_objects() -> TestResult {
     let mut fixture = StateCoreFixture::new(vec![0; 4_096])?;
     let mut edge = edge();
+    use std::sync::Arc;
+    let directory = crate::test_support::TestDirectory::create()?;
+    let qualification = crate::test_support::signed_test_qualification(
+        agenc_relay_storage::StateDirectory::probe(&directory.0)?,
+    )?;
+    let state = agenc_relay_storage::StateDirectory::open(&directory.0, &[qualification])?;
+    edge.spool = Some(crate::e2ee::spool::SpoolResources {
+        directory: Arc::new(state.companion_spool_directory(0, 0)?),
+        disk: agenc_relay_storage::CompanionDisk::new(1024 * 1024)?,
+        memory: fixture.context_mut()?.backing_reservations(),
+    });
+    let capacity = 128 * 1024;
+    let link = Arc::new(tokio::sync::Semaphore::new(capacity));
+    edge.ingress_link = Some(Arc::clone(&link));
     let payload =
         ArcWireObject::new(ArcWireObjectKind::ApplicationMls, vec![12; 8_000])?.encode()?;
     let payload_id = *agenc_relay_e2ee::ObjectId::compute(&payload).as_bytes();
     let event = event_bytes(&notice(Some(payload_id))?)?;
     assert!(!deliver(&mut edge, &mut fixture, &event, false)?);
+    let after_event = link.available_permits();
+    assert!(
+        after_event < capacity,
+        "the parsed event still owns its link backing"
+    );
     let fragments = agenc_relay_e2ee::wire::fragment::fragment_object(&payload)?;
     let first = fragments.first().ok_or("fragment")?.clone();
     edge.on_event_frame(
@@ -160,12 +179,19 @@ fn a_lost_link_releases_the_coordinators_partial_objects() -> TestResult {
     )
     .map_err(|refusal| refusal.code.to_string())?;
     assert_eq!(edge.assembler.open_count(), 1);
+    assert!(link.available_permits() < after_event);
     edge.link_down();
     assert_eq!(
         edge.assembler.open_count(),
         0,
         "the partial payload is released"
     );
+    assert_eq!(
+        link.available_permits(),
+        capacity,
+        "link loss drops payload and descriptor"
+    );
+    edge.ingress_link = Some(Arc::clone(&link));
     // Well past the idle deadline, the next link carries the event and its
     // payload again from their first fragments.
     fixture.context_mut()?.set_monotonic_for_test(120_000);

@@ -229,7 +229,13 @@ type AppliedPosition = (u64, u64, [u8; 16]);
 
 /// The companion parts of one open barrier by part index, each with its
 /// payload when the event named one.
-type BarrierParts = BTreeMap<u16, (events::OpenEvent, Option<super::spool::CompanionBytes>)>;
+type BarrierParts = BTreeMap<
+    u16,
+    (
+        std::sync::Arc<events::OpenEvent>,
+        Option<super::spool::CompanionBytes>,
+    ),
+>;
 
 /// The edge E2EE router.
 pub struct E2eeEdge {

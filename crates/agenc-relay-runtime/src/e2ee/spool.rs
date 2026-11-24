@@ -28,6 +28,24 @@ use crate::budget::BackingReservationPort;
 #[derive(Clone)]
 pub struct CompanionBytes(Arc<dyn AsRef<[u8]> + Send + Sync>);
 
+impl CompanionBytes {
+    fn retained(bytes: Vec<u8>, permit: Box<dyn BackingPermit>) -> Self {
+        struct Retained {
+            bytes: Vec<u8>,
+            _permit: Box<dyn BackingPermit>,
+        }
+        impl AsRef<[u8]> for Retained {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+        Self(Arc::new(Retained {
+            bytes,
+            _permit: permit,
+        }))
+    }
+}
+
 impl From<ReservedObject> for CompanionBytes {
     fn from(value: ReservedObject) -> Self {
         Self(Arc::new(value))
@@ -174,29 +192,30 @@ pub(crate) fn ingest_control(
 }
 
 impl SpoolResources {
+    pub(crate) fn reserve_retained(
+        &self,
+        bytes: usize,
+        link: Option<Arc<Semaphore>>,
+    ) -> Result<Box<dyn BackingPermit>, AssemblyError> {
+        IngressMemory {
+            process: self.memory.clone(),
+            link,
+        }
+        .reserve(bytes)
+    }
+
     pub(crate) fn copy_for_dispatch(
         &self,
         bytes: &[u8],
         link: Option<Arc<Semaphore>>,
     ) -> Result<CompanionBytes, AssemblyError> {
-        struct Copy {
-            bytes: Vec<u8>,
-            _permit: Box<dyn BackingPermit>,
-        }
-        impl AsRef<[u8]> for Copy {
-            fn as_ref(&self) -> &[u8] {
-                &self.bytes
-            }
-        }
-        let memory = IngressMemory {
-            process: self.memory.clone(),
-            link,
-        };
-        let permit = memory.reserve(bytes.len())?;
-        Ok(CompanionBytes(Arc::new(Copy {
-            bytes: bytes.to_owned(),
-            _permit: permit,
-        })))
+        let permit = self.reserve_retained(bytes.len(), link)?;
+        Ok(CompanionBytes::retained(bytes.to_owned(), permit))
+    }
+
+    pub(crate) fn retain_restored(&self, bytes: Vec<u8>) -> Result<CompanionBytes, AssemblyError> {
+        let permit = self.reserve_retained(bytes.capacity(), None)?;
+        Ok(CompanionBytes::retained(bytes, permit))
     }
 
     pub(crate) fn ingest(

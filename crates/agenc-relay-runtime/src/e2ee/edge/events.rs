@@ -154,8 +154,8 @@ pub(super) struct HeldBatch {
 }
 
 /// An event whose payload has not arrived.
-#[derive(Clone)]
 pub(crate) struct OpenEvent {
+    pub(super) _backing: Option<Box<dyn agenc_relay_e2ee::wire::assembly::BackingPermit>>,
     pub(crate) position: DeliveryPosition,
     pub(crate) event: ArcFederationEvent,
     pub(crate) payload_object_id: Option<[u8; 32]>,
@@ -178,6 +178,52 @@ fn event_object_id(event: &ArcFederationEvent) -> Result<[u8; 32], Refusal> {
 }
 
 impl E2eeEdge {
+    pub(super) fn decode_open_event(
+        &self,
+        bytes: &[u8],
+        position: DeliveryPosition,
+        link: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    ) -> Result<OpenEvent, Refusal> {
+        let object = agenc_relay_e2ee::object::ArcWireObjectRef::parse(bytes)
+            .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+        if object.kind() != ArcWireObjectKind::FederationEvent {
+            return Err(E2eeReplyCode::InvalidFragment.into());
+        }
+        // Each variable field is copied by the typed decoder. Include the
+        // record, shared owner and map entry before letting an event wait.
+        let charge = bytes
+            .len()
+            .checked_add(std::mem::size_of::<OpenEvent>() + 128)
+            .ok_or(E2eeReplyCode::RateLimited)?;
+        let backing = self
+            .spool
+            .as_ref()
+            .map(|s| s.reserve_retained(charge, link))
+            .transpose()
+            .map_err(|error| error.reply_code())?;
+        let mut budget = DecodeBudget::new(1 << 16, 4_096);
+        let event = ArcFederationEvent::decode_exact(object.body(), &mut budget)
+            .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+        if event.network_id != self.config.network_id
+            || event.target_server_id != *self.config.server_id.as_bytes()
+            || event.delivery_generation != position.delivery_generation
+            || event.delivery_sequence != position.delivery_sequence
+            || event.event_id != position.event_id
+        {
+            return Err(E2eeReplyCode::InvalidFragment.into());
+        }
+        let payload_object_id = event
+            .payload_object_id
+            .empty_or_fixed::<32>()
+            .map_err(|_| E2eeReplyCode::InvalidFragment)?;
+        Ok(OpenEvent {
+            _backing: backing,
+            position,
+            event,
+            payload_object_id,
+        })
+    }
+
     /// `EEVENT` fragments: the event object assembles; its payload follows
     /// on `EDATA` when the event names one.
     pub(super) fn on_event_frame(
@@ -223,22 +269,14 @@ impl E2eeEdge {
             }
             return self.admit_event(context, edge, open, Some(bytes));
         }
-        let mut budget = DecodeBudget::new(1 << 16, 4_096);
-        let object = ArcWireObject::decode_kind(
-            &bytes,
-            Some(ArcWireObjectKind::FederationEvent),
-            &mut budget,
-        )
-        .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-        let event = ArcFederationEvent::decode_exact(object.body(), &mut budget)
-            .map_err(|_| E2eeReplyCode::InvalidFragment)?;
-        let payload_object_id = optional::<32>(event.payload_object_id.as_slice());
-        let open = OpenEvent {
-            position,
-            event,
-            payload_object_id,
-        };
-        if payload_object_id.is_some() {
+        let open = self.decode_open_event(&bytes, position, self.ingress_link.clone())?;
+        if open.payload_object_id.is_some() {
+            if let Some(prior) = self.events_in.get(&position.event_id) {
+                if prior.position != position || prior.event != open.event {
+                    return Err(E2eeReplyCode::InvalidFragment.into());
+                }
+                return Ok(Vec::new());
+            }
             self.events_in.insert(position.event_id, open);
             return Ok(Vec::new());
         }
@@ -299,14 +337,6 @@ impl E2eeEdge {
         payload: Option<crate::e2ee::spool::CompanionBytes>,
     ) -> Result<Vec<ClientOutput>, Refusal> {
         let event = &open.event;
-        let header_ok = event.network_id == self.config.network_id
-            && event.target_server_id == *self.config.server_id.as_bytes()
-            && event.delivery_generation == open.position.delivery_generation
-            && event.delivery_sequence == open.position.delivery_sequence
-            && event.event_id == open.position.event_id;
-        if !header_ok {
-            return Err(E2eeReplyCode::InvalidFragment.into());
-        }
         if let Some(mutation_id) = optional::<16>(event.cross_profile_mutation_id.as_slice()) {
             return self.barrier_part(context, edge, open, payload, mutation_id);
         }
@@ -494,7 +524,7 @@ impl E2eeEdge {
         self.barrier_parts
             .entry(mutation_id)
             .or_default()
-            .insert(part_index, (open, payload));
+            .insert(part_index, (open.into(), payload));
         Ok(Vec::new())
     }
 

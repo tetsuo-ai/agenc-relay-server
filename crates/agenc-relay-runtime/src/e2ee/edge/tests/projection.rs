@@ -190,6 +190,7 @@ fn part(kind: ArcFederationEventKind, route_sequence: u64) -> TestResult<OpenEve
         event_id: [11; 16],
     };
     Ok(OpenEvent {
+        _backing: None,
         position,
         event: ArcFederationEvent {
             profile_version: 1,
@@ -223,7 +224,7 @@ fn part(kind: ArcFederationEventKind, route_sequence: u64) -> TestResult<OpenEve
 
 fn stage_part(edge: &mut E2eeEdge, part: OpenEvent) {
     edge.barrier_parts
-        .insert(MUTATION, BTreeMap::from([(1, (part, None))]));
+        .insert(MUTATION, BTreeMap::from([(1, (part.into(), None))]));
 }
 
 #[tokio::test]

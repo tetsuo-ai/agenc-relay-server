@@ -316,6 +316,7 @@ fn event(case: &Case, request: Option<[u8; 16]>, ack: Option<&[u8]>) -> TestResu
     };
     let payload_object_id = ack.map(|bytes| *ObjectId::compute(bytes).as_bytes());
     Ok(OpenEvent {
+        _backing: None,
         position,
         event,
         payload_object_id,
@@ -576,7 +577,7 @@ async fn a_barrier_completion_reaches_its_requesting_connection_only_as_its_labe
             }
             edge.barrier_parts.insert(
                 MUTATION,
-                BTreeMap::from([(1, (open, ack.clone().map(Into::into)))]),
+                BTreeMap::from([(1, (open.into(), ack.clone().map(Into::into)))]),
             );
             let (_, mut outputs) = edge
                 .prepare_barrier(fixture.context_mut()?, &base_edge(), MUTATION)
