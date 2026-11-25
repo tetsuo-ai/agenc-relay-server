@@ -1,7 +1,7 @@
 //! Validate guarded account ownership and its actual signed directory before startup.
 #![forbid(unsafe_code)]
 
-use agenc_relay_domain::{DurableAccount, InitialRootState};
+use agenc_relay_domain::AccountGenesisPolicy;
 use agenc_relay_e2ee::identity::{VerifiedRoot, verify_root_identity};
 use agenc_relay_e2ee::ids::account_id_digest;
 use agenc_relay_e2ee::limits::MAX_IDENTITY_OBJECT;
@@ -9,6 +9,7 @@ use agenc_relay_e2ee::object::{ArcWireObjectKind, ArcWireObjectRef};
 use agenc_relay_e2ee::objects::identity::ArcRootIdentity;
 use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode};
 use agenc_relay_storage::e2ee_records::initial_root::FORMAT_KEY;
+use agenc_relay_storage::e2ee_records::initial_root::RootClaimState;
 use agenc_relay_storage::e2ee_records::{DirectoryRow, MAX_ROOT_CHAIN_LENGTH, ObjectRow};
 use agenc_relay_storage::{
     PersistentRecordValue, ReadPlan, SealedRecord, StorageError, StoragePort, StoredKey, TableId,
@@ -31,16 +32,20 @@ impl Scan {
     ) -> Result<(), RuntimeError> {
         let format = StoredKey::new(FORMAT_KEY.to_vec())?;
         let marked = self.index.holds(TableId::E2eeState, &format);
-        for account in self.accounts.values().filter(|a| a.initial_root.is_some()) {
-            if !marked
-                || !self
-                    .index
-                    .initial_root_owners
-                    .contains_key(&account.account_id)
-            {
+        for account in self
+            .accounts
+            .values()
+            .filter(|account| account.genesis_policy == AccountGenesisPolicy::Guarded)
+        {
+            let claim = self
+                .index
+                .initial_root_owners
+                .get(&account.account_id)
+                .ok_or_else(stale)?;
+            if !marked {
                 return Err(stale());
             }
-            self.check_initial_directory(keys, port, account)?;
+            self.check_initial_directory(keys, port, account.account_id, claim.state)?;
         }
         Ok(())
     }
@@ -49,17 +54,18 @@ impl Scan {
         &self,
         keys: &KeyDeriver,
         port: &StoragePort,
-        account: &DurableAccount,
+        account: AccountId,
+        claim: RootClaimState,
     ) -> Result<(), RuntimeError> {
         let network = keys.binding().network_id();
-        let id = account.account_id.to_text();
+        let id = account.to_text();
         let id = id.as_bytes().try_into().map_err(|_| stale())?;
         let digest = account_id_digest(network.as_bytes(), id).map_err(|_| stale())?;
         let key = DirectoryRow::identity_key(&digest)?;
-        let Some(InitialRootState::Published {
+        let RootClaimState::Published {
             fingerprint,
             object_id,
-        }) = account.initial_root.as_deref()
+        } = claim
         else {
             return if self.index.holds(TableId::E2eeState, &key) {
                 Err(stale())
@@ -83,14 +89,13 @@ impl Scan {
         else {
             return Err(stale());
         };
-        if chain_object_ids.first() != Some(object_id) || chain_object_ids.last() != Some(&head) {
+        if chain_object_ids.first() != Some(&object_id) || chain_object_ids.last() != Some(&head) {
             return Err(stale());
         }
         let mut previous = None;
         for id in chain_object_ids {
-            let verified =
-                self.read_signed_root(keys, port, account.account_id, id, previous.as_ref())?;
-            if previous.is_none() && verified.fingerprint != *fingerprint {
+            let verified = self.read_signed_root(keys, port, account, id, previous.as_ref())?;
+            if previous.is_none() && verified.fingerprint != fingerprint {
                 return Err(stale());
             }
             previous = Some(verified);

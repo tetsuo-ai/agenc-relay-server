@@ -14,8 +14,24 @@ pub const PREFIX: &[u8] = b"initial-root-owner/v1/";
 /// A singleton retained after deletion of the last guarded account.
 pub const FORMAT_KEY: &[u8] = b"initial-root-format/v1";
 const VERSION: u16 = 1;
-const OWNER_BYTES: usize = 2 + 1 + 32 + 16 + 16 + 16 + 32;
+const OWNER_BYTES: usize = 2 + 1 + 32 + 16 + 16 + 16 + 32 + 1 + 32 + 32;
 const WRAPPER_BYTES: usize = 12;
+
+/// The private, monotone choice and original publication receipt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum RootClaimState {
+    /// Authenticated creation reserved the only first-root choice.
+    Reserved,
+    /// The claimant chose this specific root fingerprint.
+    Chosen([u8; 32]),
+    /// The original first root was published with this exact object ID.
+    Published {
+        /// Verified root fingerprint.
+        fingerprint: [u8; 32],
+        /// Original signed object ID.
+        object_id: [u8; 32],
+    },
+}
 
 /// Exact private authority from the accepted original guarded account creation.
 /// Only the account-bound verifier enters this record.
@@ -30,6 +46,8 @@ pub struct RootClaimOwner {
     pub start: RequestId,
     /// Account-bound private verifier, released only to account-service code.
     pub owner: InitialRootClaimOwner,
+    /// State serialized in the private row only.
+    pub state: RootClaimState,
 }
 
 impl PartialEq for RootClaimOwner {
@@ -39,6 +57,7 @@ impl PartialEq for RootClaimOwner {
             && self.epoch == other.epoch
             && self.start == other.start
             && self.owner.matches(&other.owner)
+            && self.state == other.state
     }
 }
 
@@ -58,6 +77,28 @@ impl RootClaimOwner {
         super::key_of(&[PREFIX, network.as_bytes(), account.random().as_bytes()])
     }
 
+    /// Constructs the only legal next state with the same immutable creation authority.
+    pub fn transition(&self, next: RootClaimState) -> Result<Self, StorageError> {
+        let allowed = match (self.state, next) {
+            (RootClaimState::Reserved, RootClaimState::Chosen(_)) => true,
+            (RootClaimState::Chosen(old), RootClaimState::Published { fingerprint, .. }) => {
+                old == fingerprint
+            }
+            _ => false,
+        };
+        if !allowed {
+            return Err(StorageError::StaleState);
+        }
+        Ok(Self {
+            network: self.network,
+            account: self.account,
+            epoch: self.epoch,
+            start: self.start,
+            owner: InitialRootClaimOwner::from_protected_bytes(*self.owner.expose_for_storage()),
+            state: next,
+        })
+    }
+
     /// Encodes the original fixed fields without a public projection.
     pub fn encode(&self) -> Result<Vec<u8>, StorageError> {
         let mut out = Encoder::with_capacity(OWNER_BYTES, OWNER_BYTES)?;
@@ -68,6 +109,18 @@ impl RootClaimOwner {
         out.put_fixed(self.epoch.as_bytes())?;
         out.put_fixed(self.start.as_bytes())?;
         out.put_fixed(self.owner.expose_for_storage())?;
+        let empty = [0; 32];
+        let (tag, fingerprint, object) = match &self.state {
+            RootClaimState::Reserved => (0, &empty, &empty),
+            RootClaimState::Chosen(fingerprint) => (1, fingerprint, &empty),
+            RootClaimState::Published {
+                fingerprint,
+                object_id,
+            } => (2, fingerprint, object_id),
+        };
+        out.put_fixed(&[tag])?;
+        out.put_fixed(fingerprint)?;
+        out.put_fixed(object)?;
         super::wrap(KIND, out.finish())
     }
 }
@@ -96,6 +149,7 @@ impl InitialRootRow {
                 epoch: RecoveryEpoch::from_bytes(input.array()?),
                 start: RequestId::from_bytes(input.array()?),
                 owner: InitialRootClaimOwner::from_protected_bytes(input.array()?),
+                state: decode_state(&mut input)?,
             }),
             _ => return Err(StorageError::InvalidEncoding),
         };
@@ -116,3 +170,27 @@ impl InitialRootRow {
         Ok(row)
     }
 }
+
+fn decode_state(input: &mut Decoder<'_>) -> Result<RootClaimState, StorageError> {
+    let tag = input.array()?;
+    let fingerprint = input.array()?;
+    let object_id = input.array()?;
+    match tag {
+        [0] if fingerprint == [0; 32] && object_id == [0; 32] => Ok(RootClaimState::Reserved),
+        [1] if object_id == [0; 32] => Ok(RootClaimState::Chosen(fingerprint)),
+        [2] => Ok(RootClaimState::Published {
+            fingerprint,
+            object_id,
+        }),
+        _ => Err(StorageError::InvalidEncoding),
+    }
+}
+
+/// Private key space, including malformed suffixes that must never be accepted under another kind.
+#[must_use]
+pub fn is_reserved_key(key: &StoredKey) -> bool {
+    key.as_bytes().starts_with(PREFIX) || key.as_bytes().starts_with(FORMAT_KEY)
+}
+
+#[cfg(test)]
+mod tests;

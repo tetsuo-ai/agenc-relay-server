@@ -4419,6 +4419,11 @@ impl AccountServiceCoordinator {
                     self.config.default_guest_direct_messages,
                     self.config.default_direct_messages,
                 );
+                let account = if intent.initial_root_claim().is_some() {
+                    account.with_initial_root_claim()
+                } else {
+                    account
+                };
                 context
                     .domain()
                     .plan_account_created(account)
@@ -4455,6 +4460,14 @@ impl AccountServiceCoordinator {
         match (sealed.result(), reservation.as_ref()) {
             (Ok(intent), Some(reservation)) => {
                 self.push_creation_success_writes(revision, intent, reservation, &mut writes)?;
+                if let Some(claim) = intent.initial_root_claim() {
+                    context.stage_initial_root_creation(
+                        claim,
+                        self.config.recovery_epoch,
+                        revision,
+                        &mut writes,
+                    )?;
+                }
             }
             (Err(_), Some(reservation)) => {
                 writes.push(AccountServiceDurableWrite::delete(

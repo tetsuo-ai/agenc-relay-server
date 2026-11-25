@@ -1177,6 +1177,12 @@ impl Projection<'_> {
                 }
                 self.put_plaintext(*table, key.clone(), plaintext.as_slice().to_vec())
             }
+            AccountServiceDurableWrite::Delete {
+                table: TableId::E2eeState,
+                key,
+            } if agenc_relay_storage::e2ee_records::initial_root::is_reserved_key(key) => {
+                Err(RuntimeError::Storage(StorageError::StaleState))
+            }
             AccountServiceDurableWrite::Delete { table, key } => self.delete(*table, key.clone()),
         }
     }
@@ -1190,16 +1196,21 @@ impl Projection<'_> {
         if !key.as_bytes().starts_with(PREFIX) && key.as_bytes() != FORMAT_KEY {
             return Ok(());
         }
-        if self.index.holds(TableId::E2eeState, key) {
-            return Err(RuntimeError::Storage(StorageError::StaleState));
-        }
         let value = PersistentRecordValue::decode(TableId::E2eeState, bytes)?;
-        if let InitialRootRow::Owner(owner) = InitialRootRow::decode_keyed(key, value.body())? {
-            if owner.network != self.keys.binding().network_id() {
-                return Err(RuntimeError::Storage(StorageError::StaleState));
+        match InitialRootRow::decode_keyed(key, value.body())? {
+            InitialRootRow::Format if !self.index.holds(TableId::E2eeState, key) => {}
+            InitialRootRow::Owner(owner) if owner.network == self.keys.binding().network_id() => {
+                match self.index.initial_root_owners.get(&owner.account) {
+                    Some(old) if old.transition(owner.state)? == owner => {}
+                    None if owner.state
+                        == agenc_relay_storage::e2ee_records::initial_root::RootClaimState::Reserved
+                        && !self.index.holds(TableId::E2eeState, key) => {}
+                    _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
+                }
+                self.updates
+                    .push(IndexUpdate::InitialRootOwner(std::sync::Arc::new(owner)));
             }
-            self.updates
-                .push(IndexUpdate::InitialRootOwner(std::sync::Arc::new(owner)));
+            _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
         }
         Ok(())
     }

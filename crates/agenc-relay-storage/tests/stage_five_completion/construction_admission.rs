@@ -154,7 +154,7 @@ fn account_record(index: u32) -> Result<(StoredKey, Vec<u8>), Box<dyn Error>> {
         session_generation: Generation::new(1)?,
         revision: Revision::new(1)?,
         admin_suspension_expires_at: None,
-        initial_root: None,
+        genesis_policy: agenc_relay_domain::AccountGenesisPolicy::Legacy,
     })?;
     let plaintext =
         PersistentRecordValue::new(TableId::Account, 1, 1, 1, None, Vec::new(), body)?.encode()?;

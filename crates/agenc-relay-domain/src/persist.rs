@@ -46,8 +46,8 @@ pub struct DurableAccount {
     pub revision: Revision,
     /// Optional bounded administrative suspension that survives audit retention.
     pub admin_suspension_expires_at: Option<UtcSecond>,
-    /// The independently authenticated class; absent on every legacy account.
-    pub initial_root: Option<std::sync::Arc<crate::InitialRootState>>,
+    /// The independently authenticated genesis class.
+    pub genesis_policy: crate::AccountGenesisPolicy,
 }
 
 impl DurableAccount {
@@ -63,7 +63,7 @@ impl DurableAccount {
             session_generation: account.session_generation,
             revision: account.revision,
             admin_suspension_expires_at: account.admin_suspension_expires_at,
-            initial_root: account.initial_root.clone(),
+            genesis_policy: account.genesis_policy,
         }
     }
 
@@ -82,7 +82,7 @@ impl DurableAccount {
             session_generation: self.session_generation,
             revision: self.revision,
             admin_suspension_expires_at: self.admin_suspension_expires_at,
-            initial_root: self.initial_root,
+            genesis_policy: self.genesis_policy,
         })
     }
 
@@ -98,7 +98,7 @@ impl DurableAccount {
             && self.reserved_nicknames == other.reserved_nicknames
             && self.session_generation == other.session_generation
             && self.admin_suspension_expires_at == other.admin_suspension_expires_at
-            && self.initial_root == other.initial_root
+            && self.genesis_policy == other.genesis_policy
     }
 }
 
@@ -986,7 +986,7 @@ mod tests {
             session_generation: Generation::new(1)?,
             revision: Revision::new(1)?,
             admin_suspension_expires_at: None,
-            initial_root: None,
+            genesis_policy: crate::AccountGenesisPolicy::Legacy,
         };
         let mut later = account.clone();
         later.revision = Revision::new(9)?;
@@ -1014,7 +1014,7 @@ mod tests {
             session_generation: Generation::new(1)?,
             revision: Revision::new(1)?,
             admin_suspension_expires_at: None,
-            initial_root: None,
+            genesis_policy: crate::AccountGenesisPolicy::Legacy,
         };
         assert_eq!(
             account.into_state().map(|_| ()),

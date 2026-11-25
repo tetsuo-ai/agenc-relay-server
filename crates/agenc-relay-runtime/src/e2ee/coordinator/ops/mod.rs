@@ -79,7 +79,7 @@ pub type PlanBinding<'a> = dyn Fn(
 pub(super) type PlanRoot<'a> = dyn Fn(
         &agenc_relay_e2ee::identity::VerifiedRoot,
         [u8; 32],
-    ) -> Result<Option<agenc_relay_domain::MutationPlan>, E2eeReplyCode>
+    ) -> Result<Option<crate::state_core::durable::AccountServiceDurableWrite>, E2eeReplyCode>
     + 'a;
 
 /// Current base directory facts used to authorize a channel binding change.

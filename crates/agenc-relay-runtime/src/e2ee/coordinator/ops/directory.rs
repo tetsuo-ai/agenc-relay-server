@@ -149,7 +149,7 @@ pub fn publish_identity(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let verified = verify_root_identity(&exec.coordinator.network_id, &root, predecessor)
         .map_err(|_| Fail::from(E2eeReplyCode::BindingAuthInvalid))?;
     let object_id = *agenc_relay_e2ee::ObjectId::compute(bytes).as_bytes();
-    let base_plan = (exec.plan_root)(&verified, object_id)?;
+    let initial_root = (exec.plan_root)(&verified, object_id)?;
     let mut directory = exec.coordinator.state.directory.clone();
     directory
         .publish_root(
@@ -165,7 +165,7 @@ pub fn publish_identity(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .map(|root| root.chain.clone())
         .unwrap_or_default();
     let mut outcome = Outcome::scalar(ResultBody::Stored(StoreKind::Identity, object_id));
-    outcome.base_plan = base_plan;
+    outcome.writes.extend(initial_root);
     outcome.security_mutation = true;
     outcome
         .writes

@@ -647,10 +647,9 @@ impl Scan {
         }
         if let InitialRootRow::Owner(owner) = InitialRootRow::decode_keyed(key, value.body())? {
             if owner.network != keys.binding().network_id()
-                || !self
-                    .accounts
-                    .get(&owner.account)
-                    .is_some_and(|a| a.initial_root.is_some())
+                || !self.accounts.get(&owner.account).is_some_and(|a| {
+                    a.genesis_policy == agenc_relay_domain::AccountGenesisPolicy::Guarded
+                })
                 || self
                     .index
                     .initial_root_owners
@@ -1608,7 +1607,7 @@ mod tests {
             session_generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
             revision: Revision::new(1).map_err(|_| RuntimeError::InvalidValue)?,
             admin_suspension_expires_at: None,
-            initial_root: None,
+            genesis_policy: agenc_relay_domain::AccountGenesisPolicy::Legacy,
         })
     }
 

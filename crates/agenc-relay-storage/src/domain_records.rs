@@ -63,10 +63,7 @@ pub const MAX_ACCOUNT_RECORD_BODY_BYTES: usize = 2
     + 8
     + 8
     + 1
-    + 8
-    + 1
-    + 32
-    + 32;
+    + 8;
 /// Exact ceiling of one encoded logical-session body at every domain limit.
 pub const MAX_SESSION_RECORD_BODY_BYTES: usize = 2
     + 3 * IDENTIFIER_BYTES
@@ -137,8 +134,6 @@ pub const MAX_SANCTION_RECORD_BODY_BYTES: usize = 2
     + 8
     + 8;
 
-mod initial_root;
-
 /// Codec for live `account` rows.
 pub struct AccountRecordBody;
 
@@ -153,10 +148,9 @@ impl AccountRecordBody {
             return Err(StorageError::LimitExceeded);
         }
         let mut encoder = Encoder::with_capacity(0, MAX_ACCOUNT_RECORD_BODY_BYTES)?;
-        encoder.put_u16(if account.initial_root.is_some() {
-            GUARDED_ACCOUNT_BODY_VERSION
-        } else {
-            ACCOUNT_BODY_VERSION
+        encoder.put_u16(match account.genesis_policy {
+            agenc_relay_domain::AccountGenesisPolicy::Legacy => ACCOUNT_BODY_VERSION,
+            agenc_relay_domain::AccountGenesisPolicy::Guarded => GUARDED_ACCOUNT_BODY_VERSION,
         })?;
         encoder.put_fixed(account.account_id.random().as_bytes())?;
         put_optional_text(
@@ -179,9 +173,6 @@ impl AccountRecordBody {
         encoder.put_u64(account.session_generation.get())?;
         encoder.put_u64(account.revision.get())?;
         put_optional_second(&mut encoder, account.admin_suspension_expires_at)?;
-        if let Some(state) = account.initial_root.as_deref() {
-            initial_root::encode(&mut encoder, state)?;
-        }
         Ok(encoder.finish())
     }
 
@@ -192,9 +183,11 @@ impl AccountRecordBody {
         }
         let mut decoder = Decoder::new(encoded);
         let version = decoder.u16()?;
-        if !matches!(version, ACCOUNT_BODY_VERSION | GUARDED_ACCOUNT_BODY_VERSION) {
-            return Err(StorageError::UnsupportedVersion);
-        }
+        let genesis_policy = match version {
+            ACCOUNT_BODY_VERSION => agenc_relay_domain::AccountGenesisPolicy::Legacy,
+            GUARDED_ACCOUNT_BODY_VERSION => agenc_relay_domain::AccountGenesisPolicy::Guarded,
+            _ => return Err(StorageError::UnsupportedVersion),
+        };
         let account_id = read_account_id(&mut decoder)?;
         let label = optional_text(&mut decoder, MAX_LABEL_BYTES)?
             .map(|text| AccountLabelValue::parse(text).map_err(|_| StorageError::InvalidEncoding))
@@ -223,9 +216,6 @@ impl AccountRecordBody {
         let session_generation = generation(&mut decoder)?;
         let revision = revision(&mut decoder)?;
         let admin_suspension_expires_at = optional_second(&mut decoder)?;
-        let initial_root = (version == GUARDED_ACCOUNT_BODY_VERSION)
-            .then(|| initial_root::decode(&mut decoder))
-            .transpose()?;
         decoder.finish()?;
         if !ascending(&contacts) || !ascending(&reserved_nicknames) {
             return Err(StorageError::InvalidEncoding);
@@ -241,7 +231,7 @@ impl AccountRecordBody {
             session_generation,
             revision,
             admin_suspension_expires_at,
-            initial_root,
+            genesis_policy,
         })
     }
 }
@@ -1325,7 +1315,7 @@ pub(crate) mod fixtures {
             session_generation,
             revision,
             admin_suspension_expires_at: None,
-            initial_root: None,
+            genesis_policy: agenc_relay_domain::AccountGenesisPolicy::Legacy,
         })
     }
 

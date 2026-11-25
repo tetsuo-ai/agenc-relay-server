@@ -497,21 +497,13 @@ pub enum DirectMessagePolicy {
     Deny,
 }
 
-/// The permanent genesis disposition of an account created with an initial-root claim.
-/// Existing and ordinary accounts have no guarded disposition.
+/// An immutable account's genesis publication policy, selected only at creation.
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub enum InitialRootState {
-    /// The original protected claimant may choose exactly one fingerprint.
-    Reserved,
-    /// Only the approved initial fingerprint may enter the public directory.
-    Chosen([u8; 32]),
-    /// The immutable generation-zero fingerprint and canonical signed object.
-    Published {
-        /// Fingerprint verified under the signed ARC root identity.
-        fingerprint: [u8; 32],
-        /// Standalone object ID of the exact signed root.
-        object_id: [u8; 32],
-    },
+pub enum AccountGenesisPolicy {
+    /// Ordinary signed genesis; includes all pre-extension accounts.
+    Legacy,
+    /// The original private claim must authorize first publication.
+    Guarded,
 }
 
 /// One account's public and authorization-relevant domain state.
@@ -527,7 +519,7 @@ pub struct AccountState {
     pub(crate) session_generation: Generation,
     pub(crate) revision: Revision,
     pub(crate) admin_suspension_expires_at: Option<UtcSecond>,
-    pub(crate) initial_root: Option<std::sync::Arc<InitialRootState>>,
+    pub(crate) genesis_policy: AccountGenesisPolicy,
 }
 
 impl AccountState {
@@ -545,7 +537,7 @@ impl AccountState {
             session_generation,
             revision,
             admin_suspension_expires_at: None,
-            initial_root: None,
+            genesis_policy: AccountGenesisPolicy::Legacy,
         }
     }
 
@@ -570,21 +562,21 @@ impl AccountState {
             session_generation,
             revision,
             admin_suspension_expires_at: None,
-            initial_root: None,
+            genesis_policy: AccountGenesisPolicy::Legacy,
         }
     }
 
     /// Selects guarded genesis on an account being constructed for its first insertion.
     #[must_use]
     pub fn with_initial_root_claim(mut self) -> Self {
-        self.initial_root = Some(std::sync::Arc::new(InitialRootState::Reserved));
+        self.genesis_policy = AccountGenesisPolicy::Guarded;
         self
     }
 
-    /// The independently persisted class and disposition at this account revision.
+    /// The independently persisted genesis policy.
     #[must_use]
-    pub fn initial_root(&self) -> Option<InitialRootState> {
-        self.initial_root.as_deref().copied()
+    pub const fn genesis_policy(&self) -> AccountGenesisPolicy {
+        self.genesis_policy
     }
 
     /// Returns the immutable account authority.
