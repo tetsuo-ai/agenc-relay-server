@@ -1,5 +1,13 @@
 # Prospective first-root service on Linux
 
+## Creation and compatibility
+
+The client can reserve the first public root while it creates an account. It commits to a client-held secret in the protected OPAQUE START. A successful FINISH binds that exact START to the newly allocated account. The coordinator writes the Guarded account, credential and reservation in the same transaction. The secret can authorize a private read or a single choice after a fresh account login. The root private key belongs to the client. The coordinator verifies the signed directory object through the existing publication path.
+
+Existing clients see the original capability list. An upgraded client discovers support by requesting `agenc.ag/initial-root` on the current connection and waiting for the solicited NEW and ACK. An ordinary edge can publish the already selected signed object. The coordinator owns the decision for every route, including publication from clients that use the original protocol.
+
+The first guarded account also establishes a minimum readable database format. A Linux test builds the previous accepted daemon, confirms that it still serves a legacy database, and starts both daemons on copies of the same guarded database. The older daemon refuses during recovery. The new daemon serves TLS on both a format-only snapshot and one containing a published account root. Run `bash scripts/test-initial-root-downgrade.sh` for this check.
+
 ## Permanent ownership and private response retention
 
 Guarded account creation commits the account's permanent genesis policy and a private reservation alongside its ordinary OPAQUE credential. A private successful choice fixes one root fingerprint. Only the corresponding valid signed generation-zero directory object can advance it to Published. The coordinator retains its standalone object ID across later root rotations and exact-response expiration.
