@@ -15,18 +15,19 @@ use agenc_relay_auth::{
     AccountTransaction, AuthenticatedAccountRequest, AuthenticationGrant,
     AuthenticationGrantRecord, AuthenticationLookup, AuthenticationStart,
     AuthenticationStartParameters, CreateAccountIntent, CreationAdmission, CreationFinish,
-    CreationStart, CredentialChangeFinish, CredentialChangeStart, CredentialChangeStartParameters,
+    CredentialChangeFinish, CredentialChangeStart, CredentialChangeStartParameters,
     CredentialChangeState, CredentialReplacementIntent, DestructiveAccountSnapshot,
     FreshAuthenticationProof, OpaqueProfile, OpaqueRegistrationRecord, OpenedAccountServiceRequest,
     SealedAccountFinishOutcome, SealedAccountStart, invitation_interval_admits,
 };
 use agenc_relay_client_wire::{
-    AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountTransfer, ParsedMessage,
-    SaslAction, SaslNumeric, SaslTransport, SecretBytes, WireMessage, numeric_reply,
+    AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase, AccountTransfer,
+    InitialRootCarrier, ParsedMessage, SaslAction, SaslNumeric, SaslTransport, SecretBytes,
+    WireMessage, numeric_reply,
 };
 use agenc_relay_crypto::{
-    AccountHpkePrivateKey, Ed25519PublicKey, LoginIndexKey, OpaqueFakeCredentialKey,
-    derive_login_index,
+    AccountHpkePrivateKey, Ed25519PublicKey, InitialRootExchange, LoginIndexKey,
+    OpaqueFakeCredentialKey, derive_login_index,
 };
 use agenc_relay_domain::{
     AccountState, DirectMessagePolicy, DomainEvent, GuestDirectMessagePolicy, PresencePolicy,
@@ -46,13 +47,21 @@ use agenc_relay_types::{
 use crate::RuntimeError;
 mod command;
 pub(crate) use command::AccountCommand;
+mod envelope;
+use envelope::{RequestKind, RoutedEnvelope};
+mod initial_root;
+use crate::state_core::InitialRootCut;
+use agenc_relay_auth::initial_root::{OpenedClaim, PreparedClaim};
+use initial_root::GuardedStartRelease;
+use initial_root::RegisteredClaim;
 
 use crate::admission::{BucketDemand, BucketKey, BucketKind, LoginHashKey};
 use crate::bridge::crypto::{
-    AccountOpenJob, CreationFinishJob, CreationFinishSealJob, CreationPreflightJob,
-    CreationStartJob, CreationStartSealJob, CredentialFinishJob, CredentialFinishSealJob,
-    CredentialStartJob, CredentialStartSealJob, CryptoJobOutput, OpaqueFinishJob,
-    OpaqueFinishSealJob, OpaqueStartJob, OpaqueStartSealJob, RuntimeCryptoJob,
+    AccountOpenJob, CreationFinishJob, CreationFinishSealJob, CreationInput, CreationPlan,
+    CreationPreflightJob, CreationStartJob, CreationStartSealJob, CredentialFinishJob,
+    CredentialFinishSealJob, CredentialStartJob, CredentialStartSealJob, CryptoJobOutput,
+    OpaqueFinishJob, OpaqueFinishSealJob, OpaqueStartJob, OpaqueStartSealJob, RuntimeCryptoJob,
+    SealedCreation,
 };
 use crate::bridge::{
     CryptoCompletionMessage, CryptoJobId, StorageReadCompletionMessage, StorageReadId,
@@ -592,6 +601,8 @@ struct AccountConnection {
     sasl: SaslTransport,
     creation: AccountTransfer,
     credentials: AccountTransfer,
+    root_claim: Option<AccountTransfer>,
+    claim_scope: Option<RegisteredClaim>,
     /// Whether the client this connection serves negotiated
     /// `standard-replies`, recorded on every routed SASL line so a refusal
     /// answered from a later continuation renders what that client accepted.
@@ -606,12 +617,35 @@ struct AccountConnection {
     fresh_authentication: Option<FreshAuthenticationProof>,
 }
 
+impl AccountConnection {
+    fn transfer(&mut self, command: AccountCommand) -> Result<&mut AccountTransfer, RuntimeError> {
+        match command {
+            AccountCommand::Base(AccountCarrierKind::Create)
+                if self.creation.initial_root_family().is_none() =>
+            {
+                Ok(&mut self.creation)
+            }
+            AccountCommand::Base(AccountCarrierKind::Create) => Err(RuntimeError::InvalidValue),
+            AccountCommand::Base(AccountCarrierKind::Credentials) => Ok(&mut self.credentials),
+            AccountCommand::InitialRoot(InitialRootCarrier::GuardedCreation) => {
+                self.creation
+                    .select_guarded_creation()
+                    .map_err(|_| RuntimeError::InvalidValue)?;
+                Ok(&mut self.creation)
+            }
+            AccountCommand::InitialRoot(InitialRootCarrier::Claim) => Ok(self
+                .root_claim
+                .get_or_insert_with(|| AccountTransfer::initial_root(InitialRootCarrier::Claim))),
+        }
+    }
+}
+
 struct RequestContext {
     generation: ConnectionGeneration,
     carrier_generation: u64,
     target: String,
     route: ConnectionRoute,
-    envelope: AccountServiceEnvelope,
+    envelope: RoutedEnvelope,
     carrier: RequestCarrier,
     phase: AccountCarrierPhase,
 }
@@ -620,6 +654,7 @@ struct RequestContext {
 enum RequestCarrier {
     Sasl,
     Account(AccountCarrierKind),
+    InitialRoot(InitialRootCarrier),
 }
 
 impl RequestContext {
@@ -627,8 +662,20 @@ impl RequestContext {
         self.phase == AccountCarrierPhase::Finish
     }
 
-    const fn expected_message_kind(&self) -> AccountServiceMessageKind {
-        match (self.carrier, self.phase) {
+    const fn expected_message_kind(&self) -> Option<RequestKind> {
+        self.carrier.kind(self.phase)
+    }
+}
+
+impl RequestCarrier {
+    fn from_command(command: AccountCommand) -> Self {
+        match command {
+            AccountCommand::Base(kind) => Self::Account(kind),
+            AccountCommand::InitialRoot(family) => Self::InitialRoot(family),
+        }
+    }
+    const fn kind(self, phase: AccountCarrierPhase) -> Option<RequestKind> {
+        let ordinary = match (self, phase) {
             (RequestCarrier::Sasl, AccountCarrierPhase::Start) => {
                 AccountServiceMessageKind::OpaqueAuthStart
             }
@@ -638,9 +685,11 @@ impl RequestContext {
             (RequestCarrier::Account(AccountCarrierKind::Create), AccountCarrierPhase::Start) => {
                 AccountServiceMessageKind::AccountCreateStart
             }
-            (RequestCarrier::Account(AccountCarrierKind::Create), AccountCarrierPhase::Finish) => {
-                AccountServiceMessageKind::AccountCreateFinish
-            }
+            (
+                RequestCarrier::InitialRoot(InitialRootCarrier::GuardedCreation)
+                | RequestCarrier::Account(AccountCarrierKind::Create),
+                AccountCarrierPhase::Finish,
+            ) => AccountServiceMessageKind::AccountCreateFinish,
             (
                 RequestCarrier::Account(AccountCarrierKind::Credentials),
                 AccountCarrierPhase::Start,
@@ -649,12 +698,37 @@ impl RequestContext {
                 RequestCarrier::Account(AccountCarrierKind::Credentials),
                 AccountCarrierPhase::Finish,
             ) => AccountServiceMessageKind::CredentialChangeFinish,
-        }
+            (
+                Self::InitialRoot(InitialRootCarrier::GuardedCreation),
+                AccountCarrierPhase::Start,
+            ) => {
+                return Some(RequestKind::InitialRoot(
+                    InitialRootExchange::ClaimedCreateStart,
+                ));
+            }
+            (Self::InitialRoot(InitialRootCarrier::Claim), AccountCarrierPhase::Finish) => {
+                return Some(RequestKind::InitialRoot(InitialRootExchange::Claim));
+            }
+            (Self::InitialRoot(InitialRootCarrier::Claim), AccountCarrierPhase::Start) => {
+                return None;
+            }
+        };
+        Some(RequestKind::Base(ordinary))
     }
 }
 
 enum PendingRead {
     Replay(RequestContext),
+    GuardedResult(GuardedStartRelease),
+    GuardedTransaction {
+        start: GuardedStartRelease,
+        replay: Box<RequestResultRecord>,
+    },
+    CommittedClaim {
+        request: RequestContext,
+        scope: RegisteredClaim,
+        prepared: Box<PreparedClaim>,
+    },
     CurrentIndex {
         request: RequestContext,
         opened: AuthenticatedAccountRequest<AuthenticationStart>,
@@ -679,20 +753,20 @@ enum PendingRead {
     },
     CreationCurrentIndex {
         request: RequestContext,
-        opened: AuthenticatedAccountRequest<CreationStart>,
+        opened: CreationInput,
         schedule: LoginIndexLookupSchedule,
         rate_available: bool,
     },
     CreationPreviousIndex {
         request: RequestContext,
-        opened: AuthenticatedAccountRequest<CreationStart>,
+        opened: CreationInput,
         schedule: LoginIndexLookupSchedule,
         current_available: bool,
         rate_available: bool,
     },
     CreationInvitation {
         request: RequestContext,
-        opened: AuthenticatedAccountRequest<CreationStart>,
+        opened: CreationInput,
         login_available: bool,
         rate_available: bool,
         invitation_key: StoredKey,
@@ -730,6 +804,11 @@ struct CredentialOpaqueContinuation {
 
 enum PendingCrypto {
     Open(RequestContext),
+    ClaimSeal {
+        request: RequestContext,
+        scope: RegisteredClaim,
+        cut: InitialRootCut,
+    },
     CreationPreflight {
         request: RequestContext,
     },
@@ -798,9 +877,14 @@ enum PendingCrypto {
 }
 
 enum ReadySeal {
+    Claim {
+        request: RequestContext,
+        opened: OpenedClaim,
+        scope: RegisteredClaim,
+    },
     CreationStart {
         request: RequestContext,
-        outcome: AccountStartOutcome<AccountCreationState>,
+        outcome: CreationPlan,
     },
     CreationFinish {
         request: RequestContext,
@@ -838,9 +922,15 @@ enum ReadySeal {
 }
 
 enum ReadyStage {
+    Claim {
+        request: RequestContext,
+        prepared: Box<PreparedClaim>,
+        scope: RegisteredClaim,
+        cut: InitialRootCut,
+    },
     CreationStart {
         request: RequestContext,
-        sealed: SealedAccountStart<AccountCreationState>,
+        sealed: SealedCreation,
     },
     CreationFinish {
         request: RequestContext,
@@ -878,6 +968,16 @@ enum ReadyStage {
 }
 
 enum PendingAuthority {
+    GuardedStart {
+        request: RequestContext,
+        sealed: Box<agenc_relay_auth::GuardedAccountStart>,
+        reservation: Option<CreationReservation>,
+    },
+    Claim {
+        request: RequestContext,
+        prepared: Box<PreparedClaim>,
+        scope: RegisteredClaim,
+    },
     Logout {
         generation: ConnectionGeneration,
         carrier_generation: u64,
@@ -1049,7 +1149,9 @@ impl AccountServiceCoordinator {
                 )
             }),
             Some(
-                PendingAuthority::CreationStart { .. }
+                PendingAuthority::GuardedStart { .. }
+                | PendingAuthority::Claim { .. }
+                | PendingAuthority::CreationStart { .. }
                 | PendingAuthority::CreationFinish { .. }
                 | PendingAuthority::CredentialStart { .. }
                 | PendingAuthority::Start { .. }
@@ -1088,6 +1190,8 @@ impl AccountServiceCoordinator {
             .fill_exact(&mut connection_nonce)
             .map_err(|_| RuntimeError::InvalidValue)?;
         let state = AccountConnection {
+            root_claim: None,
+            claim_scope: None,
             sasl: SaslTransport::new().map_err(|_| RuntimeError::MemoryExhausted)?,
             creation: AccountTransfer::new(AccountCarrierKind::Create)
                 .map_err(|_| RuntimeError::MemoryExhausted)?,
@@ -1122,8 +1226,24 @@ impl AccountServiceCoordinator {
     ) {
         let mut retained = self.queue_closed_live_transactions(context, generation);
         retained |= self.cancel_closed_crypto(context, generation);
-        self.reads
-            .retain(|_, pending| pending.generation() != generation);
+        let mut guarded_cleanups = Vec::new();
+        self.reads.retain(|_, pending| {
+            if pending.generation() != generation {
+                return true;
+            }
+            if let Some(cleanup) = pending.guarded_cleanup() {
+                guarded_cleanups.push(cleanup);
+            }
+            false
+        });
+        for cleanup in guarded_cleanups {
+            let _queued = self.queue_transaction_cleanup(
+                context,
+                generation,
+                LiveTransactionClass::Creation,
+                cleanup,
+            );
+        }
         retained |= self.discard_closed_ready_seals(context, generation);
         retained |= self.discard_closed_ready_stage(context, generation);
         if !self.retains_credential_reservation(generation, retained) {
@@ -2122,9 +2242,29 @@ impl AccountServiceCoordinator {
         generation: ConnectionGeneration,
         carrier_generation: u64,
         target: &str,
-        kind: AccountCarrierKind,
+        kind: impl Into<AccountCommand>,
         mut message: ParsedMessage,
     ) -> CarrierRoute {
+        let kind = kind.into();
+        let claim_scope = match kind {
+            AccountCommand::InitialRoot(InitialRootCarrier::GuardedCreation) => {
+                if !context
+                    .sessions()
+                    .connection(generation)
+                    .is_some_and(|entry| !entry.sink_gone() && entry.session().is_none())
+                {
+                    return CarrierRoute::Close;
+                }
+                None
+            }
+            AccountCommand::InitialRoot(InitialRootCarrier::Claim) => {
+                let Ok(scope) = self.registered_claim(context, generation) else {
+                    return CarrierRoute::Close;
+                };
+                Some(scope)
+            }
+            AccountCommand::Base(_) => None,
+        };
         let has_tags = !message.tags().is_empty();
         let Some(subcommand) = message.take_parameter(0) else {
             return CarrierRoute::Close;
@@ -2135,12 +2275,15 @@ impl AccountServiceCoordinator {
             let Some(connection) = self.connections.get_mut(&generation) else {
                 return CarrierRoute::Close;
             };
-            let transfer = match kind {
-                AccountCarrierKind::Create => &mut connection.creation,
-                AccountCarrierKind::Credentials => &mut connection.credentials,
+            let route = connection.route;
+            if let Some(scope) = claim_scope {
+                connection.claim_scope = Some(scope);
+            }
+            let Ok(transfer) = connection.transfer(kind) else {
+                return CarrierRoute::Close;
             };
             (
-                connection.route,
+                route,
                 transfer.client(&subcommand, parameter.as_deref(), has_tags, now),
             )
         };
@@ -2183,14 +2326,19 @@ impl AccountServiceCoordinator {
         carrier_generation: u64,
         target: &str,
         route: ConnectionRoute,
-        kind: AccountCarrierKind,
+        kind: impl Into<AccountCommand>,
         phase: AccountCarrierPhase,
         bytes: SecretBytes,
     ) -> CarrierRoute {
         let Ok(encoded) = bytes.expose().try_into() else {
             return CarrierRoute::Close;
         };
-        let Ok(envelope) = AccountServiceEnvelope::parse(encoded) else {
+        let kind = kind.into();
+        let carrier = RequestCarrier::from_command(kind);
+        let Some(expected) = carrier.kind(phase) else {
+            return CarrierRoute::Close;
+        };
+        let Ok(envelope) = RoutedEnvelope::parse(encoded, expected) else {
             return self.fail_account_route(context, generation, kind);
         };
         let request = RequestContext {
@@ -2199,12 +2347,9 @@ impl AccountServiceCoordinator {
             target: target.to_owned(),
             route,
             envelope,
-            carrier: RequestCarrier::Account(kind),
+            carrier,
             phase,
         };
-        if request.envelope.message_kind() != request.expected_message_kind() {
-            return self.fail_account_route(context, generation, kind);
-        }
         if self.submit_replay_read(context, request).is_err() {
             return CarrierRoute::Close;
         }
@@ -2256,7 +2401,7 @@ impl AccountServiceCoordinator {
             carrier_generation,
             target: target.to_owned(),
             route,
-            envelope,
+            envelope: envelope.into(),
             carrier: RequestCarrier::Sasl,
             phase,
         };
@@ -2413,15 +2558,16 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &StateCoreContext,
         generation: ConnectionGeneration,
-        kind: AccountCarrierKind,
+        kind: impl Into<AccountCommand>,
     ) -> CarrierRoute {
         let Some(connection) = self.connections.get_mut(&generation) else {
             return CarrierRoute::Close;
         };
-        match kind {
-            AccountCarrierKind::Create => connection.creation.reject(),
-            AccountCarrierKind::Credentials => connection.credentials.reject(),
-        }
+        let kind = kind.into();
+        let Ok(transfer) = connection.transfer(kind) else {
+            return CarrierRoute::Close;
+        };
+        transfer.reject();
         match account_failure(context.server_prefix(), kind) {
             Ok(frame) => CarrierRoute::Finished {
                 frames: vec![frame],
@@ -2486,6 +2632,45 @@ impl AccountServiceCoordinator {
         output: CryptoJobOutput,
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
         match (pending, output) {
+            (PendingCrypto::Open(request), CryptoJobOutput::InitialRootOpen(output)) => {
+                match *output {
+                    Ok(crate::bridge::crypto::OpenedInitialRoot::Claim(opened))
+                        if request.carrier
+                            == RequestCarrier::InitialRoot(InitialRootCarrier::Claim) =>
+                    {
+                        self.queue_claim(context, request, *opened)
+                    }
+                    Ok(crate::bridge::crypto::OpenedInitialRoot::Creation(opened))
+                        if request.carrier
+                            == RequestCarrier::InitialRoot(InitialRootCarrier::GuardedCreation) =>
+                    {
+                        self.open_creation_start(context, request, (*opened).into())
+                    }
+                    _ => {
+                        self.fail_pending(context, request, AccountRefusalReason::RequestUnreadable)
+                    }
+                }
+            }
+            (
+                PendingCrypto::ClaimSeal {
+                    request,
+                    scope,
+                    cut,
+                },
+                CryptoJobOutput::InitialRootSealed(output),
+            ) => {
+                let prepared = Box::new((*output).map_err(|_| RuntimeError::InvalidValue)?);
+                if self.ready_stage.is_some() {
+                    return Err(RuntimeError::InvalidValue);
+                }
+                self.ready_stage = Some(ReadyStage::Claim {
+                    request,
+                    scope,
+                    cut,
+                    prepared,
+                });
+                Ok(Vec::new())
+            }
             (PendingCrypto::Open(request), CryptoJobOutput::AccountOpen(output)) => {
                 self.open_completed(context, request, *output)
             }
@@ -2750,7 +2935,7 @@ impl AccountServiceCoordinator {
         };
         match opened {
             OpenedAccountServiceRequest::CreationStart(opened) if !request.is_finish() => {
-                self.open_creation_start(context, request, opened)
+                self.open_creation_start(context, request, opened.into())
             }
             OpenedAccountServiceRequest::CreationFinish(opened) if request.is_finish() => {
                 self.open_creation_finish(context, request, opened)
@@ -2775,7 +2960,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         request: RequestContext,
-        opened: AuthenticatedAccountRequest<CreationStart>,
+        opened: CreationInput,
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
         if self
             .connections
@@ -2810,6 +2995,16 @@ impl AccountServiceCoordinator {
         request: RequestContext,
         opened: AuthenticatedAccountRequest<CreationFinish>,
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let guarded =
+            request.carrier == RequestCarrier::InitialRoot(InitialRootCarrier::GuardedCreation);
+        if self
+            .connections
+            .get(&request.generation)
+            .and_then(|c| c.creation_transaction.as_ref())
+            .is_some_and(|live| live.transaction.is_guarded_creation() != guarded)
+        {
+            return self.fail_pending(context, request, AccountRefusalReason::WrongPhase);
+        }
         let Some(live) = self
             .connections
             .get_mut(&request.generation)
@@ -3092,7 +3287,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         request: RequestContext,
-        opened: AuthenticatedAccountRequest<CreationStart>,
+        opened: CreationInput,
         rate_available: bool,
     ) -> Result<(), RuntimeError> {
         let schedule = LoginIndexLookupSchedule::new(
@@ -3365,7 +3560,9 @@ impl AccountServiceCoordinator {
         let Some(pending) = self.reads.remove(&message.read_id) else {
             return Vec::new();
         };
-        let close = CarrierCompletion::closed(pending.generation(), pending.carrier_generation());
+        let generation = pending.generation();
+        let close = CarrierCompletion::closed(generation, pending.carrier_generation());
+        let cleanup = pending.guarded_cleanup();
         let result = match message.result {
             Ok(result) => self.apply_read_result(context, pending, result),
             Err(_) => Err(RuntimeError::InvalidValue),
@@ -3375,7 +3572,17 @@ impl AccountServiceCoordinator {
                 completions.extend(self.progress(context));
                 completions
             }
-            Err(_) => vec![close],
+            Err(_) => {
+                if let Some(cleanup) = cleanup {
+                    let _queued = self.queue_transaction_cleanup(
+                        context,
+                        generation,
+                        LiveTransactionClass::Creation,
+                        cleanup,
+                    );
+                }
+                vec![close]
+            }
         }
     }
 
@@ -3388,6 +3595,17 @@ impl AccountServiceCoordinator {
     ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
         match pending {
             PendingRead::Replay(request) => self.replay_read(context, request, result),
+            PendingRead::GuardedResult(start) => {
+                self.read_guarded_transaction(context, start, result)
+            }
+            PendingRead::GuardedTransaction { start, replay } => {
+                self.release_guarded_start(context, start, *replay, result)
+            }
+            PendingRead::CommittedClaim {
+                request,
+                scope,
+                prepared,
+            } => self.release_claim(context, request, scope, prepared, result),
             PendingRead::CurrentIndex {
                 request,
                 opened,
@@ -3495,7 +3713,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         request: RequestContext,
-        opened: AuthenticatedAccountRequest<CreationStart>,
+        opened: CreationInput,
         schedule: LoginIndexLookupSchedule,
         rate_available: bool,
         result: ReadResult,
@@ -3528,7 +3746,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         request: RequestContext,
-        opened: AuthenticatedAccountRequest<CreationStart>,
+        opened: CreationInput,
         schedule: LoginIndexLookupSchedule,
         current_available: bool,
         rate_available: bool,
@@ -3583,7 +3801,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         request: RequestContext,
-        opened: AuthenticatedAccountRequest<CreationStart>,
+        opened: CreationInput,
         login_available: bool,
         rate_available: bool,
         invitation_key: StoredKey,
@@ -3611,7 +3829,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         request: RequestContext,
-        opened: AuthenticatedAccountRequest<CreationStart>,
+        opened: CreationInput,
         login_available: bool,
         invitation_available: bool,
         rate_available: bool,
@@ -3910,15 +4128,7 @@ impl AccountServiceCoordinator {
         let key = request_result_key(request.envelope.client_request_id())?;
         let Some(value) = read_optional_persistent(context, result, TableId::RequestResult, &key)?
         else {
-            let job_envelope = AccountServiceEnvelope::parse(*request.envelope.as_bytes())
-                .map_err(|_| RuntimeError::InvalidValue)?;
-            let job = RuntimeCryptoJob::AccountOpen(Box::new(AccountOpenJob::new(
-                Arc::clone(&self.config.hpke_private_key),
-                self.config.recovery_epoch,
-                self.config.network_id,
-                request.envelope.message_kind(),
-                job_envelope,
-            )));
+            let job = request.envelope.open_job(&self.config)?;
             self.submit_crypto(context, PendingCrypto::Open(request), job)?;
             return Ok(Vec::new());
         };
@@ -3927,6 +4137,9 @@ impl AccountServiceCoordinator {
         }
         let protocol =
             ProtocolRecordBody::decode(TableId::RequestResult, REQUEST_RESULT_KIND, value.body())?;
+        if request.carrier == RequestCarrier::InitialRoot(InitialRootCarrier::Claim) {
+            return self.replay_registered_claim(context, request, protocol.canonical_object());
+        }
         let stored = RequestResultRecord::decode(protocol.canonical_object())?;
         if stored.route != request.route || stored.request != *request.envelope.as_bytes() {
             return Err(RuntimeError::InvalidValue);
@@ -3942,16 +4155,16 @@ impl AccountServiceCoordinator {
         if !expected_terminal {
             return Err(RuntimeError::InvalidValue);
         }
+        let Some(RequestKind::Base(kind)) = request.expected_message_kind() else {
+            return self.replay_initial_root(context, request, stored);
+        };
         let response = agenc_relay_auth::AccountServiceResponse::parse(stored.response)
             .map_err(|_| RuntimeError::InvalidValue)?;
         if response.client_request_id() != request.envelope.client_request_id() {
             return Err(RuntimeError::InvalidValue);
         }
-        let terminal_account = replay_terminal_account(
-            request.expected_message_kind(),
-            stored.terminal,
-            stored.terminal_account,
-        )?;
+        let terminal_account =
+            replay_terminal_account(kind, stored.terminal, stored.terminal_account)?;
         let mut frames = self.response_frames(
             context,
             &request,
@@ -3961,8 +4174,7 @@ impl AccountServiceCoordinator {
         if let Some(account_id) = terminal_account {
             frames.push(account_created_note(context.server_prefix(), account_id)?);
         }
-        let credential_changed = request.expected_message_kind()
-            == AccountServiceMessageKind::CredentialChangeFinish
+        let credential_changed = kind == AccountServiceMessageKind::CredentialChangeFinish
             && stored.terminal == RequestTerminal::Accepted;
         if credential_changed {
             frames.push(account_credential_changed_note(context.server_prefix())?);
@@ -4028,7 +4240,8 @@ impl AccountServiceCoordinator {
         self.crypto.values().any(|pending| {
             matches!(
                 pending,
-                PendingCrypto::CreationStartSeal { .. }
+                PendingCrypto::ClaimSeal { .. }
+                    | PendingCrypto::CreationStartSeal { .. }
                     | PendingCrypto::CreationFinishSeal { .. }
                     | PendingCrypto::CredentialStartSeal { .. }
                     | PendingCrypto::CredentialFinishSeal { .. }
@@ -4047,6 +4260,11 @@ impl AccountServiceCoordinator {
         let cleanup = ready.transaction_cleanup();
         let response_count = context.head().account_service_response_count;
         let (pending, job) = match ready {
+            ReadySeal::Claim {
+                request,
+                opened,
+                scope,
+            } => self.prepare_claim(context, request, scope, opened, response_count)?,
             ReadySeal::CreationStart { request, outcome } => (
                 PendingCrypto::CreationStartSeal { request },
                 RuntimeCryptoJob::CreationStartSeal(Box::new(CreationStartSealJob::new(
@@ -4174,6 +4392,12 @@ impl AccountServiceCoordinator {
         ready: ReadyStage,
     ) -> Result<(), RuntimeError> {
         match ready {
+            ReadyStage::Claim {
+                request,
+                scope,
+                cut,
+                prepared,
+            } => self.stage_claim(context, request, scope, cut, prepared),
             ReadyStage::CreationStart { request, sealed } => {
                 self.stage_creation_start(context, request, sealed)
             }
@@ -4229,26 +4453,36 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &mut StateCoreContext,
         request: RequestContext,
-        sealed: SealedAccountStart<AccountCreationState>,
+        sealed: impl Into<SealedCreation>,
     ) -> Result<(), RuntimeError> {
+        let sealed = sealed.into();
         if !self.transaction_capacity_available() {
             return Err(RuntimeError::LimitExceeded);
         }
         let now = context.now();
         let now_utc = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
-        let transaction_record = sealed
-            .creation_transaction_record(now, now_utc)
+        let expected = match &sealed {
+            SealedCreation::Base(_) => {
+                RequestKind::Base(AccountServiceMessageKind::AccountCreateStart)
+            }
+            SealedCreation::Guarded(_) => {
+                RequestKind::InitialRoot(InitialRootExchange::ClaimedCreateStart)
+            }
+        };
+        if request.expected_message_kind() != Some(expected) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let (transaction_expiry, transaction_record) = sealed
+            .retained_record(now, now_utc)
             .map_err(|_| RuntimeError::InvalidValue)?;
-        let transaction_expiry = transaction_record
-            .durable_expires_at_utc()
-            .map_err(|_| RuntimeError::InvalidValue)?;
-        let reservation = self.creation_reservation(&sealed)?;
+        let reservation =
+            self.creation_reservation(sealed.reservation_login(), sealed.reservation_invitation())?;
         let plan = context
             .domain()
             .plan_account_service_checkpoint()
             .map_err(|_| RuntimeError::InvalidValue)?;
         let revision = plan.resulting_revision().get();
-        let response = sealed.response_intent().response().as_bytes();
+        let response = sealed.response();
         let mut writes = Vec::new();
         writes
             .try_reserve_exact(5)
@@ -4288,7 +4522,7 @@ impl AccountServiceCoordinator {
             0,
             Some(transaction_expiry.get()),
             transaction_references,
-            transaction_record.expose_for_persistence().to_vec(),
+            transaction_record,
         )?;
         writes.push(AccountServiceDurableWrite::put(
             TableId::AuthTransaction,
@@ -4317,11 +4551,16 @@ impl AccountServiceCoordinator {
             None,
             response,
         )?);
-        let frames = self.response_frames(context, &request, response, false)?;
-        let fanout = context
-            .fanout_request_to(request.generation, frames)
-            .map_err(|_| RuntimeError::MemoryExhausted)?;
-        let next = sealed.response_intent().next_response_count();
+        let fanout = match &sealed {
+            SealedCreation::Base(_) => {
+                let frames = self.response_frames(context, &request, response, false)?;
+                context
+                    .fanout_request_to(request.generation, frames)
+                    .map_err(|_| RuntimeError::MemoryExhausted)?
+            }
+            SealedCreation::Guarded(_) => FanoutRequest::new(Vec::new(), Vec::new())?,
+        };
+        let next = sealed.next_response_count();
         // The response count is checked before anything is staged so a
         // mismatch never leaves a committed batch without its live owner.
         if next
@@ -4349,21 +4588,29 @@ impl AccountServiceCoordinator {
         if !matches!(accepted, Ok(StageAccepted::Staged { .. })) {
             return Err(RuntimeError::InvalidValue);
         }
-        self.pending_authority = Some(PendingAuthority::CreationStart {
-            generation: request.generation,
-            carrier_generation: request.carrier_generation,
-            sealed,
-            reservation,
+        self.pending_authority = Some(match sealed {
+            SealedCreation::Base(sealed) => PendingAuthority::CreationStart {
+                generation: request.generation,
+                carrier_generation: request.carrier_generation,
+                sealed: *sealed,
+                reservation,
+            },
+            SealedCreation::Guarded(sealed) => PendingAuthority::GuardedStart {
+                request,
+                sealed,
+                reservation,
+            },
         });
         Ok(())
     }
 
     fn creation_reservation(
         &self,
-        sealed: &SealedAccountStart<AccountCreationState>,
+        digest: Option<&agenc_relay_crypto::LoginIndexDigest>,
+        invitation_id: Option<agenc_relay_types::InviteId>,
     ) -> Result<Option<CreationReservation>, RuntimeError> {
-        let Some(digest) = sealed.creation_reservation_login_digest() else {
-            if sealed.creation_reservation_invitation().is_some() {
+        let Some(digest) = digest else {
+            if invitation_id.is_some() {
                 return Err(RuntimeError::InvalidValue);
             }
             return Ok(None);
@@ -4377,9 +4624,7 @@ impl AccountServiceCoordinator {
         .encode()?;
         Ok(Some(CreationReservation {
             login_key: key,
-            invitation_id: sealed
-                .creation_reservation_invitation()
-                .map(|(invite_id, _)| invite_id),
+            invitation_id,
         }))
     }
 
@@ -5205,7 +5450,10 @@ impl AccountServiceCoordinator {
         match request.carrier {
             RequestCarrier::Sasl => self.sasl_response_frames(context, request, response, accepted),
             RequestCarrier::Account(kind) => {
-                self.account_response_frames(context, request, kind, response, accepted)
+                self.account_response_frames(context, request, kind.into(), response, accepted)
+            }
+            RequestCarrier::InitialRoot(family) => {
+                self.account_response_frames(context, request, family.into(), response, accepted)
             }
         }
     }
@@ -5246,7 +5494,7 @@ impl AccountServiceCoordinator {
         &mut self,
         context: &StateCoreContext,
         request: &RequestContext,
-        kind: AccountCarrierKind,
+        kind: AccountCommand,
         response: &[u8],
         accepted: bool,
     ) -> Result<Vec<WireMessage>, RuntimeError> {
@@ -5254,14 +5502,16 @@ impl AccountServiceCoordinator {
             .connections
             .get_mut(&request.generation)
             .ok_or(RuntimeError::InvalidValue)?;
-        let transfer = match kind {
-            AccountCarrierKind::Create => &mut connection.creation,
-            AccountCarrierKind::Credentials => &mut connection.credentials,
-        };
+        let transfer = connection.transfer(kind)?;
         let actions = transfer
             .server_response(request.phase, response, context.now().get())
             .map_err(|_| RuntimeError::InvalidValue)?;
         let mut frames = render_account_actions(context.server_prefix(), kind, actions)?;
+        if kind == AccountCommand::InitialRoot(InitialRootCarrier::Claim) {
+            connection.root_claim = None;
+            connection.claim_scope = None;
+            return Ok(frames);
+        }
         if !request.is_finish() {
             return Ok(frames);
         }
@@ -5285,6 +5535,10 @@ impl AccountServiceCoordinator {
             RequestCarrier::Account(kind) => {
                 context.account_request_refused(reason);
                 self.fail_account_route(context, request.generation, kind)
+            }
+            RequestCarrier::InitialRoot(family) => {
+                context.account_request_refused(reason);
+                self.fail_account_route(context, request.generation, family)
             }
         };
         let CarrierRoute::Finished { frames, result } = route else {
@@ -5388,6 +5642,23 @@ impl AccountServiceCoordinator {
         let Ok(transaction) = sealed.into_transaction_after_commit(committed_count) else {
             return Some(CarrierCompletion::closed(generation, carrier_generation));
         };
+        self.install_creation(
+            context,
+            generation,
+            carrier_generation,
+            transaction,
+            reservation,
+        )
+    }
+
+    fn install_creation(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        transaction: AccountTransaction<AccountCreationState>,
+        reservation: Option<CreationReservation>,
+    ) -> Option<CarrierCompletion> {
         let transaction_id = transaction.binding().transaction_id();
         let deadline = transaction.binding().expires_at();
         if self
@@ -5938,6 +6209,29 @@ impl AccountServiceCoordinator {
         };
         let committed_count = context.head().account_service_response_count;
         let completion = match authority {
+            PendingAuthority::Claim {
+                request,
+                scope,
+                prepared,
+            } => {
+                let close =
+                    CarrierCompletion::closed(request.generation, request.carrier_generation);
+                self.read_committed_claim(context, request, scope, prepared)
+                    .err()
+                    .map(|_| close)
+            }
+            PendingAuthority::GuardedStart {
+                request,
+                sealed,
+                reservation,
+            } => self.read_guarded_result(
+                context,
+                GuardedStartRelease {
+                    request,
+                    sealed,
+                    reservation,
+                },
+            ),
             PendingAuthority::Logout {
                 generation,
                 carrier_generation,
@@ -6306,7 +6600,11 @@ fn transaction_cleanup_batch(
 impl PendingRead {
     const fn generation(&self) -> ConnectionGeneration {
         match self {
-            Self::Replay(request)
+            Self::GuardedResult(start) | Self::GuardedTransaction { start, .. } => {
+                start.request.generation
+            }
+            Self::CommittedClaim { request, .. }
+            | Self::Replay(request)
             | Self::CurrentIndex { request, .. }
             | Self::PreviousIndex { request, .. }
             | Self::OpaqueRecord { request, .. }
@@ -6319,7 +6617,11 @@ impl PendingRead {
 
     const fn carrier_generation(&self) -> u64 {
         match self {
-            Self::Replay(request)
+            Self::GuardedResult(start) | Self::GuardedTransaction { start, .. } => {
+                start.request.carrier_generation
+            }
+            Self::CommittedClaim { request, .. }
+            | Self::Replay(request)
             | Self::CurrentIndex { request, .. }
             | Self::PreviousIndex { request, .. }
             | Self::OpaqueRecord { request, .. }
@@ -6372,7 +6674,8 @@ impl PendingCrypto {
 
     const fn generation(&self) -> ConnectionGeneration {
         match self {
-            Self::Open(request)
+            Self::ClaimSeal { request, .. }
+            | Self::Open(request)
             | Self::CreationPreflight { request }
             | Self::CreationStart { request }
             | Self::CreationStartSeal { request }
@@ -6391,7 +6694,8 @@ impl PendingCrypto {
 
     const fn carrier_generation(&self) -> u64 {
         match self {
-            Self::Open(request)
+            Self::ClaimSeal { request, .. }
+            | Self::Open(request)
             | Self::CreationPreflight { request }
             | Self::CreationStart { request }
             | Self::CreationStartSeal { request }
@@ -6480,7 +6784,8 @@ impl ReadySeal {
 
     const fn generation(&self) -> ConnectionGeneration {
         match self {
-            Self::CreationStart { request, .. }
+            Self::Claim { request, .. }
+            | Self::CreationStart { request, .. }
             | Self::CreationFinish { request, .. }
             | Self::CredentialStart { request, .. }
             | Self::CredentialFinish { request, .. }
@@ -6561,7 +6866,8 @@ impl ReadyStage {
 
     const fn generation(&self) -> ConnectionGeneration {
         match self {
-            Self::CreationStart { request, .. }
+            Self::Claim { request, .. }
+            | Self::CreationStart { request, .. }
             | Self::CreationFinish { request, .. }
             | Self::CredentialStart { request, .. }
             | Self::CredentialFinish { request, .. }
@@ -6572,7 +6878,8 @@ impl ReadyStage {
 
     const fn carrier_generation(&self) -> u64 {
         match self {
-            Self::CreationStart { request, .. }
+            Self::Claim { request, .. }
+            | Self::CreationStart { request, .. }
             | Self::CreationFinish { request, .. }
             | Self::CredentialStart { request, .. }
             | Self::CredentialFinish { request, .. }
@@ -6620,6 +6927,7 @@ impl PendingAuthority {
 
     const fn generation(&self) -> ConnectionGeneration {
         match self {
+            Self::Claim { request, .. } | Self::GuardedStart { request, .. } => request.generation,
             Self::Logout { generation, .. }
             | Self::CreationStart { generation, .. }
             | Self::CreationFinish { generation, .. }
@@ -6632,6 +6940,9 @@ impl PendingAuthority {
 
     const fn carrier_generation(&self) -> u64 {
         match self {
+            Self::Claim { request, .. } | Self::GuardedStart { request, .. } => {
+                request.carrier_generation
+            }
             Self::Logout {
                 carrier_generation, ..
             }
@@ -6714,12 +7025,19 @@ fn request_result_write(
         request: *request.envelope.as_bytes(),
         response: *response,
     };
-    let body = ProtocolRecordBody::new(
-        TableId::RequestResult,
-        REQUEST_RESULT_KIND,
-        1,
+    store_request_result(
+        revision,
+        request.envelope.client_request_id(),
         record.encode(),
-    )?;
+    )
+}
+
+fn store_request_result(
+    revision: u64,
+    id: RequestId,
+    encoded: Vec<u8>,
+) -> Result<AccountServiceDurableWrite, RuntimeError> {
+    let body = ProtocolRecordBody::new(TableId::RequestResult, REQUEST_RESULT_KIND, 1, encoded)?;
     let value = PersistentRecordValue::new(
         TableId::RequestResult,
         REQUEST_RESULT_KIND,
@@ -6731,7 +7049,7 @@ fn request_result_write(
     )?;
     AccountServiceDurableWrite::put(
         TableId::RequestResult,
-        request_result_key(request.envelope.client_request_id())?,
+        request_result_key(id)?,
         value.encode()?,
     )
 }
@@ -7312,6 +7630,9 @@ mod tests {
         phase: AccountCarrierPhase,
     ) -> Result<RequestContext, Box<dyn core::error::Error>> {
         let kind = match (carrier, phase) {
+            (RequestCarrier::InitialRoot(_), _) => {
+                return Err("the base fixture requires a base family".into());
+            }
             (RequestCarrier::Sasl, AccountCarrierPhase::Start) => {
                 AccountServiceMessageKind::OpaqueAuthStart
             }
@@ -7343,7 +7664,7 @@ mod tests {
                 connection_id: ConnectionId::from_bytes([2; 16]),
                 connection_nonce: [3; 32],
             },
-            envelope: structural_envelope(kind)?,
+            envelope: structural_envelope(kind)?.into(),
             carrier,
             phase,
         })
@@ -7387,7 +7708,10 @@ mod tests {
         for (carrier, phase, expected) in cases {
             let request = request_context(1, 7, carrier, phase)?;
             assert_eq!(request.is_finish(), phase == AccountCarrierPhase::Finish);
-            assert_eq!(request.expected_message_kind(), expected);
+            assert_eq!(
+                request.expected_message_kind(),
+                Some(super::RequestKind::Base(expected))
+            );
         }
 
         let login = || NormalizedLogin::prepare("bounded-user");

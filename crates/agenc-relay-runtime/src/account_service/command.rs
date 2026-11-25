@@ -8,6 +8,38 @@ pub(crate) enum AccountCommand {
     InitialRoot(InitialRootCarrier),
 }
 
+impl From<AccountCarrierKind> for AccountCommand {
+    fn from(kind: AccountCarrierKind) -> Self {
+        Self::Base(kind)
+    }
+}
+
+impl From<InitialRootCarrier> for AccountCommand {
+    fn from(carrier: InitialRootCarrier) -> Self {
+        Self::InitialRoot(carrier)
+    }
+}
+
+impl AccountCommand {
+    pub(crate) const fn command(self) -> &'static str {
+        match self {
+            Self::Base(kind) => kind.command(),
+            Self::InitialRoot(family) => family.command(),
+        }
+    }
+
+    pub(super) const fn unavailable(self) -> &'static str {
+        match self {
+            Self::Base(AccountCarrierKind::Create)
+            | Self::InitialRoot(InitialRootCarrier::GuardedCreation) => {
+                "Account creation unavailable"
+            }
+            Self::Base(AccountCarrierKind::Credentials) => "Credential change unavailable",
+            Self::InitialRoot(InitialRootCarrier::Claim) => "Account root claim unavailable",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use agenc_relay_client_wire::{AccountCarrierAction, AccountCarrierPhase, InitialRootCarrier};
@@ -56,37 +88,5 @@ mod tests {
             .is_err()
         );
         Ok(())
-    }
-}
-
-impl From<AccountCarrierKind> for AccountCommand {
-    fn from(kind: AccountCarrierKind) -> Self {
-        Self::Base(kind)
-    }
-}
-
-impl From<InitialRootCarrier> for AccountCommand {
-    fn from(carrier: InitialRootCarrier) -> Self {
-        Self::InitialRoot(carrier)
-    }
-}
-
-impl AccountCommand {
-    pub(crate) const fn command(self) -> &'static str {
-        match self {
-            Self::Base(kind) => kind.command(),
-            Self::InitialRoot(family) => family.command(),
-        }
-    }
-
-    pub(super) const fn unavailable(self) -> &'static str {
-        match self {
-            Self::Base(AccountCarrierKind::Create)
-            | Self::InitialRoot(InitialRootCarrier::GuardedCreation) => {
-                "Account creation unavailable"
-            }
-            Self::Base(AccountCarrierKind::Credentials) => "Credential change unavailable",
-            Self::InitialRoot(InitialRootCarrier::Claim) => "Account root claim unavailable",
-        }
     }
 }

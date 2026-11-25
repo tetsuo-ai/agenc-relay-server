@@ -29,6 +29,15 @@ pub(super) enum CreationOrigin {
     },
 }
 
+impl AccountTransaction<AccountCreationState> {
+    /// The transport must keep a guarded START on its original negotiated route through FINISH.
+    #[must_use]
+    pub fn is_guarded_creation(&self) -> bool {
+        self.state_ref()
+            .is_some_and(|s| matches!(s.origin, CreationOrigin::Guarded { .. }))
+    }
+}
+
 impl CreationOrigin {
     pub(super) fn accepts(&self, finish: AccountRequestBinding) -> bool {
         match self {
@@ -197,6 +206,30 @@ impl GuardedAccountStart {
     #[must_use]
     pub const fn record(&self) -> &GuardedCreationTransactionRecord {
         &self.record
+    }
+
+    /// Rechecks the live monotonic deadline and the retained UTC expiry at durable admission.
+    pub fn live_record_expiry(
+        &self,
+        now: MonotonicTick,
+        utc: UtcSecond,
+    ) -> Result<UtcSecond, AuthError> {
+        durable_transaction_expiry(
+            self.transaction.binding(),
+            TransactionClass::AccountCreation,
+            now,
+            utc,
+        )?;
+        let mut reader = AuthenticationRecordReader::new(self.record.expose_for_persistence());
+        let (transaction, _, _, expires) = read_transaction_record_header(
+            &mut reader,
+            InitialRootExchange::VERSION,
+            CREATION_TRANSACTION_CLASS,
+        )?;
+        if transaction != self.transaction_id() || expires <= utc {
+            return Err(AuthError::Expired);
+        }
+        Ok(expires)
     }
 
     /// Borrows the sealed response for the ordered replay row.

@@ -427,6 +427,7 @@ impl CliNode {
     /// Hands the node to the shared daemon fixture helpers.
     fn into_fixture(self) -> NodeFixture {
         NodeFixture {
+            provisioned_epoch: self.own_epoch,
             config_path: self.config_path,
             log_dir: self.data_dir.join("logs"),
             public_address: self.public_address,

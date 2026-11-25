@@ -683,6 +683,12 @@ impl AccountTransfer {
         Ok(())
     }
 
+    /// Identifies the negotiated transport that owns any current transfer and challenge.
+    #[must_use]
+    pub const fn initial_root_family(&self) -> Option<InitialRootCarrier> {
+        self.initial_root
+    }
+
     /// Returns the exact command owned by this carrier.
     #[must_use]
     pub const fn command(&self) -> &'static str {
