@@ -13,12 +13,13 @@
 //! its accounts ([`RouteTable::direct_plaintext_allowed`]): every node decides
 //! that refusal with this one predicate (companion 11.4 and 12.5).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_relay_types::{AccountId, ChannelInstanceId};
 
 use crate::error::DomainError;
 
+mod binding_change;
 mod successor;
 
 /// A 32-byte conversation identifier.
@@ -254,6 +255,8 @@ pub struct BindingSummary {
 pub struct RouteTable {
     routes: BTreeMap<ConversationId, RouteEntry>,
     by_channel: BTreeMap<ChannelInstanceId, ConversationId>,
+    /// Superseded instances stay encrypted until destruction of that exact instance.
+    retired_channels: BTreeSet<ChannelInstanceId>,
     by_pair: BTreeMap<DirectPair, ConversationId>,
     locks: BTreeMap<SemanticLockId, ConversationId>,
     /// The newest incarnation of each semantic route.
@@ -294,7 +297,7 @@ impl RouteTable {
     /// binding or tombstone exists for it (`E2EE_REQUIRED` otherwise).
     #[must_use]
     pub fn channel_plaintext_allowed(&self, channel_id: &ChannelInstanceId) -> bool {
-        self.channel_route(channel_id).is_none()
+        self.channel_route(channel_id).is_none() && !self.retired_channels.contains(channel_id)
     }
 
     /// Whether plaintext may pass between two accounts: only when no live,
@@ -339,7 +342,7 @@ impl RouteTable {
         owner: AccountId,
         expires_at: u64,
     ) -> Result<(), RouteConflict> {
-        if self.by_channel.contains_key(&channel_id)
+        if !self.channel_plaintext_allowed(&channel_id)
             || self.target_reserved(&RouteTarget::Channel(channel_id))
         {
             return Err(RouteConflict::GroupConflict);
@@ -436,32 +439,20 @@ impl RouteTable {
         summary: BindingSummary,
         now: u64,
     ) -> Result<RouteEntry, RouteConflict> {
-        let reservation = self
-            .reservations
-            .get(&reservation_id)
-            .copied()
-            .filter(|reservation| reservation.owner == actor && reservation.expires_at > now)
-            .ok_or(RouteConflict::ReservationInvalid)?;
-        let target = match (
-            reservation.target,
-            summary.channel_instance_id,
-            summary.conversation_nonce,
-            summary.direct_pair,
-        ) {
-            (RouteTarget::Channel(instance), Some(bound), None, None) if instance == bound => {
-                RouteTarget::Channel(instance)
-            }
-            (RouteTarget::Direct(pair), None, Some(nonce), Some(named))
-                if reservation.conversation_nonce == Some(nonce) && named == pair =>
-            {
-                RouteTarget::Direct(pair)
-            }
-            _ => return Err(RouteConflict::ReservationInvalid),
-        };
+        let target = self.reserved_target(reservation_id, actor, &summary, now)?;
         if summary.binding_generation != 0 || self.routes.contains_key(&summary.conversation_id) {
             return Err(RouteConflict::BadState);
         }
         self.check_lock_slot(&summary)?;
+        let occupied = match target {
+            RouteTarget::Channel(instance) => !self.channel_plaintext_allowed(&instance),
+            RouteTarget::Direct(pair) => self
+                .direct_route(&pair)
+                .is_some_and(|entry| entry.authorized_close().is_none()),
+        };
+        if occupied {
+            return Err(RouteConflict::GroupConflict);
+        }
         let entry = RouteEntry {
             conversation_id: summary.conversation_id,
             target,
@@ -535,23 +526,37 @@ impl RouteTable {
         conversation_id: &ConversationId,
         summary: BindingSummary,
     ) -> Result<(), RouteConflict> {
+        let next = self.continued_binding(conversation_id, &summary)?;
+        self.routes.insert(*conversation_id, next);
+        Ok(())
+    }
+
+    fn continued_binding(
+        &self,
+        conversation: &ConversationId,
+        summary: &BindingSummary,
+    ) -> Result<RouteEntry, RouteConflict> {
         let entry = self
             .routes
-            .get_mut(conversation_id)
+            .get(conversation)
             .ok_or(RouteConflict::RouteInvalid)?;
         if !entry.accepts_traffic() {
             return Err(RouteConflict::BadState);
         }
-        let continues = entry.binding_generation.checked_add(1) == Some(summary.binding_generation)
-            && summary.previous_binding_id == entry.binding_id
-            && summary.lock == entry.lock
-            && summary.conversation_id == *conversation_id;
-        if !continues {
+        if entry.binding_generation.checked_add(1) != Some(summary.binding_generation)
+            || summary.previous_binding_id != entry.binding_id
+            || summary.conversation_id != *conversation
+            || summary.lock != entry.lock
+            || summary.lineage != entry.lineage
+            || summary.incarnation != entry.incarnation
+        {
             return Err(RouteConflict::NotSuccessor);
         }
-        entry.binding_id = summary.binding_id;
-        entry.binding_generation = summary.binding_generation;
-        Ok(())
+        Ok(RouteEntry {
+            binding_id: summary.binding_id,
+            binding_generation: summary.binding_generation,
+            ..*entry
+        })
     }
 
     /// Records the finalized active-to-closing transition.
@@ -595,6 +600,9 @@ impl RouteTable {
         &mut self,
         channel_id: &ChannelInstanceId,
     ) -> Result<(), RouteConflict> {
+        if self.retired_channels.remove(channel_id) {
+            return Ok(());
+        }
         let conversation_id = *self
             .by_channel
             .get(channel_id)
@@ -679,6 +687,19 @@ impl RouteTable {
     /// entry there outranks it ([`Self::take_indexes`]), so the indexes name
     /// the newest route whatever the order of the restore.
     pub fn restore_entry(&mut self, entry: RouteEntry) {
+        if let Some(previous) = self.routes.get(&entry.conversation_id).copied()
+            && previous.target != entry.target
+        {
+            if entry.binding_generation <= previous.binding_generation {
+                return;
+            }
+            if let RouteTarget::Channel(old) = previous.target
+                && self.by_channel.get(&old) == Some(&entry.conversation_id)
+            {
+                self.by_channel.remove(&old);
+                self.retired_channels.insert(old);
+            }
+        }
         self.routes.insert(entry.conversation_id, entry);
         self.take_indexes(&entry, Indexes::ALL);
     }

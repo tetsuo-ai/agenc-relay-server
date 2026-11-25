@@ -657,6 +657,70 @@ pub fn is_binding_successor(current: &VerifiedBinding, successor: &VerifiedBindi
         && successor.route.kind == current.route.kind
 }
 
+/// Whether a finalized binding action names this exact verified package
+/// as the next binding of the same MLS group and semantic route. A new
+/// concrete channel instance or Direct nonce may be authorized by that action.
+#[must_use]
+pub fn is_same_group_binding_successor(
+    current: &VerifiedBinding,
+    next: &VerifiedBinding,
+    authorized_binding_id: &SemanticId,
+) -> bool {
+    SameGroupOrigin {
+        generation: current.generation,
+        id: &current.binding_id,
+        route: &current.route,
+        group: &current.group_id,
+        conversation: &current.conversation_id,
+        suite: current.cipher_suite,
+    }
+    .accepts(next, authorized_binding_id)
+}
+
+/// Checks a verified successor against the canonical package the relay already
+/// admitted. The earlier binding keeps its original authority across roster
+/// renewals. Its object and ID must come from the trusted stored route.
+pub fn continues_admitted_group_binding(
+    network: &SemanticId,
+    admitted: &ArcConversationBindingTbs,
+    next: &VerifiedBinding,
+    authorized_binding_id: &SemanticId,
+) -> Result<bool, E2eeError> {
+    let id = semantic_id_of(SemanticHashDomain::BindingId, admitted)?;
+    let route = verify_semantic_route(network, &admitted.semantic_route)?;
+    Ok(admitted.network_id == *network
+        && SameGroupOrigin {
+            generation: admitted.binding_generation,
+            id: &id,
+            route: &route,
+            group: admitted.group_id.as_slice(),
+            conversation: &admitted.conversation_id,
+            suite: admitted.cipher_suite,
+        }
+        .accepts(next, authorized_binding_id))
+}
+
+struct SameGroupOrigin<'a> {
+    generation: u64,
+    id: &'a SemanticId,
+    route: &'a SemanticRoute,
+    group: &'a [u8],
+    conversation: &'a SemanticId,
+    suite: u16,
+}
+
+impl SameGroupOrigin<'_> {
+    fn accepts(&self, next: &VerifiedBinding, target: &SemanticId) -> bool {
+        self.generation.checked_add(1) == Some(next.generation)
+            && next.previous_binding_id == *self.id
+            && next.binding_id == *target
+            && next.group_id.as_slice() == self.group
+            && next.conversation_id == *self.conversation
+            && next.cipher_suite == self.suite
+            && next.route == *self.route
+    }
+}
+
 /// Whether `next` opens the next semantic incarnation after a lineage
 /// closed with `close_id`.
 #[must_use]

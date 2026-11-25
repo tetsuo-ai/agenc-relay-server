@@ -377,7 +377,7 @@ fn a_verified_successor_whose_previous_binding_is_not_retained_is_discarded() ->
 }
 
 #[test]
-fn a_rebinding_of_the_same_conversation_is_not_treated_as_a_successor() -> TestResult {
+fn an_unadmitted_same_group_replacement_cannot_restore_routing() -> TestResult {
     let principal = principal(40, &ACCOUNT_A, &[DEVICE])?;
     let index = bindings_index(vec![
         (OLD_BINDING, package(&principal, OLD, 0, [0; 32])?),
@@ -385,7 +385,7 @@ fn a_rebinding_of_the_same_conversation_is_not_treated_as_a_successor() -> TestR
     ]);
     let mut state = conversations(&[(OLD, NEW_BINDING)]);
     discard_unanchored_successors(&mut state, &index, &std::collections::BTreeSet::new());
-    assert!(state.conversations.contains_key(&OLD));
+    assert!(!state.conversations.contains_key(&OLD));
     Ok(())
 }
 
@@ -706,6 +706,8 @@ fn a_vote_the_ledger_refuses_is_not_counted_as_replayed() -> TestResult {
 
 fn sequencer_rows(proofs: Vec<(ProofKeyParts, [u8; 32])>) -> SequencerRows {
     SequencerRows {
+        keys: binding::Keys::default(),
+        admissions: BTreeMap::new(),
         records: BTreeMap::new(),
         candidates: BTreeMap::new(),
         proofs,

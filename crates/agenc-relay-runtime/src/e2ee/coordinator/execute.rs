@@ -516,6 +516,7 @@ fn execute(
                 .is_some_and(|state| state.members().any(|member| member == user))
         })
     };
+    let binding_channel = |channel| binding_channel_facts(domain, user_id, channel);
     let plan_binding = |channel: ChannelInstanceId, principals: &[[u8; 24]]| {
         binding_plan(domain, user_id, channel, principals)
     };
@@ -538,6 +539,7 @@ fn execute(
         hosting: &hosting,
         attached_edges: &attached_edges,
         channel_member: &channel_member,
+        binding_channel: &binding_channel,
         plan_binding: &plan_binding,
         state_generation,
         source_view,
@@ -674,6 +676,21 @@ fn route_copy(
 
 /// The base binding plan of a channel whose member accounts are exactly
 /// the binding principals; the actor is the requesting origin's session.
+fn binding_channel_facts(
+    domain: &agenc_relay_domain::DomainState,
+    user_id: Option<UserId>,
+    channel: ChannelInstanceId,
+) -> Option<ops::BindingChannel> {
+    let state = domain.channel(channel)?;
+    Some(ops::BindingChannel {
+        name_hash: agenc_relay_e2ee::route::channel_name_hash(state.name().canonical().as_bytes())
+            .ok()?,
+        protected: state.content_policy() == agenc_relay_domain::ContentPolicy::E2eeBound,
+        owner: user_id
+            .is_some_and(|user| state.role_of(user) == Some(agenc_relay_domain::Role::Owner)),
+    })
+}
+
 fn binding_plan(
     domain: &agenc_relay_domain::DomainState,
     user_id: Option<UserId>,

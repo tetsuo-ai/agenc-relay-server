@@ -271,6 +271,16 @@ fn owned_by_in_batch(
     let bytes = key.as_bytes();
     Ok(match kind {
         ROUTE_ROW_KIND => route_owned(key, body, staged)?,
+        agenc_relay_storage::e2ee_records::binding_admission::KIND => {
+            let row = agenc_relay_storage::e2ee_records::binding_admission::BindingAdmissionRow::decode_keyed(key, body).map_err(invalid)?;
+            [
+                row.previous_binding_object,
+                row.binding_object,
+                row.terminal_record_object,
+            ]
+            .map(|id| owned(id, RetentionClass::SecurityProof, Some(row.conversation_id)))
+            .to_vec()
+        }
         CLAIM_ROW_KIND => claim_owned(body)?,
         SEQUENCER_ROW_KIND => sequencer_owned(key, body)?,
         DIRECTORY_ROW_KIND => directory_owned(body)?,

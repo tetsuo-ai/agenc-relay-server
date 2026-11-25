@@ -85,7 +85,11 @@ fn still_held(
 /// The `route_state_hidden` copy that removes `conversation` from `edge`,
 /// naming the route object the edge last held; `None` for a conversation
 /// the coordinator no longer retains, whose standing is dropped silently.
-fn hidden_copy(exec: &Exec<'_>, edge: ServerId, conversation: [u8; 32]) -> Option<EventContent> {
+pub(super) fn hidden_copy(
+    exec: &Exec<'_>,
+    edge: ServerId,
+    conversation: [u8; 32],
+) -> Option<EventContent> {
     let state = &exec.coordinator.state;
     let known = state.conversations.get(&conversation)?;
     let sequence = state

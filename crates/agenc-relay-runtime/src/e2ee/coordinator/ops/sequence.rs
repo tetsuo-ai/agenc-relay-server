@@ -63,7 +63,9 @@ fn wire(kind: ArcWireObjectKind, body: Vec<u8>) -> Result<Vec<u8>, Fail> {
         .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))
 }
 
-pub(super) fn record_bytes(record: &ArcSequencerRecord) -> Result<Vec<u8>, Fail> {
+pub(in crate::e2ee::coordinator) fn record_bytes(
+    record: &ArcSequencerRecord,
+) -> Result<Vec<u8>, Fail> {
     let body = record
         .encode()
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
@@ -867,6 +869,8 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         ));
     }
     let (policy, rosters) = council(exec, &conversation_id, &core.old_policy_id)?;
+    let binding_target =
+        super::binding_change::finalized_target(exec, &request.proof, &policy, &rosters)?;
     let resulting_policy_id = authorization.resulting_policy_id;
     if resulting_policy_id != core.old_policy_id {
         // A policy change installs exactly the retained successor of the
@@ -998,6 +1002,10 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         finalization_id,
         certificate_id,
     ));
+    if reinit.is_some() {
+        super::super::direct_renewal::forget(exec, &mut outcome, conversation_id)?;
+        super::super::reservations::retire_predecessor(exec, &mut outcome, pinned.binding)?;
+    }
     outcome.security_mutation = true;
     outcome.writes.extend(refresh.writes);
     outcome.writes.extend(finalize_rows);
@@ -1055,6 +1063,11 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             state.current_policy_id = resulting_policy_id;
             state.route_object_id = route_object_id;
             state.reinit = reinit.flatten();
+            state.pending_binding = binding_target.map(|target| super::super::BindingFinality {
+                target,
+                sequence: position.route_sequence,
+                record_object: record_id,
+            });
             if let Some(pin) = next_pin {
                 state.sequencer_credential_id = pin;
                 state.blocked_credential_id = None;

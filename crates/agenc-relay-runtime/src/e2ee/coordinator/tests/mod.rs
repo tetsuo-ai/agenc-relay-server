@@ -132,6 +132,10 @@ struct Harness {
     devices: Vec<u8>,
     /// Whether the base profile counts the origin as a member of every channel.
     channel_member: bool,
+    /// Base directory facts for coordinator tests that exercise an actual channel handoff.
+    binding_channels: Vec<(ChannelInstanceId, super::ops::BindingChannel)>,
+    /// A peer that no longer holds one concrete channel instance.
+    missing_host: Option<(ServerId, ChannelInstanceId)>,
     /// The successor the last finalized ReInit Commit authorized; attempts
     /// carry its target.
     reinit: Option<sequence::reinit_successor::Successor>,
@@ -222,6 +226,8 @@ impl Harness {
             writes: Vec::new(),
             devices: devices.to_vec(),
             channel_member: true,
+            binding_channels: Vec::new(),
+            missing_host: None,
             reinit: None,
         })
     }
@@ -272,6 +278,8 @@ impl Harness {
             origin.next_sequence = self.sequence;
             origin.device = device;
         }
+        fresh.binding_channels.clone_from(&self.binding_channels);
+        fresh.missing_host = self.missing_host;
         Ok(fresh)
     }
 
@@ -361,7 +369,7 @@ impl Harness {
             .ok_or("the origin is registered")?;
         let home = ServerId::from_bytes(HOME);
         let peers = [home, ServerId::from_bytes([12; 16])];
-        let holds = |_: ServerId, _: ChannelInstanceId| true;
+        let holds = |server, instance| self.missing_host != Some((server, instance));
         let hosting = |_: ChannelInstanceId| vec![home];
         let attached = |_: &[u8; 32]| vec![home];
         let channel_member = self.channel_member;
@@ -389,6 +397,12 @@ impl Harness {
             hosting: &hosting,
             attached_edges: &attached,
             channel_member: &member,
+            binding_channel: &|id| {
+                self.binding_channels
+                    .iter()
+                    .find(|(instance, _)| *instance == id)
+                    .map(|(_, facts)| *facts)
+            },
             plan_binding: &plan_binding,
             state_generation: STATE_GENERATION,
             source_view: Vec::new(),

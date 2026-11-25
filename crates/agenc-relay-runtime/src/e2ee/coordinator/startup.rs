@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+mod binding;
 mod objects;
 
 #[cfg(test)]
@@ -168,6 +169,8 @@ pub(super) struct Restore {
     backing: Option<crate::budget::BackingReservationPort>,
     objects: objects::Restore,
     reservations: super::reservations::Rows,
+    bindings: binding::Rows,
+    renewals: super::direct_renewal::Nonces,
     gates: super::recovery_gates::Gates,
     routes: BTreeMap<[u8; 32], RouteRow>,
     records: BTreeMap<([u8; 32], u64), RecordRow>,
@@ -228,12 +231,7 @@ impl Restore {
         value: &PersistentRecordValue,
         backing: Option<&crate::budget::BackingReservationPort>,
     ) {
-        if self.objects.selected() {
-            self.objects.poison();
-            return;
-        }
-        if wrong_package_row_kind(key, value.record_kind()) {
-            self.claim_fault = Some(super::CompanionFault::Storage);
+        if self.state_row_handled(key, value, backing) {
             return;
         }
         self.owners.admit_row(key, value);
@@ -299,6 +297,25 @@ impl Restore {
         }
     }
 
+    /// Classify header faults and the two typed binding record prefixes before
+    /// the general state collector indexes an owner or a decoded body.
+    fn state_row_handled(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+        backing: Option<&crate::budget::BackingReservationPort>,
+    ) -> bool {
+        if self.objects.selected() {
+            self.objects.poison();
+            return true;
+        }
+        if wrong_package_row_kind(key, value.record_kind()) {
+            self.claim_fault = Some(super::CompanionFault::Storage);
+            return true;
+        }
+        self.admit_binding_row(key, value, backing)
+    }
+
     fn admit_replay(&mut self, key: &StoredKey, body: &[u8]) {
         use agenc_relay_storage::e2ee_records::prefix;
         if key.as_bytes().starts_with(prefix::ORIGIN_SEQUENCE) {
@@ -310,6 +327,33 @@ impl Restore {
         } else {
             push(&mut self.replays, key, ReplayRow::decode(body));
         }
+    }
+
+    fn admit_binding_row(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+        backing: Option<&crate::budget::BackingReservationPort>,
+    ) -> bool {
+        use agenc_relay_storage::e2ee_records::{binding_admission, direct_renewal};
+        let kind = value.record_kind();
+        let bytes = key.as_bytes();
+        if bytes.starts_with(binding_admission::PREFIX) != (kind == binding_admission::KIND)
+            || bytes.starts_with(direct_renewal::PREFIX) != (kind == direct_renewal::KIND)
+        {
+            self.objects.poison();
+            return true;
+        }
+        let result = match kind {
+            binding_admission::KIND => self.bindings.admit(key, value.body(), backing),
+            direct_renewal::KIND => self.renewals.admit(key, value.body(), backing),
+            _ => return false,
+        };
+        self.owners.admit_row(key, value);
+        if result.is_err() {
+            self.objects.poison();
+        }
+        true
     }
 
     /// The collector's durable continuation; a malformed row poisons the
@@ -731,6 +775,7 @@ pub(super) fn rebuild(
             .map(super::delivery_owner::LocalIdentity::recovery_epoch),
     )?;
     let network_id = coordinator.network_id;
+    let active = coordinator.key_set().cloned();
     let state = &mut coordinator.state;
     restore.objects.apply(state)?;
     restore_packages(
@@ -746,34 +791,73 @@ pub(super) fn rebuild(
     restore_replays(state, restore.replays, restore.backing.as_ref())?;
     restore_origin_sequences(state, restore.origin_sequences);
     let index = ObjectIndex::build(state);
+    let admissions = restore.bindings.restore(state, &restore.routes)?;
     let rows = SequencerRows {
+        keys: binding::Keys {
+            active,
+            history: restore.history,
+        },
+        admissions,
         records: restore.records,
         candidates: restore.candidates,
         proofs: restore.proofs,
         policies: restore.policies,
         memberships: restore.memberships,
     };
-    for (conversation_id, row) in restore.routes {
-        restore_route(state, &network_id, &index, &rows, conversation_id, &row);
-    }
-    restore_successors(state, &network_id, &index)?;
+    restore_routes(state, &network_id, &index, &rows, restore.routes)?;
+    restore.renewals.validate(state, &network_id)?;
+    state.renewals = restore.renewals;
     state.reservations = restore.reservations.finish(state, network_id)?;
     rows.restore_terminal_certificates(state, &network_id)?;
     restore.gates.install(state)?;
     coordinator.owner_reconstruction = restore.owners.for_network(network_id).finish(state);
     state.object_expiry = restore.object_expiry.unwrap_or_default();
     state.recovery = restore.recovery;
-    coordinator.signer_history = restore.history.clone();
+    coordinator.signer_history = rows.keys.history.clone();
     // A coordinator without an installed key set (no signer configured)
     // has no signer ownership to reconcile.
     coordinator.signer_startup = coordinator.key_set().is_some().then(|| {
         Box::new(signer_proposal(
             coordinator,
             restore.key_set,
-            restore.history,
+            rows.keys.history,
         ))
     });
     restore.delivery.apply(coordinator)
+}
+
+fn restore_routes(
+    state: &mut CompanionState,
+    network_id: &[u8; 32],
+    index: &ObjectIndex,
+    rows: &SequencerRows,
+    routes: BTreeMap<[u8; 32], RouteRow>,
+) -> Result<(), super::CompanionFault> {
+    for (conversation_id, row) in routes {
+        let must_restore = rows.admissions.contains_key(&conversation_id)
+            || binding::requires_handoff(state, index, rows, conversation_id, &row);
+        let restored = restore_route(
+            state,
+            network_id,
+            index,
+            rows,
+            conversation_id,
+            &row,
+            must_restore,
+        );
+        if restored.is_none() && must_restore {
+            return Err(super::CompanionFault::Storage);
+        }
+    }
+    restore_successors(state, network_id, index)?;
+    if rows
+        .admissions
+        .keys()
+        .any(|id| !state.conversations.contains_key(id))
+    {
+        return Err(super::CompanionFault::Storage);
+    }
+    Ok(())
 }
 
 /// What the startup signer reconciliation compares: the durable set and
@@ -893,8 +977,7 @@ fn discard_unanchored_successors(
         .conversations
         .iter()
         .filter_map(|(id, value)| {
-            let (_, package) = index.bindings.get(&value.binding)?;
-            let tbs = &package.binding.tbs;
+            let tbs = binding::anchor(state, index, value)?;
             if tbs.binding_generation == 0 {
                 return None;
             }
@@ -908,6 +991,7 @@ fn discard_unanchored_successors(
     successors.sort_by_key(|(generation, _, _)| *generation);
     for (_, id, predecessor) in successors {
         if predecessor == Some(id) {
+            discard_route(state, id);
             continue;
         }
         // A successor of a retired predecessor, bound under the previous
@@ -982,7 +1066,14 @@ fn restore_successor(
     let package = reinit_install::package(carried.context(), &attempt.key_package_plan).ok()?;
     let bytes =
         reinit_install::wire_object(ArcWireObjectKind::ConversationBinding, &package).ok()?;
-    let installed = state.conversations.get(&new)?.binding_object_id;
+    let successor = state.conversations.get(&new)?;
+    let first_change = successor
+        .binding_admissions
+        .first_key_value()
+        .map(|(_, row)| *row);
+    let installed = first_change.map_or(successor.binding_object_id, |row| {
+        row.previous_binding_object
+    });
     let log = state.logs.get(&new)?;
     if installed != *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes()
         || log.accepted_epoch() < 1
@@ -996,16 +1087,28 @@ fn restore_successor(
     let context_digest =
         agenc_relay_e2ee::ids::semantic_id_of(SemanticHashDomain::ContextHash, carried.context())
             .ok()?;
-    state
-        .routes
-        .select_restored_successor(ConversationId(old), ConversationId(new))
-        .ok()?;
+    if first_change.is_some() {
+        let verified =
+            agenc_relay_e2ee::route::verify_replacement_binding(network_id, &package).ok()?;
+        let anchor = super::ops::route::binding_summary(&verified, network_id).ok()?;
+        state
+            .routes
+            .select_continued_successor(ConversationId(old), &anchor)
+            .ok()?;
+    } else {
+        state
+            .routes
+            .select_restored_successor(ConversationId(old), ConversationId(new))
+            .ok()?;
+    }
     let lifecycle = state.lifecycles.get(&new)?;
     state.lifecycles.insert(
         new,
         Lifecycle::restore(lifecycle.gate(), false, lifecycle.removal_pending()),
     );
-    state.conversations.get_mut(&new)?.context_digest = context_digest;
+    if first_change.is_none() {
+        state.conversations.get_mut(&new)?.context_digest = context_digest;
+    }
     Some(())
 }
 
@@ -1675,6 +1778,8 @@ fn restore_replays(
 
 /// The sequencer rows of every conversation.
 struct SequencerRows {
+    keys: binding::Keys,
+    admissions: BTreeMap<[u8; 32], binding::Admissions>,
     records: BTreeMap<([u8; 32], u64), RecordRow>,
     candidates: BTreeMap<([u8; 32], u64), CandidateRow>,
     proofs: Vec<(ProofKeyParts, [u8; 32])>,
@@ -2125,7 +2230,8 @@ fn current_policy(
 /// still names is retained, and its absence refuses the route.
 fn restore_validation_time(
     state: &CompanionState,
-    expected: RouteExpectation,
+    mut expected: RouteExpectation,
+    path: &binding::Path,
     records: &BTreeMap<u64, &RecordRow>,
     slots: &BTreeMap<([u8; 32], u64), CandidateRow>,
 ) -> Option<u64> {
@@ -2163,6 +2269,7 @@ fn restore_validation_time(
             ArcWireObject::decode_kind(bytes, Some(ArcWireObjectKind::CommitMls), &mut budget)
                 .ok()?;
         let mut budget = DecodeBudget::new(MAX_LIVE_OBJECT, 1 << 16);
+        expected.route_binding = path.route_at(*sequence);
         let envelope = verify_commit_object(
             &object,
             &expected,
@@ -2308,6 +2415,13 @@ fn policy_rosters(
                 approval.signer_device_certificate_id,
             ));
     }
+    with_certificates(historical, required)
+}
+
+fn with_certificates(
+    historical: &[(VerifiedRoot, VerifiedRoster)],
+    required: CertificateReferences,
+) -> Option<PrincipalRosters> {
     let mut rosters = PrincipalRosters::new();
     for (fingerprint, certificates) in required {
         let (root, roster) = historical.iter().find(|(root, roster)| {
@@ -2617,6 +2731,7 @@ fn restore_route(
     rows: &SequencerRows,
     conversation_id: [u8; 32],
     row: &RouteRow,
+    must_restore: bool,
 ) -> Option<()> {
     let route: ArcFederationRouteState = decode_body(
         &row.route_state,
@@ -2624,6 +2739,17 @@ fn restore_route(
         MAX_FEDERATION_CONTROL_OBJECT,
     )?;
     let (binding_object_id, package) = index.bindings.get(&row.binding_id)?;
+    if must_restore
+        && !binding::projection_matches(
+            network_id,
+            conversation_id,
+            row,
+            &route,
+            &package.binding.tbs,
+        )
+    {
+        return None;
+    }
     let target = route_target(&route)?;
     let recovery = if row.recovery_gate {
         (RecoveryState::Pending, RecoveryGate::Pending)
@@ -2662,6 +2788,21 @@ fn restore_route(
         .any(|record| activates_bootstrap(state, record));
     let lifecycle = Lifecycle::restore(recovery.1, !activated, false);
     let direct = matches!(target, RouteTarget::Direct(_));
+    let admissions = rows.admissions.get(&conversation_id);
+    let path = binding::Path::load(
+        state,
+        network_id,
+        *binding_object_id,
+        conversation_id,
+        admissions,
+    )?;
+    if index
+        .bindings
+        .get(&path.previous)
+        .is_some_and(|(_, previous)| previous.binding.tbs.conversation_id == conversation_id)
+    {
+        return None;
+    }
     let last_validation_time = restore_validation_time(
         state,
         RouteExpectation {
@@ -2670,10 +2811,16 @@ fn restore_route(
             route_binding: route.route_binding,
             group_id: tbs.group_id.as_slice().try_into().ok()?,
         },
+        &path,
         &records,
         &rows.candidates,
     )?;
     let mut conversation = ConversationState {
+        binding_admissions: admissions.cloned().unwrap_or_default(),
+        binding_chain_bytes: path.bytes,
+        context_digest: admissions
+            .and_then(|m| m.last_key_value())
+            .map_or([0; 32], |(_, row)| row.context_digest),
         binding_object_id: *binding_object_id,
         binding: row.binding_id,
         context_core_id: tbs.context_core_id,
@@ -2715,6 +2862,17 @@ fn restore_route(
         &mut conversation,
         conversation_id,
     );
+    if must_restore {
+        binding::restore_finality(
+            state,
+            &rows.keys,
+            &records,
+            &path,
+            &historical,
+            (route.finalized_epoch, route.accepted_state_id),
+            &mut conversation,
+        )?;
+    }
     super::membership_restore::restore(
         &historical,
         network_id,
@@ -2739,6 +2897,7 @@ fn restore_route(
         .collect();
     fill_proofs(&mut conversation, &proofs);
     super::membership_restore::restore_signers(&state.objects, &mut conversation);
+    path.restore_guards(&mut state.routes)?;
     state.routes.restore_entry(entry);
     state.logs.insert(conversation_id, log);
     state.lifecycles.insert(conversation_id, lifecycle);

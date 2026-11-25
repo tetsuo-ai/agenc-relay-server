@@ -11,6 +11,7 @@
 mod earlier_stores;
 mod reserved_pair;
 mod row_mismatch;
+mod same_group;
 
 use agenc_relay_domain::e2ee::{ConversationId, DirectPair, RouteLifecycle};
 use agenc_relay_e2ee::ids::conversation_id;
@@ -247,6 +248,46 @@ fn reserve_direct(
     let reserved = ArcReservation::decode_exact(object.body(), &mut budget)?;
     let nonce = reserved.tbs.conversation_nonce.as_slice().try_into()?;
     Ok(Ok((reservation, nonce)))
+}
+
+/// An operational group's creator can prepare its next binding. A grant neither
+/// changes the current binding nor permits a second outstanding grant.
+fn assert_migration_grant_preserves_pair(harness: &mut Harness, peer: &[u8; 24]) -> TestResult {
+    let pair = DirectPair::new(
+        AccountId::parse_wire_bytes(&harness.account)?,
+        AccountId::parse_wire_bytes(peer)?,
+    )?;
+    let old = *harness
+        .coordinator
+        .state
+        .routes
+        .direct_route(&pair)
+        .ok_or("missing active pair")?;
+    let (grant, _) = ok_reservation(reserve_direct(harness, peer)?)?;
+    assert_eq!(
+        harness.coordinator.state.routes.direct_route(&pair),
+        Some(&old)
+    );
+    assert_eq!(
+        harness
+            .coordinator
+            .state
+            .reservations
+            .for_predecessor(&old.binding_id),
+        Some(grant)
+    );
+    assert_eq!(
+        refusal(reserve_direct(harness, peer)?),
+        Some(E2eeReplyCode::GroupConflict)
+    );
+    assert!(
+        !harness
+            .coordinator
+            .state
+            .routes
+            .direct_plaintext_allowed(&pair)
+    );
+    Ok(())
 }
 
 /// Binds `group` to `reservation`.
@@ -719,10 +760,7 @@ fn a_closed_direct_pair_is_reserved_and_bound_again() -> TestResult {
     bind_and_publish(&mut harness, reservation, &first)?;
     operate(&mut harness, first.conversation, None)?;
     // The live pair, and the closing one, take no other reservation.
-    assert_eq!(
-        refusal(reserve_direct(&mut harness, &peer_account)?),
-        Some(E2eeReplyCode::GroupConflict)
-    );
+    assert_migration_grant_preserves_pair(&mut harness, &peer_account)?;
     let close_id = close(&mut harness, first.conversation, 2)?;
     let closed = route_of(&harness, first.conversation)?;
     assert!(
@@ -764,10 +802,7 @@ fn a_closed_direct_pair_is_reserved_and_bound_again() -> TestResult {
     ));
     operate(&mut harness, next.conversation, None)?;
     // A live next incarnation keeps the pair.
-    assert_eq!(
-        refusal(reserve_direct(&mut harness, &peer_account)?),
-        Some(E2eeReplyCode::GroupConflict)
-    );
+    assert_migration_grant_preserves_pair(&mut harness, &peer_account)?;
     // A restart restores both incarnations and indexes the live one.
     let mut harness = harness.reloaded()?;
     assert_eq!(route_of(&harness, next.conversation)?, second);
@@ -864,9 +899,6 @@ async fn a_recreated_direct_pair_restarts_through_the_sealed_store() -> TestResu
         Some(&live)
     );
     traffic(&mut restarted, next.conversation, None, 2)?;
-    assert_eq!(
-        refusal(reserve_direct(&mut restarted, &peer_account)?),
-        Some(E2eeReplyCode::GroupConflict)
-    );
+    assert_migration_grant_preserves_pair(&mut restarted, &peer_account)?;
     Ok(())
 }

@@ -14,6 +14,8 @@
 //! | --- | ---: | --- | --- |
 //! | `recovery/v1/` | 1 | conversation ID | [`crate::E2eeRecoveryGate`] |
 //! | `route/v1/` | 2 | conversation ID | [`RouteRow`] |
+//! | `direct-binding-renewal/v1/` | 25 | conversation ID | [`direct_renewal::DirectRenewal`] |
+//! | `binding-admission/v1/` | 24 | conversation ID, binding generation | [`binding_admission::BindingAdmissionRow`] |
 //! | `lock/v1/` | 3 | semantic route lock ID | [`ClaimRow::Lock`] |
 //! | `reservation/v1/` | 3 | reservation ID | [`ClaimRow::Reservation`] |
 //! | `record/v1/` | 4 | conversation ID, route sequence | [`SequencerRow::Record`] |
@@ -46,7 +48,9 @@ use crate::schema::{MAX_STORED_KEY_BYTES, StoredKey, TableId};
 use crate::{MAX_PROTOCOL_BODY_BYTES, ReadPlan, StorageError};
 
 pub mod barrier;
+pub mod binding_admission;
 pub mod delivery_recovery;
+pub mod direct_renewal;
 pub mod expiry;
 pub use expiry::{EXPIRY_PROGRESS_ROW_KIND, ObjectExpiryProgressRow};
 pub mod mailbox_sequence;
@@ -187,7 +191,9 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 43] = [
+const PREFIX_KINDS: [(&[u8], u16); 45] = [
+    (direct_renewal::PREFIX, direct_renewal::KIND),
+    (binding_admission::PREFIX, binding_admission::KIND),
     (prefix::RECOVERY_SUBMISSION, RECOVERY_SUBMISSION_ROW_KIND),
     (prefix::RECOVERY_RECORD, RECOVERY_RECORD_ROW_KIND),
     (prefix::RECOVERY, RECOVERY_GATE_KIND),
@@ -671,6 +677,8 @@ pub enum ClaimRow {
         kind: u16,
         /// Semantic route lock identifier.
         lock_id: [u8; HASH_BYTES],
+        /// An already-bound group can reserve a target only for this accepted binding.
+        previous_binding: Option<[u8; HASH_BYTES]>,
         /// Route binding.
         route_binding: [u8; HASH_BYTES],
         /// The retained reservation object identifier.
@@ -682,6 +690,7 @@ pub enum ClaimRow {
 
 const LOCK_ARM: u16 = 1;
 const RESERVATION_ARM: u16 = 2;
+const BINDING_RESERVATION_ARM: u16 = 3;
 
 impl ClaimRow {
     /// The `lock/v1/<lock-id>` key.
@@ -727,8 +736,13 @@ impl ClaimRow {
                 route_binding,
                 reservation_object_id,
                 expires_at,
+                previous_binding,
             } => {
-                encoder.put_u16(RESERVATION_ARM)?;
+                encoder.put_u16(if previous_binding.is_some() {
+                    BINDING_RESERVATION_ARM
+                } else {
+                    RESERVATION_ARM
+                })?;
                 encoder.put_fixed(owner_account_digest)?;
                 encoder.put_fixed(owner_device_id)?;
                 encoder.put_u16(*kind)?;
@@ -736,6 +750,9 @@ impl ClaimRow {
                 encoder.put_fixed(route_binding)?;
                 encoder.put_fixed(reservation_object_id)?;
                 encoder.put_u64(*expires_at)?;
+                if let Some(id) = previous_binding {
+                    encoder.put_fixed(id)?;
+                }
             }
         }
         wrap(CLAIM_ROW_KIND, encoder.finish())
@@ -751,7 +768,7 @@ impl ClaimRow {
                 binding_id: decoder.array()?,
                 incarnation: decoder.u64()?,
             },
-            RESERVATION_ARM => Self::Reservation {
+            arm @ (RESERVATION_ARM | BINDING_RESERVATION_ARM) => Self::Reservation {
                 owner_account_digest: decoder.array()?,
                 owner_device_id: decoder.array()?,
                 kind: decoder.u16()?,
@@ -759,6 +776,11 @@ impl ClaimRow {
                 route_binding: decoder.array()?,
                 reservation_object_id: decoder.array()?,
                 expires_at: decoder.u64()?,
+                previous_binding: if arm == BINDING_RESERVATION_ARM {
+                    Some(decoder.array()?)
+                } else {
+                    None
+                },
             },
             _ => return Err(StorageError::InvalidEncoding),
         };
@@ -2887,6 +2909,8 @@ impl WitnessRow {
 pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageError> {
     match record_kind {
         ROUTE_ROW_KIND => RouteRow::decode(body).map(|_| ()),
+        binding_admission::KIND => binding_admission::BindingAdmissionRow::decode(body).map(|_| ()),
+        direct_renewal::KIND => direct_renewal::DirectRenewal::decode(body).map(|_| ()),
         CLAIM_ROW_KIND => ClaimRow::decode(body).map(|_| ()),
         SEQUENCER_ROW_KIND => SequencerRow::decode(body).map(|_| ()),
         DIRECTORY_ROW_KIND => DirectoryRow::decode(body).map(|_| ()),
@@ -3030,6 +3054,30 @@ pub mod fixtures {
     }
 
     /// Package, attach, mailbox, replay, delivery, key set, and barrier bodies.
+    fn binding_admission_body(hash: [u8; HASH_BYTES]) -> Result<Vec<u8>, StorageError> {
+        binding_admission::BindingAdmissionRow {
+            conversation_id: hash,
+            generation: 1,
+            route_sequence: 2,
+            previous_binding_object: [1; HASH_BYTES],
+            binding_object: [2; HASH_BYTES],
+            terminal_record_object: hash,
+            context_digest: hash,
+            request_object: hash,
+        }
+        .encode()
+    }
+
+    fn direct_renewal_body(hash: [u8; HASH_BYTES]) -> Result<Vec<u8>, StorageError> {
+        direct_renewal::DirectRenewal {
+            conversation: hash,
+            previous: hash,
+            nonce: hash,
+            route: hash,
+        }
+        .encode()
+    }
+
     fn operational_body(kind: u16, seed: u8) -> Result<Vec<u8>, StorageError> {
         let hash = [seed; HASH_BYTES];
         let id = [seed; ID_BYTES];
@@ -3087,6 +3135,8 @@ pub mod fixtures {
             }))
             .encode(),
             WITNESS_ROW_KIND => witness_body(seed),
+            binding_admission::KIND => binding_admission_body(hash),
+            direct_renewal::KIND => direct_renewal_body(hash),
             EXPIRY_PROGRESS_ROW_KIND => ObjectExpiryProgressRow {
                 cursor: Some([seed; HASH_BYTES]),
                 passes: u64::from(seed),

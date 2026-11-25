@@ -120,9 +120,6 @@ fn an_earlier_live_direct_pair_keeps_its_pair_and_traffic() -> TestResult {
     let mut harness = restarted("live-direct")?;
     let live = only_route(&harness, true)?;
     let (_, peer_account) = stored_peer()?;
-    assert_eq!(
-        refusal(reserve_direct(&mut harness, &peer_account)?),
-        Some(E2eeReplyCode::GroupConflict)
-    );
+    assert_migration_grant_preserves_pair(&mut harness, &peer_account)?;
     traffic(&mut harness, live.conversation_id.0, None, 2)
 }

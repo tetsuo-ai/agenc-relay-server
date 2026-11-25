@@ -58,6 +58,15 @@ pub(super) fn decode_e2ee_restore(
                 return Err(StorageError::StaleState);
             }
         }
+        crate::e2ee_records::direct_renewal::KIND => {
+            crate::e2ee_records::direct_renewal::DirectRenewal::decode_keyed(key, state.body())?;
+        }
+        crate::e2ee_records::binding_admission::KIND => {
+            crate::e2ee_records::binding_admission::BindingAdmissionRow::decode_keyed(
+                key,
+                state.body(),
+            )?;
+        }
         crate::e2ee_records::MAILBOX_SEQUENCE_ROW_KIND => {
             crate::e2ee_records::MailboxSequenceRow::decode_keyed(key, state.body())?;
         }

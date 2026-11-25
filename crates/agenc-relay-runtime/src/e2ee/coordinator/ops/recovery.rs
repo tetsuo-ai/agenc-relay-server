@@ -108,6 +108,15 @@ fn direct_mutation(exec: &Exec<'_>) -> Result<(), Fail> {
         }
         Ok(conversation)
     })?;
+    if exec
+        .coordinator
+        .state
+        .conversations
+        .get(&conversation)
+        .is_some_and(|state| state.pending_binding.is_some())
+    {
+        return Err(Fail::with(E2eeReplyCode::FinalityRequired, &conversation));
+    }
     mutation(exec, &conversation)
 }
 

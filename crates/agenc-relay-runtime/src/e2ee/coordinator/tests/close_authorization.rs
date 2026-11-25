@@ -184,6 +184,20 @@ pub(in crate::e2ee::coordinator::tests) fn transition_bytes(
     })
 }
 
+/// Sign the old council's finality votes and controller authorization for the
+/// exact semantic successor binding.
+pub(in crate::e2ee::coordinator::tests) fn binding_bytes(
+    source: &Harness,
+    opened: &Opened,
+    target: [u8; 32],
+) -> TestResult<(Vec<u8>, [u8; 32])> {
+    finalization_with(source, opened, &[DEVICE], |authorization| {
+        authorization.authorization_rule = ArcCommitAuthorizationRule::ControlledTransition;
+        authorization.action_bits = action_bits::BINDING;
+        authorization.transition_target_digest = target;
+    })
+}
+
 /// The finalization request of `opened` with the finality votes of
 /// `voters`, after `patch` set the authorization's rule and action bits.
 fn finalization_with(
