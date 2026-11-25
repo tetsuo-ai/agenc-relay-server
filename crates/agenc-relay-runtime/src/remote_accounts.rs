@@ -3,10 +3,12 @@
 //! speaks the exact carrier grammar, and the captured frames become the
 //! federated result the edge relays.
 
+use agenc_relay_client_wire::InitialRootCarrier;
 use agenc_relay_client_wire::{
     FramedLine, ParsedMessage, WireMessage, decode_account_payload, decode_sasl_payload,
     encode_account_payload, encode_sasl_payload, parse_message,
 };
+use agenc_relay_federation_wire::InitialRootOperation;
 use agenc_relay_types::{AccountId, FederationOpcode};
 
 use crate::account_service::{AccountServiceCoordinator, CarrierCompletion, CarrierRoute};
@@ -204,7 +206,10 @@ pub(crate) fn completion(
     let (arm, replies) = if completion.close {
         (busy(), Vec::new())
     } else {
-        outcome(context, accounts, generation, opcode, &lines)
+        match federation.remote_root_operation(generation) {
+            Some(operation) => root_outcome(operation, &lines),
+            None => outcome(context, accounts, generation, opcode, &lines),
+        }
     };
     let _answered = federation.finish_remote_carrier(context, generation, arm, replies);
     if completion.close {
@@ -237,6 +242,17 @@ fn carrier(
 ) {
     let carrier_generation = in_flight.carrier_generation;
     let bound = in_flight.registered_session();
+    let extension = in_flight.root_operation();
+    let family = match extension {
+        Some(InitialRootOperation::ClaimedCreateStart) => Some(InitialRootCarrier::GuardedCreation),
+        Some(InitialRootOperation::Claim) => Some(InitialRootCarrier::Claim),
+        None if opcode == FederationOpcode::AccountCreateFinish
+            && federation.guarded_start_on(generation, in_flight.link()) =>
+        {
+            Some(InitialRootCarrier::GuardedCreation)
+        }
+        None => None,
+    };
     if federation
         .remote_carrier_started(context, generation, in_flight)
         .is_err()
@@ -275,7 +291,7 @@ fn carrier(
             federation.finish_remote_carrier(context, generation, not_allowed(), Vec::new());
         return;
     }
-    let Some(lines) = carrier_lines(federation, generation, opcode, envelope) else {
+    let Some(lines) = carrier_lines(federation, generation, opcode, family, envelope) else {
         let _answered = federation.finish_remote_carrier(context, generation, busy(), Vec::new());
         return;
     };
@@ -292,6 +308,14 @@ fn carrier(
                 // negotiated state and renders any failure line itself.
                 accounts.route_sasl(context, generation, carrier_generation, "*", false, message)
             }
+            _ if let Some(family) = family => accounts.route_account(
+                context,
+                generation,
+                carrier_generation,
+                "*",
+                family,
+                message,
+            ),
             _ => accounts.route_account(
                 context,
                 generation,
@@ -328,7 +352,10 @@ fn carrier(
         .remote_carrier_sink(generation)
         .map(|sink| sink.take_lines())
         .unwrap_or_default();
-    let (arm, replies) = outcome(context, accounts, generation, opcode, &lines);
+    let (arm, replies) = match extension {
+        Some(operation) => root_outcome(operation, &lines),
+        None => outcome(context, accounts, generation, opcode, &lines),
+    };
     let _answered = federation.finish_remote_carrier(context, generation, arm, replies);
 }
 
@@ -376,6 +403,7 @@ fn carrier_lines(
     federation: &mut FederationCoordinator,
     generation: ConnectionGeneration,
     opcode: FederationOpcode,
+    family: Option<InitialRootCarrier>,
     envelope: &[u8],
 ) -> Option<Vec<String>> {
     let mut lines = Vec::new();
@@ -396,7 +424,9 @@ fn carrier_lines(
         | FederationOpcode::AccountCreateFinish
         | FederationOpcode::CredentialChangeStart
         | FederationOpcode::CredentialChangeFinish => {
-            let command = if matches!(
+            let command = if let Some(owner) = family {
+                owner.command()
+            } else if matches!(
                 opcode,
                 FederationOpcode::CredentialChangeStart | FederationOpcode::CredentialChangeFinish
             ) {
@@ -412,6 +442,15 @@ fn carrier_lines(
             } else {
                 "FINISH"
             };
+            let phase = match family {
+                Some(InitialRootCarrier::Claim) => "CLAIM",
+                Some(InitialRootCarrier::GuardedCreation)
+                    if opcode == FederationOpcode::AccountCreateStart =>
+                {
+                    "CLAIMSTART"
+                }
+                _ => phase,
+            };
             lines.push(format!("{command} {phase} {ENVELOPE_LENGTH_TOKEN}"));
             let encoded = encode_account_payload(envelope);
             for chunk in encoded.as_bytes().chunks(CHUNK_CHARACTERS) {
@@ -425,6 +464,41 @@ fn carrier_lines(
         _ => return None,
     }
     Some(lines)
+}
+
+fn root_outcome(
+    operation: InitialRootOperation,
+    lines: &[String],
+) -> (ResultArm, Vec<WireMessage>) {
+    let command = match operation {
+        InitialRootOperation::ClaimedCreateStart => "ACCTCREATE",
+        InitialRootOperation::Claim => "ACCTROOT",
+    };
+    let mut encoded = String::new();
+    for line in lines {
+        if let Some((name, fields)) = captured_parts(line)
+            && name == command
+            && let [verb, data] = fields.as_slice()
+            && verb == "DATA"
+        {
+            if encoded.len().saturating_add(data.len())
+                > agenc_relay_auth::ACCOUNT_SERVICE_RESPONSE_BYTES.div_ceil(3) * 4
+            {
+                return (not_allowed(), Vec::new());
+            }
+            encoded.push_str(data);
+        }
+    }
+    let Some(response) = decode_account_payload(&encoded) else {
+        return (not_allowed(), Vec::new());
+    };
+    if response.len() != agenc_relay_auth::ACCOUNT_SERVICE_RESPONSE_BYTES {
+        return (not_allowed(), Vec::new());
+    }
+    (
+        ResultArm::InitialRoot(operation, response.into_boxed_slice()),
+        Vec::new(),
+    )
 }
 
 /// The result of one finished remote carrier, from the frames the account

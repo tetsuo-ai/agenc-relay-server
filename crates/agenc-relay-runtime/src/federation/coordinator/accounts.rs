@@ -137,6 +137,8 @@ pub(crate) struct RemoteCarrier {
     pub sink: Arc<CaptureSink>,
     /// Whether the virtual SASL transport already selected its mechanism.
     pub sasl_started: bool,
+    /// Only an accepted guarded START on this same authenticated link may drive the ordinary FINISH.
+    guarded_start: Option<LinkId>,
     /// The request in flight on this carrier, if any.
     pub in_flight: Option<InFlightCarrier>,
 }
@@ -152,6 +154,15 @@ pub(crate) struct InFlightCarrier {
 }
 
 impl InFlightCarrier {
+    pub(crate) fn root_operation(
+        &self,
+    ) -> Option<agenc_relay_federation_wire::InitialRootOperation> {
+        self.fresh.extension
+    }
+    pub(crate) fn link(&self) -> LinkId {
+        self.link
+    }
+
     pub(crate) fn registered_session(&self) -> Option<crate::state_core::session::BoundSession> {
         self.fresh.bound
     }
@@ -239,6 +250,7 @@ impl RemoteAccounts {
                 peer,
                 sink: CaptureSink::new(generation),
                 sasl_started: false,
+                guarded_start: None,
                 in_flight: None,
             },
         );
@@ -568,6 +580,7 @@ impl FederationCoordinator {
         context.bind_remote_account_result(
             generation,
             fresh.header,
+            fresh.extension,
             fresh.request_object_id,
             origin,
         );
@@ -590,6 +603,9 @@ impl FederationCoordinator {
         let carrier = self.remote_accounts.carriers.get_mut(&generation)?;
         let peer = carrier.peer;
         let in_flight = carrier.in_flight.take()?;
+        if in_flight.opcode == FederationOpcode::AccountCreateFinish {
+            carrier.guarded_start = None;
+        }
         if in_flight.opcode == FederationOpcode::OpaqueAuthFinish {
             carrier.sasl_started = false;
         }
@@ -601,8 +617,26 @@ impl FederationCoordinator {
                 self.fail_link(context, link, peer, Violation::Origin);
                 return None;
             }
+            if in_flight.fresh.extension
+                == Some(agenc_relay_federation_wire::InitialRootOperation::ClaimedCreateStart)
+                && matches!(
+                    arm,
+                    ResultArm::InitialRoot(
+                        agenc_relay_federation_wire::InitialRootOperation::ClaimedCreateStart,
+                        _
+                    )
+                )
+                && let Some(carrier) = self.remote_accounts.carriers.get_mut(&generation)
+            {
+                carrier.guarded_start = Some(link);
+            }
             self.send_result(context, link, peer, in_flight.fresh.descriptor, &bytes);
             return Some(answered);
+        }
+        if in_flight.fresh.extension.is_some() && !matches!(arm, ResultArm::Failed { .. }) {
+            context.forget_remote_account_result(generation);
+            self.fail_link(context, link, peer, Violation::Origin);
+            return None;
         }
         context.forget_remote_account_result(generation);
         let mut objects = Vec::new();
@@ -643,6 +677,24 @@ impl FederationCoordinator {
         peer: ServerId,
     ) {
         self.fail_link(context, link, peer, Violation::Ceiling);
+    }
+
+    pub(crate) fn remote_root_operation(
+        &self,
+        generation: ConnectionGeneration,
+    ) -> Option<agenc_relay_federation_wire::InitialRootOperation> {
+        self.remote_accounts
+            .carriers
+            .get(&generation)?
+            .in_flight
+            .as_ref()?
+            .root_operation()
+    }
+    pub(crate) fn guarded_start_on(&self, generation: ConnectionGeneration, link: LinkId) -> bool {
+        self.remote_accounts
+            .carriers
+            .get(&generation)
+            .is_some_and(|carrier| carrier.guarded_start == Some(link))
     }
 
     /// The in-flight opcode of one virtual connection.

@@ -8,7 +8,6 @@ use agenc_relay_domain::{CanonicalCommand, DomainError, PlanDecision, SessionSee
 use agenc_relay_federation_wire::{
     AssembledObject, DecodeBudget, FederationHash32, OperationDescriptor, RequestCorrelation,
     RequestHeader, ResultHeader, SchemaObject, decode_request_operation, federation_object_id,
-    result_kind_permitted,
 };
 use agenc_relay_storage::federation_records::{
     COORDINATOR_RESULT_KIND, CoordinatorResultRecord, request_result_key,
@@ -17,7 +16,7 @@ use agenc_relay_storage::{PersistentRecordValue, ReadPlan, TableId};
 use agenc_relay_types::{EventId, ServerId, UserId};
 
 use super::convert::{self, ConvertedRequest, convert_operation};
-use super::{FederationCoordinator, PendingCommit, QueuedRequest, Violation, encode_object};
+use super::{FederationCoordinator, PendingCommit, QueuedRequest, Violation};
 use crate::bridge::CryptoJobId;
 use crate::channels::{FederatedDeferred, FederatedPlan, FederatedRefusal, plan_federated_command};
 use crate::federation::codec::operations::FederatedOperation;
@@ -46,6 +45,7 @@ pub(crate) struct PendingCrypto {
 pub(crate) struct FreshRequest {
     pub(super) key: OperationKey,
     pub(super) header: RequestHeader,
+    pub(super) extension: Option<agenc_relay_federation_wire::InitialRootOperation>,
     pub(super) descriptor: OperationDescriptor,
     pub(super) request_object_id: FederationHash32,
     pub(super) bound: Option<BoundSession>,
@@ -191,9 +191,18 @@ fn execute(
     charge: Option<IngressCharge>,
 ) -> Result<(), Violation> {
     let mut budget = DecodeBudget::new(REQUEST_DECODE_BYTES, REQUEST_DECODE_VALUES);
-    let request = SchemaObject::decode_exact("FederationRequest", object.as_slice(), &mut budget)
-        .map_err(|_| Violation::Codec)?;
-    let header = RequestHeader::from_object(&request).map_err(|_| Violation::Codec)?;
+    use crate::federation::codec::initial_root::Request;
+    let profile = coordinator
+        .peers
+        .get(&peer)
+        .and_then(|p| p.live.as_ref())
+        .filter(|live| live.link == link)
+        .ok_or(Violation::Phase)?
+        .handle
+        .profile;
+    let request =
+        Request::read(profile, object.as_slice(), &mut budget).map_err(|_| Violation::Codec)?;
+    let header = request.header();
     check_descriptor(coordinator, peer, &descriptor, &header, object.object_id())?;
     let key = OperationKey {
         origin: OriginKey {
@@ -204,31 +213,11 @@ fn execute(
         generation: header.replay_key.origin_generation,
         sequence: header.replay_key.operation_sequence,
     };
-    match classify(coordinator, &key, &header, object.object_id())? {
-        Classified::Fresh => {}
-        Classified::Replay => {
-            return replay(coordinator, context, link, peer, descriptor, &header);
-        }
-        Classified::Expired => {
-            let fresh = FreshRequest {
-                key,
-                header,
-                descriptor,
-                request_object_id: object.object_id(),
-                bound: None,
-                command: None,
-                mutation: MutationContext::default(),
-                charge,
-            };
-            return expire_request(coordinator, context, link, peer, fresh);
-        }
-    }
-    let operation = decode_request_operation(&request, &mut budget)
-        .and_then(|arm| FederatedOperation::from_object(header.opcode, &arm))
-        .map_err(|_| Violation::Codec)?;
-    let fresh = FreshRequest {
+    let classified = classify(coordinator, &key, &header, object.object_id())?;
+    let mut fresh = FreshRequest {
         key,
         header,
+        extension: request.extension(),
         descriptor,
         request_object_id: object.object_id(),
         bound: None,
@@ -236,7 +225,46 @@ fn execute(
         mutation: MutationContext::default(),
         charge,
     };
-    run_operation(coordinator, context, link, peer, fresh, operation)
+    match classified {
+        Classified::Replay => return replay(coordinator, context, link, peer, descriptor, &header),
+        Classified::Expired => return expire_request(coordinator, context, link, peer, fresh),
+        Classified::Fresh => {}
+    }
+    match request {
+        Request::Base(_, object) => {
+            let operation = decode_request_operation(&object, &mut budget)
+                .and_then(|arm| FederatedOperation::from_object(header.opcode, &arm))
+                .map_err(|_| Violation::Codec)?;
+            run_operation(coordinator, context, link, peer, fresh, operation)
+        }
+        Request::Enhanced(request) => {
+            if context.is_quiescing() {
+                return Err(Violation::Phase);
+            }
+            let bound = request
+                .session
+                .map(|id| {
+                    super::convert::hosted_session(context.domain(), peer, id)
+                        .map(|(_, bound)| bound)
+                })
+                .transpose();
+            if !bound.is_ok_and(|bound| {
+                coordinator
+                    .bind_remote_account_request(context, peer, &mut fresh, header.opcode, bound)
+                    .is_ok()
+            }) {
+                return finish_failed(
+                    coordinator,
+                    context,
+                    link,
+                    peer,
+                    fresh,
+                    DomainError::Forbidden,
+                );
+            }
+            coordinator.queue_remote_carrier(context, link, peer, fresh, request.envelope.to_vec())
+        }
+    }
 }
 
 /// An expired replay ends its origin without advancing or rewriting its
@@ -300,6 +328,15 @@ pub(super) fn remember_registration(
     result: &[u8],
 ) -> Result<(), Violation> {
     let mut budget = DecodeBudget::new(1 << 20, 4_096);
+    if result.starts_with(&2u16.to_be_bytes()) {
+        agenc_relay_federation_wire::InitialRootResult::decode(
+            agenc_relay_federation_wire::FederationProfile::InitialRoot,
+            result,
+            &mut budget,
+        )
+        .map_err(|_| Violation::Codec)?;
+        return Ok(());
+    }
     let object = SchemaObject::decode_exact("FederationResult", result, &mut budget)
         .map_err(|_| Violation::Codec)?;
     let header = ResultHeader::from_object(&object).map_err(|_| Violation::Codec)?;
@@ -1177,6 +1214,7 @@ pub(super) fn stage_with_plan_and_writes(
                 result: encoded,
                 descriptor: fresh.descriptor,
                 header: fresh.header,
+                extension: fresh.extension,
                 _charge: fresh.charge,
                 query: None,
             });
@@ -1254,57 +1292,10 @@ pub(super) fn finish_without_plan(
         )
         .map(|_| ());
     }
-    let FreshRequest {
-        key,
-        header,
-        descriptor,
-        request_object_id,
-        charge,
-        ..
-    } = fresh;
-    fail_without_plan(
-        coordinator,
-        context,
-        link,
-        peer,
-        key,
-        &header,
-        descriptor,
-        request_object_id,
-        (arm, replies),
-        charge,
-    )
-}
-
-// agenc-review: allow owner=runtime reviewed=2026-09-02 reason=a request outcome carries its link peer replay key header descriptor object identity result and charge to one durable staging boundary
-#[allow(clippy::too_many_arguments)]
-fn fail_without_plan(
-    coordinator: &mut FederationCoordinator,
-    context: &mut StateCoreContext,
-    link: LinkId,
-    peer: ServerId,
-    key: OperationKey,
-    header: &RequestHeader,
-    descriptor: OperationDescriptor,
-    request_object_id: FederationHash32,
-    result: (ResultArm, Vec<agenc_relay_federation_wire::SchemaObject>),
-    charge: Option<IngressCharge>,
-) -> Result<(), Violation> {
-    let (arm, replies) = result;
     if matches!(arm, ResultArm::Failed { .. }) {
         coordinator.counters.requests_failed =
             coordinator.counters.requests_failed.saturating_add(1);
     }
-    let fresh = FreshRequest {
-        key,
-        header: *header,
-        descriptor,
-        request_object_id,
-        bound: None,
-        command: None,
-        mutation: MutationContext::default(),
-        charge,
-    };
     let encoded = encode_result(coordinator, &fresh, &arm, None, replies)?;
     let plan = context
         .domain()
@@ -1334,6 +1325,7 @@ fn fail_without_plan(
         result: encoded,
         descriptor: fresh.descriptor,
         header: fresh.header,
+        extension: fresh.extension,
         _charge: fresh.charge,
         query: None,
     });
@@ -1374,9 +1366,6 @@ pub(super) fn encode_result(
     completion_event_id: Option<EventId>,
     replies: Vec<agenc_relay_federation_wire::SchemaObject>,
 ) -> Result<Vec<u8>, Violation> {
-    if !result_kind_permitted(fresh.header.opcode, arm.kind()) {
-        return Err(Violation::Codec);
-    }
     let header = ResultHeader {
         network_id: coordinator.config.network_id,
         replay_key: fresh.header.replay_key,
@@ -1385,11 +1374,14 @@ pub(super) fn encode_result(
         completion_event_id,
         result_kind: arm.kind(),
     };
-    let object = arm
-        .to_object()
-        .and_then(|object| header.build(&object, replies))
-        .map_err(|_| Violation::Codec)?;
-    encode_object(&object).map_err(|_| Violation::Codec)
+    crate::federation::codec::initial_root::encode_result(
+        &fresh.header,
+        fresh.extension,
+        &header,
+        arm,
+        replies,
+    )
+    .map_err(|_| Violation::Codec)
 }
 
 /// The result row and origin row every fresh request commits.

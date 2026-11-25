@@ -1,6 +1,9 @@
 //! The explicitly configured optional federation profile. Its hello uses the
 //! original fixed layout and signs the selected wire version and profile hash.
 
+mod transfer;
+pub use transfer::{InitialRootOperation, InitialRootRequest, InitialRootResult};
+
 use crate::{BASE_FEDERATION_PROFILE_SHA256, CodecError, FederationHello, HelloTbs};
 pub use agenc_relay_types::{INITIAL_ROOT_PROFILE_SHA256, INITIAL_ROOT_PROFILE_TOKEN};
 
