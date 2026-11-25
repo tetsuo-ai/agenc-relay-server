@@ -47,6 +47,28 @@ fn registered_owner(
     Ok(client)
 }
 
+fn sealed_claim(
+    fixture: &NodeFixture,
+    account: AccountId,
+    start: RequestId,
+    secret: &InitialRootSecret,
+    action: ClaimAction,
+    request_id: u8,
+) -> TestResult<(
+    agenc_relay_auth::InitialRootServiceEnvelope,
+    agenc_relay_auth::initial_root::ClaimOpenToken,
+)> {
+    let public = AccountHpkePrivateKey::from_bytes(ACCOUNT_HPKE_PRIVATE)?.public_key()?;
+    let binding = AccountRequestBinding::new(
+        NETWORK_ID,
+        account_recovery_epoch(fixture, NETWORK_ID)?,
+        public.key_id(),
+        RequestId::from_bytes([request_id; 16]),
+        InitialRootExchange::Claim,
+    );
+    Ok(seal_claim(public, binding, account, start, secret, action)?)
+}
+
 fn claim(
     client: &mut ArcClient,
     fixture: &NodeFixture,
@@ -56,15 +78,7 @@ fn claim(
     action: ClaimAction,
     request_id: u8,
 ) -> TestResult<Option<ClaimState>> {
-    let public = AccountHpkePrivateKey::from_bytes(ACCOUNT_HPKE_PRIVATE)?.public_key()?;
-    let binding = AccountRequestBinding::new(
-        NETWORK_ID,
-        account_recovery_epoch(fixture, NETWORK_ID)?,
-        public.key_id(),
-        RequestId::from_bytes([request_id; 16]),
-        InitialRootExchange::Claim,
-    );
-    let (request, token) = seal_claim(public, binding, account, start, secret, action)?;
+    let (request, token) = sealed_claim(fixture, account, start, secret, action, request_id)?;
     let bytes =
         client.account_carrier_bytes("ACCTROOT", "CLAIM", "COMPLETE", request.as_bytes())?;
     let result = token.open(&InitialRootServiceResponse::parse(
@@ -314,5 +328,103 @@ fn separate_registered_legacy_account_cannot_read_or_choose_the_creators_claim()
     );
     let _ = edge.stop()?;
     let _ = daemon.stop()?;
+    Ok(())
+}
+
+#[test]
+fn lost_chosen_reply_is_recovered_privately_after_restore_while_older_reserved_is_fenced()
+-> TestResult {
+    use super::stage_ten_drills::{RestorePlan, restore_node, write_backup};
+    let mut network = build_network()?;
+    let fixture = &mut network.coordinator;
+    let original_config = fs::read(&fixture.config_path)?;
+    let original_epoch = fixture.provisioned_epoch.clone();
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    let secret = InitialRootSecret::generate()?;
+    let ids = account_requests(141)?;
+    let mut creator = ArcClient::connect(fixture)?;
+    creator.negotiate_sasl()?;
+    negotiate_root(&mut creator)?;
+    let account = create_account_with_root_option(
+        &mut creator,
+        fixture,
+        "restored-creator",
+        ids,
+        Some(&secret),
+    )?;
+    drop(creator);
+    assert!(daemon.stop()?.success());
+    let (reserved, _, _) = write_backup(fixture, "private-before-choose.backup", 1)?;
+
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    let mut client = registered_owner(fixture, "Chooser", "restored-creator", 147, account)?;
+    let identity = Principal::new(88, 89, account)?;
+    let fingerprint = builders::root_fingerprint(&identity.keys.root)?;
+    let (request, token) = sealed_claim(
+        fixture,
+        account,
+        ids[0],
+        &secret,
+        ClaimAction::Choose(fingerprint),
+        150,
+    )?;
+    // The production actor only admits this fixed outer header after its durable result.
+    // Drop the connection and one-use opener without reading the sealed response or its choice.
+    client.begin_account_carrier("ACCTROOT", "CLAIM", "COMPLETE", request.as_bytes())?;
+    drop((client, token));
+    assert!(daemon.stop()?.success());
+    let (chosen, _, _) = write_backup(fixture, "private-after-choose.backup", 2)?;
+
+    // Both snapshots are of the same original account, preimage, START and physical creation.
+    for (backup, expected, generation) in [
+        (&chosen, Some(ClaimState::Chosen(fingerprint)), 2),
+        (&reserved, None, 3),
+    ] {
+        fs::write(&fixture.config_path, &original_config)?;
+        let restored = restore_node(
+            fixture,
+            &RestorePlan {
+                backup,
+                new_master: false,
+                // The first restore removes the original state directory for both cases.
+                disaster: generation == 2,
+                generation,
+            },
+        )
+        .map_err(|error| {
+            failure(format!(
+                "signed backup recovery generation {generation}: {error}"
+            ))
+        })?;
+        assert!(restored.incarnation_changed && restored.epoch != original_epoch);
+        fixture.provisioned_epoch = restored.epoch;
+        let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+        let mut owner = registered_owner(fixture, "Returned", "restored-creator", 155, account)?;
+        assert!(
+            claim(
+                &mut owner,
+                fixture,
+                account,
+                ids[0],
+                &secret,
+                ClaimAction::Read,
+                161
+            )? == expected
+        );
+        assert!(
+            claim(
+                &mut owner,
+                fixture,
+                account,
+                ids[0],
+                &secret,
+                ClaimAction::Choose(fingerprint),
+                162
+            )?
+            .is_none()
+        );
+        drop(owner);
+        assert!(daemon.stop()?.success());
+    }
     Ok(())
 }
