@@ -479,6 +479,7 @@ impl Fresh<'_> {
 
 // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=the executor context carries every base fact one handler may consult
 #[allow(clippy::too_many_arguments)]
+// agenc-review: focus owner=runtime reviewed=2026-11-25 reason=all companion operation predicates borrow the same domain snapshot, directory gate, entropy and edge projection at dispatch
 fn execute(
     coordinator: &CompanionCoordinator,
     context: &StateCoreContext,

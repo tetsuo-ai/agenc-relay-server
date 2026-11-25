@@ -607,6 +607,7 @@ impl RegistrationState {
     /// NEW and DEL actions are observable only when `cap-notify` was enabled
     /// before the transition. Reconnect-only security changes are always
     /// returned to the connection owner.
+    // agenc-review: focus owner=client-wire reviewed=2026-11-25 reason=preserving the prior notification and guarded-transfer state across the same profile diff determines all withdrawal and reconnect actions
     pub fn apply_capability_profile(
         &mut self,
         current: &CapabilityProfile,
@@ -673,6 +674,22 @@ impl RegistrationState {
             let actions = one_action(RegistrationAction::NotRegistered)?;
             return Ok(actions);
         }
+        let command = self.registration_command_for_profile(&message, advertised)?;
+        if command == RegistrationCommand::Quit {
+            return self.begin_close(quit_reason(&message)?);
+        }
+        if self.phase == RegistrationPhase::Registered {
+            return self.registered_message(message, command, advertised);
+        }
+        self.negotiating_message(message, command, advertised)
+    }
+
+    // agenc-review: focus owner=client-wire reviewed=2026-11-25 reason=both the live offer and the acknowledged capability must match the same parsed carrier family before invoking its grammar
+    fn registration_command_for_profile(
+        &self,
+        message: &ParsedMessage,
+        advertised: &CapabilityProfile,
+    ) -> Result<RegistrationCommand, RegistrationError> {
         let negotiated = self.cap.enabled(INITIAL_ROOT_CAPABILITY);
         let initial_root = match message.command() {
             "ACCTCREATE"
@@ -685,7 +702,7 @@ impl RegistrationState {
             "ACCTROOT" if negotiated => Some(InitialRootCarrier::Claim),
             _ => None,
         };
-        let command = match initial_root {
+        match initial_root {
             Some(carrier) => {
                 let current = |name| advertised.contains(name) && self.cap.enabled(name);
                 if !self.cap.supports_multiline()
@@ -695,20 +712,14 @@ impl RegistrationState {
                 {
                     return Err(RegistrationError::AuthenticationUnavailable);
                 }
-                RegistrationCommand::InitialRoot(
+                Ok(RegistrationCommand::InitialRoot(
                     carrier,
-                    parse_initial_root_command(&message, carrier)?,
-                )
+                    parse_initial_root_command(message, carrier)?,
+                ))
             }
-            None => parse_registration_command(&message, self.access_policy)?,
-        };
-        if command == RegistrationCommand::Quit {
-            return self.begin_close(quit_reason(&message)?);
+            None => parse_registration_command(message, self.access_policy)
+                .map_err(RegistrationError::from),
         }
-        if self.phase == RegistrationPhase::Registered {
-            return self.registered_message(message, command, advertised);
-        }
-        self.negotiating_message(message, command, advertised)
     }
 
     fn defer_input(

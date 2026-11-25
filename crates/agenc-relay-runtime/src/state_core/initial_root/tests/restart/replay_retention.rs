@@ -1,4 +1,6 @@
 //! The actual closed/open redb journal retains the first root through private result expiry.
+#![forbid(unsafe_code)]
+
 use super::*;
 use crate::account_service::{AccountServiceCoordinator, test_registered_receipt};
 use crate::state_core::durable::claim_replays::CLAIM_REPLAY_SECONDS;

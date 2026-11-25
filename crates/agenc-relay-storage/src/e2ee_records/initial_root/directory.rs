@@ -136,6 +136,7 @@ impl Allocation {
         Self::classify(mutation.table(), key, value.as_ref())
     }
 
+    // agenc-review: focus owner=storage reviewed=2026-11-25 reason=the same canonical row and table distinguish direct account charges, shared owners and bounded stock payers
     fn classify(
         table: TableId,
         key: &StoredKey,

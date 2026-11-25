@@ -43,6 +43,7 @@ pub(super) fn project(projection: &Projection<'_>) -> Result<Updates, RuntimeErr
 }
 
 impl<'a> Plan<'a> {
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the first owner and its own sealed subtotal are allocated together while the same mutation list determines which owners retire
     fn lifecycle(&mut self, projection: &Projection<'_>) -> Result<(), RuntimeError> {
         let network = projection.keys.binding().network_id();
         for update in &projection.updates {

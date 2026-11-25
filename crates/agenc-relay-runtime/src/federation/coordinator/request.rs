@@ -182,6 +182,7 @@ pub(super) fn next_queued(
     None
 }
 
+// agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the closed request families share the same authenticated origin snapshot, duplicate check and durable result handoff
 fn execute(
     coordinator: &mut FederationCoordinator,
     context: &mut StateCoreContext,

@@ -661,6 +661,7 @@ fn restored_origin(record: OriginRecord, row: &FederationOriginRecord) -> Connec
     }
 }
 
+// agenc-review: focus owner=runtime reviewed=2026-11-25 reason=restoration validates the full recovered request identity before choosing whether its result is covered or still needs origin recovery
 pub(super) fn restore_request(
     edge: &mut EdgeFederation,
     key: &StoredKey,

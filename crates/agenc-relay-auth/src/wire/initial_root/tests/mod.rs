@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use agenc_relay_crypto::Sha256Stream;
 use agenc_relay_types::AccountRandomId;
 

@@ -312,6 +312,7 @@ fn open_test_storage(
 }
 
 /// Reconstructs the durable index and composes the core over the owner.
+// agenc-review: focus owner=runtime reviewed=2026-11-25 reason=a fixture opens storage, budgeted reconstruction, bridges and the scripted clocks in the same order as the runtime
 fn compose_test_state(
     owner: &mut StorageOwner,
     entropy: Vec<u8>,

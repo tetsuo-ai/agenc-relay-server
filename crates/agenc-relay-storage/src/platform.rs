@@ -1259,8 +1259,15 @@ mod tests {
         ));
 
         let mut bounded = BackupDirectoryReader::open(directory.path(), 3)?;
-        assert!(bounded.next_name()?.is_some());
-        assert_eq!(bounded.next_name(), Err(StorageError::LimitExceeded));
+        let mut next = bounded.next_name();
+        assert!(matches!(next, Ok(Some(_))));
+        // Both dot entries consume budget. The filesystem may return one after a candidate.
+        for _ in 0..names.len() {
+            let Ok(Some(name)) = &next else { break };
+            assert!(names.contains(name));
+            next = bounded.next_name();
+        }
+        assert_eq!(next, Err(StorageError::LimitExceeded));
         Ok(())
     }
 
