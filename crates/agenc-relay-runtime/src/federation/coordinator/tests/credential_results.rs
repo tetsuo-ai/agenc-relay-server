@@ -208,6 +208,7 @@ fn prepare(fixture: &mut StateCoreFixture) -> TestResult<(RequestHeader, u64)> {
         fresh.extension,
         fresh.request_object_id,
         origin,
+        None,
     );
     let writes = context.remote_account_result_writes(
         OWNER,

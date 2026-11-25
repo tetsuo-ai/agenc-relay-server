@@ -1237,7 +1237,7 @@ impl StateCoreContext {
     ) -> Result<StageAccepted, StageRefused> {
         let Ok(mut account_service_writes) = account_service_writes
             .into_iter()
-            .map(AccountServiceDurableWrite::revalidate)
+            .map(|write| self.revalidate_federated_deletion(write))
             .collect::<Result<Vec<_>, _>>()
         else {
             self.clear_projection_intent();

@@ -586,6 +586,7 @@ impl FederationCoordinator {
             fresh.extension,
             fresh.request_object_id,
             origin,
+            fresh.root_intake.as_ref().map(|slot| slot.deadline),
         );
         if let Some(carrier) = self.remote_accounts.carriers.get_mut(&generation) {
             carrier.in_flight = Some(*in_flight);

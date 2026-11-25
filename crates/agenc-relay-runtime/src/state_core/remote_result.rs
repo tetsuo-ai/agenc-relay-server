@@ -22,6 +22,7 @@ pub(crate) struct RemoteResultBinding {
     request_object_id: FederationHash32,
     origin: AccountServiceDurableWrite,
     prepared: Option<(u64, Vec<u8>)>,
+    protected_deadline: Option<u64>,
     replay: Option<FederationHash32>,
 }
 
@@ -39,6 +40,7 @@ impl StateCoreContext {
         extension: Option<InitialRootOperation>,
         request_object_id: FederationHash32,
         origin: AccountServiceDurableWrite,
+        protected_deadline: Option<u64>,
     ) {
         self.remote_account_results.insert(
             generation,
@@ -49,6 +51,7 @@ impl StateCoreContext {
                 origin,
                 prepared: None,
                 replay: None,
+                protected_deadline,
             },
         );
     }
@@ -85,12 +88,20 @@ impl StateCoreContext {
             completion_event_id: completion_event_id.map(|id| *id.as_bytes()),
             resulting_state_generation: revision,
         };
-        let result = row(
+        let value = PersistentRecordValue::new(
             TableId::RequestResult,
-            request_result_key(binding.header.replay_key.to_bytes())?,
             COORDINATOR_RESULT_KIND,
             revision,
+            0,
+            binding.protected_deadline,
+            Vec::new(),
             record.encode()?,
+        )?
+        .encode()?;
+        let result = AccountServiceDurableWrite::put(
+            TableId::RequestResult,
+            request_result_key(binding.header.replay_key.to_bytes())?,
+            value,
         )?;
         let origin = binding.origin_at(revision)?;
         binding.prepared = Some((self.head.storage_commit_sequence, bytes));
@@ -175,10 +186,14 @@ impl StateCoreContext {
         generation: ConnectionGeneration,
     ) -> Option<CommittedRemoteResult> {
         let binding = self.remote_account_results.get(&generation)?;
-        let (staged_after, _) = binding.prepared.as_ref()?;
+        let (staged_after, bytes) = binding.prepared.as_ref()?;
         let key = request_result_key(binding.header.replay_key.to_bytes()).ok()?;
         if self.head.storage_commit_sequence <= *staged_after
             || !self.index.holds(TableId::RequestResult, &key)
+            || (binding.extension.is_some()
+                && !self
+                    .index
+                    .holds_federated_claim(&binding.header.replay_key.to_bytes(), bytes))
         {
             return None;
         }

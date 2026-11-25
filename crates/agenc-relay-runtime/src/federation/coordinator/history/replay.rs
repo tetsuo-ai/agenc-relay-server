@@ -87,6 +87,7 @@ fn request_of(
     };
     Ok(FreshRequest {
         extension: None,
+        root_intake: None,
         key,
         header,
         descriptor,

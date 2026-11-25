@@ -628,6 +628,7 @@ impl Scan {
         }
         if table == TableId::RequestResult {
             self.index.restore_claim_replay(&key, &value)?;
+            self.index.restore_federated_claim(&key, &value)?;
         }
         match (table, value.record_kind()) {
             (TableId::Account, TOMBSTONE_RECORD_KIND) => self.admit_account_tombstone(&key, &value),

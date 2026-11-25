@@ -14,6 +14,7 @@ mod companion;
 mod convert;
 mod grace;
 mod history;
+mod initial_root_results;
 mod mailbox_expiry;
 mod maintenance;
 mod object_expiry;
@@ -331,6 +332,7 @@ pub struct FederationCoordinator {
     replay_maintenance: replay_maintenance::Worker,
     mailbox_expiry: mailbox_expiry::Worker,
     request_expiry: request_expiry::Worker,
+    root_intakes: initial_root_results::Admissions,
     object_expiry: object_expiry::Worker,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
@@ -417,6 +419,7 @@ impl FederationCoordinator {
             replay_maintenance: replay_maintenance::Worker::default(),
             mailbox_expiry: mailbox_expiry::Worker::default(),
             request_expiry: request_expiry::Worker::default(),
+            root_intakes: initial_root_results::Admissions::default(),
             object_expiry: object_expiry::Worker::default(),
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
@@ -1879,6 +1882,7 @@ impl FederationCoordinator {
                 key,
                 header,
                 extension,
+                root_intake: None,
                 descriptor,
                 request_object_id,
                 bound: None,
@@ -2015,6 +2019,30 @@ impl FederationCoordinator {
         if live.link != link {
             return;
         }
+        let protected;
+        let encoded = if encoded.starts_with(&2u16.to_be_bytes()) {
+            if live.handle.profile != agenc_relay_federation_wire::FederationProfile::InitialRoot {
+                return;
+            }
+            match initial_root_results::authorized_output(
+                context,
+                self.config.network_id,
+                peer,
+                &descriptor,
+                encoded,
+            ) {
+                Ok(checked) => {
+                    protected = checked;
+                    protected.as_ref()
+                }
+                Err(error) => {
+                    self.fail_link(context, link, peer, error);
+                    return;
+                }
+            }
+        } else {
+            encoded
+        };
         let descriptor = OperationDescriptor {
             object_id: federation_object_id(encoded),
             ..descriptor

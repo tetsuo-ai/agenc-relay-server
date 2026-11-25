@@ -238,6 +238,7 @@ pub(crate) enum AdminMutationAfterImage {
 }
 
 pub(crate) mod claim_replays;
+pub(crate) mod federated_claims;
 pub(super) mod guarded_directory;
 mod initial_root;
 pub use initial_root::BackedRootClaim;
@@ -247,6 +248,10 @@ pub use initial_root::BackedRootClaim;
 pub enum IndexUpdate {
     /// One exactly bound, process-budgeted private response was written.
     RetainClaimReplay(std::sync::Arc<claim_replays::BackedClaimReplay>),
+    /// Charge the exact coordinator result of a protected remote operation.
+    RetainFederatedClaim(std::sync::Arc<federated_claims::BackedMapping>),
+    /// Release the owned remote operation after both retention floors.
+    RemoveFederatedClaim(federated_claims::Key),
     /// The original private response reached its authenticated retention boundary.
     RemoveClaimReplay(agenc_relay_types::RequestId),
     /// Account-directory accounting and backed object ownership from this exact batch.
@@ -307,6 +312,7 @@ pub enum IndexUpdate {
 #[derive(Default)]
 pub struct DurableIndex {
     claim_replays: claim_replays::Receipts,
+    federated_claims: federated_claims::Mappings,
     pub(super) guarded_directory: guarded_directory::Directory,
     pub(super) companion_disk: Option<agenc_relay_storage::CompanionDiskAccounting>,
     pub(super) initial_root_owners: BTreeMap<AccountId, std::sync::Arc<BackedRootClaim>>,
@@ -388,6 +394,8 @@ impl DurableIndex {
     fn apply_one(&mut self, update: &IndexUpdate) {
         match update {
             IndexUpdate::GuardedDirectory(changes) => self.guarded_directory.apply(changes),
+            IndexUpdate::RetainFederatedClaim(held) => self.apply_federated(held),
+            IndexUpdate::RemoveFederatedClaim(key) => self.remove_federated(key),
             IndexUpdate::RetainClaimReplay(held) => self.claim_replays.put(held),
             IndexUpdate::RemoveClaimReplay(id) => self.claim_replays.remove(*id),
             IndexUpdate::InitialRootOwner(owner) => {
@@ -1187,6 +1195,7 @@ impl Projection<'_> {
                     }
                     if *table == TableId::RequestResult {
                         self.project_claim_replay(key, &row)?;
+                        self.project_federated_claim(key, &row)?;
                     }
                 }
                 if *table == TableId::E2eeState {
@@ -1203,6 +1212,7 @@ impl Projection<'_> {
             AccountServiceDurableWrite::Delete { table, key } => {
                 if *table == TableId::RequestResult {
                     self.forget_claim_replay(key)?;
+                    self.forget_federated_claim(key)?;
                 }
                 self.delete(*table, key.clone())
             }
