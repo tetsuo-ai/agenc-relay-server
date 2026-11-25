@@ -669,9 +669,14 @@ pub(super) fn restore_request(
     let invalid = super::startup::invalid;
     let row = EdgeRequestRecord::decode(value.body())?;
     let mut budget = DecodeBudget::new(1 << 20, 4_096);
-    let object = SchemaObject::decode_exact("FederationRequest", &row.request_object, &mut budget)
-        .map_err(|_| invalid())?;
-    let header = RequestHeader::from_object(&object).map_err(|_| invalid())?;
+    let object = crate::federation::codec::initial_root::Request::read(
+        agenc_relay_federation_wire::FederationProfile::InitialRoot,
+        &row.request_object,
+        &mut budget,
+    )
+    .map_err(|_| invalid())?;
+    let header = object.header();
+    let extension = object.extension();
     if header.network_id != edge.config.network_id
         || header.replay_key.home_server_id != edge.config.server_id
         || key != &request_result_key(header.replay_key.to_bytes())?
@@ -692,7 +697,7 @@ pub(super) fn restore_request(
         .find(|(_, origin)| origin.origin_id == header.replay_key.origin_id)
         .map(|(generation, _)| *generation)
         .ok_or_else(invalid)?;
-    let result = restored_result(&row, &header)?;
+    let result = restored_result(&row, &header, extension)?;
     if restored_snapshot_covered(edge, &row, &result)? {
         return Ok(());
     }
@@ -706,7 +711,13 @@ pub(super) fn restore_request(
             completion_coverage: row.completion_coverage,
             generation,
             sink_gone: true,
-            kind: request::PendingKind::Close,
+            kind: extension.map_or(request::PendingKind::Close, |operation| {
+                request::PendingKind::InitialRoot {
+                    carrier: super::initial_root::Carrier::from_operation(operation),
+                    link: None,
+                    carrier_generation: 0,
+                }
+            }),
             header,
             bytes: row.request_object,
             sent: false,
@@ -759,15 +770,21 @@ fn restored_snapshot_covered(
 fn restored_result(
     row: &EdgeRequestRecord,
     header: &RequestHeader,
+    extension: Option<agenc_relay_federation_wire::InitialRootOperation>,
 ) -> Result<Option<crate::federation::codec::results::ResultArm>, RuntimeError> {
     let invalid = super::startup::invalid;
     if row.result_object.is_empty() {
         return Ok(None);
     }
     let mut budget = DecodeBudget::new(1 << 20, 4_096);
-    let object = SchemaObject::decode_exact("FederationResult", &row.result_object, &mut budget)
-        .map_err(|_| invalid())?;
-    let result_header = ResultHeader::from_object(&object).map_err(|_| invalid())?;
+    let result = crate::federation::codec::initial_root::ResultObject::read(
+        agenc_relay_federation_wire::FederationProfile::InitialRoot,
+        extension,
+        &row.result_object,
+        &mut budget,
+    )
+    .map_err(|_| invalid())?;
+    let result_header = result.header;
     if result_header.replay_key != header.replay_key
         || result_header.request_id != header.request_id
         || result_header.request_object_id.as_bytes() != &row.request_object_id
@@ -776,12 +793,7 @@ fn restored_result(
     {
         return Err(invalid());
     }
-    let arm = agenc_relay_federation_wire::decode_result_arm(&object, &mut budget)
-        .map_err(|_| invalid())?;
-    Ok(Some(
-        crate::federation::codec::results::ResultArm::from_object(result_header.result_kind, &arm)
-            .map_err(|_| invalid())?,
-    ))
+    Ok(Some(result.arm))
 }
 
 fn check_restored_coverage(

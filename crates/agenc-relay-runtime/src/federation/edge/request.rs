@@ -12,7 +12,7 @@ use agenc_relay_domain::{
 use agenc_relay_federation_wire::{
     AssembledObject, CanonicalEncode, DecodeBudget, OperationDescriptor, OriginAccount,
     OriginRecord, OriginSession, ReplayKey, RequestHeader, ResultHeader, SchemaObject,
-    decode_result_arm, federation_object_id,
+    federation_object_id,
 };
 use agenc_relay_types::{FederationResultKind, RequestId, SessionId, UserId};
 use zeroize::Zeroizing;
@@ -144,6 +144,19 @@ pub enum EdgeCompletion {
         /// What the coordinator answered.
         outcome: RemoteCarrierOutcome,
     },
+    /// An account root carrier answered on its original negotiated coordinator link.
+    InitialRoot {
+        /// The registered or preregistered client.
+        generation: ConnectionGeneration,
+        /// The client's transfer generation.
+        carrier_generation: u64,
+        /// The authenticated coordinator link that admitted this transfer.
+        link: crate::federation::LinkId,
+        /// The original client command family and phase.
+        phase: (agenc_relay_client_wire::InitialRootCarrier, bool),
+        /// The corresponding account-service outcome.
+        outcome: RemoteCarrierOutcome,
+    },
     /// A registered credential carrier was answered after durable completion coverage.
     CredentialCarrier {
         /// The client connection.
@@ -167,6 +180,11 @@ pub(crate) enum PendingKind {
     AccountCarrier {
         sasl: bool,
         finish: bool,
+        carrier_generation: u64,
+    },
+    InitialRoot {
+        carrier: super::initial_root::Carrier,
+        link: Option<crate::federation::LinkId>,
         carrier_generation: u64,
     },
     Command {
@@ -389,6 +407,19 @@ pub(super) fn prepare_request(
     generation: ConnectionGeneration,
     operation: &FederatedOperation,
 ) -> Result<(RequestId, RequestHeader, Vec<u8>), Violation> {
+    prepare_encoded(edge, context, generation, operation.opcode(), |header| {
+        let arm = operation.to_object()?;
+        Ok(header.build(&arm)?.encode_canonical()?.as_slice().to_vec())
+    })
+}
+
+pub(super) fn prepare_encoded(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    opcode: agenc_relay_types::FederationOpcode,
+    encode: impl FnOnce(&RequestHeader) -> Result<Vec<u8>, agenc_relay_federation_wire::CodecError>,
+) -> Result<(RequestId, RequestHeader, Vec<u8>), Violation> {
     let mut random = [0_u8; 16];
     context
         .entropy_mut()
@@ -409,14 +440,9 @@ pub(super) fn prepare_request(
             operation_sequence: origin.sequence,
         },
         request_id,
-        opcode: operation.opcode(),
+        opcode,
     };
-    let bytes = operation
-        .to_object()
-        .and_then(|arm| header.build(&arm))
-        .and_then(|object| object.encode_canonical())
-        .map(|bytes| bytes.as_slice().to_vec())
-        .map_err(|_| Violation::Codec)?;
+    let bytes = encode(&header).map_err(|_| Violation::Codec)?;
     origin.sequence = origin.sequence.checked_add(1).ok_or(Violation::Ceiling)?;
     Ok((request_id, header, bytes))
 }
@@ -469,7 +495,7 @@ pub(super) fn transmit(
     let Some(pending) = edge.pending.get(&request_id) else {
         return;
     };
-    if pending.sent || pending.result.is_some() {
+    if pending.sent || pending.result.is_some() || !super::initial_root::can_send(edge, pending) {
         return;
     }
     // A resync or a client's departure deletes the origin and marks its
@@ -605,7 +631,7 @@ pub(super) fn send_account_carrier(
             edge,
             context,
             generation,
-            opcode,
+            (opcode, None),
             bytes,
             finish,
             carrier_generation,
@@ -774,11 +800,14 @@ fn route_command(
     Ok(Routed::Forwarded)
 }
 
-fn defer_account_carrier(
+pub(super) fn defer_account_carrier(
     edge: &mut EdgeFederation,
     context: &StateCoreContext,
     generation: ConnectionGeneration,
-    opcode: agenc_relay_types::FederationOpcode,
+    carrier: (
+        agenc_relay_types::FederationOpcode,
+        Option<super::initial_root::OwnedCarrier>,
+    ),
     envelope: &[u8],
     finish: bool,
     carrier_generation: u64,
@@ -801,7 +830,8 @@ fn defer_account_carrier(
     edge.deferred_carriers.insert(
         generation,
         DeferredCarrier {
-            opcode,
+            opcode: carrier.0,
+            root: carrier.1,
             envelope: retained,
             finish,
             carrier_generation,
@@ -826,6 +856,24 @@ fn dispatch_deferred_carrier(
         return None;
     }
     let carrier = edge.deferred_carriers.remove(&generation)?;
+    if let Some(owned) = carrier.root {
+        return owned
+            .send(
+                edge,
+                context,
+                generation,
+                carrier.carrier_generation,
+                &carrier.envelope,
+            )
+            .err()
+            .map(|_| {
+                owned.completion(
+                    generation,
+                    carrier.carrier_generation,
+                    RemoteCarrierOutcome::Failed { chunks: Vec::new() },
+                )
+            });
+    }
     send_account_carrier(
         edge,
         context,
@@ -1559,9 +1607,32 @@ pub(super) fn receive_result(
     object: &AssembledObject,
 ) -> Result<Vec<EdgeCompletion>, Violation> {
     let mut budget = DecodeBudget::new(1 << 20, 4_096);
-    let result = SchemaObject::decode_exact("FederationResult", object.as_slice(), &mut budget)
-        .map_err(|_| Violation::Codec)?;
-    let header = ResultHeader::from_object(&result).map_err(|_| Violation::Codec)?;
+    let profile = edge.live.as_ref().map_or(
+        agenc_relay_federation_wire::FederationProfile::Base,
+        |live| live.handle.profile,
+    );
+    let bytes = object.as_slice();
+    let pending = edge.pending.get(&descriptor.request_id);
+    if pending.is_none() && bytes.starts_with(&2u16.to_be_bytes()) {
+        let checked =
+            agenc_relay_federation_wire::InitialRootResult::decode(profile, bytes, &mut budget)
+                .map_err(|_| Violation::Codec)?;
+        if descriptor.request_id != checked.layout.request_id
+            || descriptor.object_id != object.object_id()
+        {
+            return Err(Violation::Consistency);
+        }
+        return Ok(Vec::new());
+    }
+    let expected = pending.and_then(super::initial_root::request_extension);
+    let checked = crate::federation::codec::initial_root::ResultObject::read(
+        profile,
+        expected,
+        bytes,
+        &mut budget,
+    )
+    .map_err(|_| Violation::Codec)?;
+    let header = checked.header;
     if descriptor.request_id != header.request_id || descriptor.object_id != object.object_id() {
         return Err(Violation::Consistency);
     }
@@ -1577,23 +1648,17 @@ pub(super) fn receive_result(
     if pending.result.is_some() {
         return repeated_result(pending, object);
     }
-    let arm = ResultArm::from_object(
-        header.result_kind,
-        &decode_result_arm(&result, &mut budget).map_err(|_| Violation::Codec)?,
-    )
-    .map_err(|_| Violation::Codec)?;
-    validate_result_generation(edge, header.request_id, &arm)?;
-    super::join_echo::validate_result(edge, header.request_id, &arm)?;
-    super::message_echo::validate_result(pending, &arm)?;
+    validate_result_generation(edge, header.request_id, &checked.arm)?;
+    super::join_echo::validate_result(edge, header.request_id, &checked.arm)?;
+    super::message_echo::validate_result(pending, &checked.arm)?;
     if pending.header.opcode == agenc_relay_types::FederationOpcode::HistoryQuery {
-        return super::history::receive(edge, context, header, object.object_id(), arm);
+        return super::history::receive(edge, context, header, object.object_id(), checked.arm);
     }
     let mut replies = Vec::new();
-    for reply in agenc_relay_federation_wire::access::vector(&result, "replies")
-        .map_err(|_| Violation::Codec)?
-    {
+    for reply in checked.indexed_replies().map_err(|_| Violation::Codec)? {
         replies.push(reply_frame(&edge.config.server_name, reply)?);
     }
+    let arm = checked.arm;
     let pending = edge
         .pending
         .get_mut(&header.request_id)
@@ -1865,6 +1930,26 @@ fn completed_request(
             generation,
             event_generation,
         }],
+        (
+            PendingKind::InitialRoot {
+                carrier,
+                link,
+                carrier_generation,
+            },
+            result,
+        ) => {
+            let Some(link) = link.filter(|id| edge.initial_root_link() == Some(*id)) else {
+                return Vec::new();
+            };
+            let outcome = carrier.outcome(result, &pending.replies);
+            vec![
+                super::initial_root::OwnedCarrier { carrier, link }.completion(
+                    generation,
+                    carrier_generation,
+                    outcome,
+                ),
+            ]
+        }
         (
             PendingKind::AccountCarrier {
                 sasl,
@@ -2212,7 +2297,7 @@ fn credential_outcome(
 }
 
 /// Maps one result and its relayed replies onto the carrier outcome.
-fn carrier_outcome(
+pub(super) fn carrier_outcome(
     result: ResultArm,
     replies: &[agenc_relay_client_wire::WireMessage],
     sasl: bool,

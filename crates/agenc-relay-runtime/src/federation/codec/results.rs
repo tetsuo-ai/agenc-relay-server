@@ -24,6 +24,8 @@ pub(crate) enum ResultArm {
     SessionRegistered(SessionRegistered),
     /// `auth_challenge`: the sealed account-service response object.
     AuthChallenge(SchemaObject),
+    /// Exact sealed response received or produced under the optional signed base profile.
+    InitialRoot(agenc_relay_federation_wire::InitialRootOperation, Box<[u8]>),
     /// `authenticated`.
     Authenticated {
         account_id: AccountId,
@@ -66,7 +68,7 @@ impl ResultArm {
             Self::Failed { .. } => FederationResultKind::Failed,
             Self::Committed { .. } => FederationResultKind::Committed,
             Self::SessionRegistered(_) => FederationResultKind::SessionRegistered,
-            Self::AuthChallenge(_) => FederationResultKind::AuthChallenge,
+            Self::AuthChallenge(_) | Self::InitialRoot(..) => FederationResultKind::AuthChallenge,
             Self::Authenticated { .. } => FederationResultKind::Authenticated,
             Self::AccountCreated { .. } => FederationResultKind::AccountCreated,
             Self::ReplyPage { .. } => FederationResultKind::ReplyPage,
@@ -108,6 +110,7 @@ impl ResultArm {
                     ],
                 )
             }
+            Self::InitialRoot(..) => Err(CodecError::SchemaMismatch),
             Self::AuthChallenge(response) => {
                 SchemaObject::new(name, vec![WireValue::Structure(response.try_clone()?)])
             }

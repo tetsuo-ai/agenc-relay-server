@@ -7,8 +7,8 @@ use crate::connection::ConnectionGeneration;
 use crate::federation::codec::results::ResultArm;
 use agenc_relay_federation_wire::RequestCorrelation;
 use agenc_relay_federation_wire::{
-    CanonicalEncode, FederationHash32, RequestHeader, ResultHeader, SchemaObject,
-    federation_object_id, result_kind_permitted,
+    FederationHash32, InitialRootOperation, RequestHeader, ResultHeader, SchemaObject,
+    federation_object_id,
 };
 use agenc_relay_storage::federation_records::{
     COORDINATOR_RESULT_KIND, CoordinatorResultRecord, request_result_key,
@@ -17,6 +17,7 @@ use agenc_relay_storage::{PersistentRecordValue, StoredKey, TableId};
 use agenc_relay_types::EventId;
 
 pub(crate) struct RemoteResultBinding {
+    extension: Option<InitialRootOperation>,
     header: RequestHeader,
     request_object_id: FederationHash32,
     origin: AccountServiceDurableWrite,
@@ -34,12 +35,14 @@ impl StateCoreContext {
         &mut self,
         generation: ConnectionGeneration,
         header: RequestHeader,
+        extension: Option<InitialRootOperation>,
         request_object_id: FederationHash32,
         origin: AccountServiceDurableWrite,
     ) {
         self.remote_account_results.insert(
             generation,
             RemoteResultBinding {
+                extension,
                 header,
                 request_object_id,
                 origin,
@@ -115,12 +118,22 @@ impl StateCoreContext {
         let Some(binding) = self.remote_account_results.get(&generation) else {
             return Ok(());
         };
-        let (arm, replies) = crate::remote_accounts::sealed_result(
-            self.server_prefix(),
-            binding.header.opcode,
-            response,
-            semantic,
-        )?;
+        let (arm, replies) = if let Some(operation) = binding.extension {
+            if semantic.is_some() {
+                return Err(RuntimeError::InvalidValue);
+            }
+            (
+                ResultArm::InitialRoot(operation, response.into()),
+                Vec::new(),
+            )
+        } else {
+            crate::remote_accounts::sealed_result(
+                self.server_prefix(),
+                binding.header.opcode,
+                response,
+                semantic,
+            )?
+        };
         writes.extend(self.remote_account_result_writes(generation, revision, &arm, replies)?);
         Ok(())
     }
@@ -177,9 +190,6 @@ impl RemoteResultBinding {
         replies: Vec<SchemaObject>,
         completion_event_id: Option<EventId>,
     ) -> Result<Vec<u8>, RuntimeError> {
-        if !result_kind_permitted(self.header.opcode, arm.kind()) {
-            return Err(RuntimeError::InvalidValue);
-        }
         let header = ResultHeader {
             network_id: self.header.network_id,
             replay_key: self.header.replay_key,
@@ -188,15 +198,14 @@ impl RemoteResultBinding {
             completion_event_id,
             result_kind: arm.kind(),
         };
-        let object = arm
-            .to_object()
-            .and_then(|arm| header.build(&arm, replies))
-            .map_err(|_| RuntimeError::InvalidValue)?;
-        Ok(object
-            .encode_canonical()
-            .map_err(|_| RuntimeError::InvalidValue)?
-            .as_slice()
-            .to_vec())
+        crate::federation::codec::initial_root::encode_result(
+            &self.header,
+            self.extension,
+            &header,
+            arm,
+            replies,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
     }
 
     fn origin_at(&self, revision: u64) -> Result<AccountServiceDurableWrite, RuntimeError> {

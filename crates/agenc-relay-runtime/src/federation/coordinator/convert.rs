@@ -236,7 +236,7 @@ fn session_seed(
 }
 
 /// Resolves a session the requesting edge hosts.
-fn hosted_session(
+pub(super) fn hosted_session(
     domain: &DomainState,
     peer: ServerId,
     session_id: SessionId,

@@ -86,6 +86,7 @@ fn request_of(
         sequence: header.replay_key.operation_sequence,
     };
     Ok(FreshRequest {
+        extension: None,
         key,
         header,
         descriptor,

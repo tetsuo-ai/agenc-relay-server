@@ -261,11 +261,23 @@ pub struct InitialRootResult<'a> {
     pub layout: ResultHeader,
     /// Original sealed payload plus its actual operation, absent only for a pre-open failure.
     pub sealed: Option<(InitialRootOperation, &'a [u8])>,
-    /// Canonically validated result and indexed replies; for sealed responses use `sealed` for the payload.
-    pub object: SchemaObject,
+    object: SchemaObject,
 }
 
 impl<'a> InitialRootResult<'a> {
+    /// Returns only the ordinary indexed replies carried by this checked result.
+    pub fn indexed_replies(&self) -> Result<&[SchemaObject], CodecError> {
+        access::vector(&self.object, "replies")
+    }
+
+    /// Returns the canonical failure fields only for a pre-open failure.
+    pub fn failed_arm(&self, budget: &mut DecodeBudget) -> Result<SchemaObject, CodecError> {
+        if self.sealed.is_some() {
+            return Err(CodecError::CrossReference);
+        }
+        crate::decode_result_arm(&self.object, budget)
+    }
+
     /// Encodes one committed sealed reply. A state reply has no indexed replies and no completion event.
     pub fn encode_sealed(
         profile: FederationProfile,

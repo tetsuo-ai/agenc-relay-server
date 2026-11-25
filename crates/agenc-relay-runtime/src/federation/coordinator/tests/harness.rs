@@ -2680,6 +2680,7 @@ fn staged_request(peer: ServerId, incarnation: ServerIncarnation) -> PendingComm
     let origin_id = OriginId::from_bytes([77; 16]);
     let request_id = RequestId::from_bytes([78; 16]);
     PendingCommit::Request {
+        extension: None,
         query: None,
         staged_after: 0,
         peer,
@@ -4746,7 +4747,7 @@ async fn resync_account_transaction_contains_its_exact_federation_response() -> 
         .encode()?,
     )
     .map_err(|error| format!("{error:?}"))?;
-    context.bind_remote_account_result(generation, header, request_object_id, origin);
+    context.bind_remote_account_result(generation, header, None, request_object_id, origin);
     let arm = ResultArm::Failed {
         code: "NOT_ALLOWED".to_owned(),
         context: String::new(),
@@ -4836,6 +4837,7 @@ fn remote_account_staging_request(
     let request_id = RequestId::from_bytes([73; 16]);
     let request_object_id = FederationHash32::from_bytes([74; 32]);
     let fresh = crate::federation::coordinator::FreshRequest {
+        extension: None,
         key: OperationKey {
             origin: key,
             generation: 0,

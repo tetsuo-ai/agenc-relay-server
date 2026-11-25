@@ -311,6 +311,7 @@ async fn a_second_carrier_request_is_refused_while_the_first_is_in_flight() -> T
     next_descriptor.request_id = next_header.request_id;
     next_descriptor.object_id = FederationHash32::from_bytes([77; 32]);
     let second = crate::federation::coordinator::FreshRequest {
+        extension: None,
         key: next_key,
         header: next_header,
         descriptor: next_descriptor,

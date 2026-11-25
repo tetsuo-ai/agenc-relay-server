@@ -35,8 +35,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use agenc_relay_domain::federation::{OperationKey, OriginKey, OriginTable, RetainedRequest};
 use agenc_relay_federation_wire::{
-    CanonicalEncode, EventDescriptor, FederationFrame, FederationHash32, FederationLineText,
-    OperationDescriptor, RequestHeader, SchemaObject, federation_object_id, split_fragments,
+    EventDescriptor, FederationFrame, FederationHash32, FederationLineText, OperationDescriptor,
+    RequestHeader, federation_object_id, split_fragments,
 };
 use agenc_relay_storage::federation_records::{
     DeliveryCursorRecord, FederationPeerRecord, PEER_RECORD_KIND, PeerPhase, peer_key,
@@ -182,6 +182,7 @@ enum PendingCommit {
         descriptor: OperationDescriptor,
         /// The request header, kept so a refused batch can still answer.
         header: RequestHeader,
+        extension: Option<agenc_relay_federation_wire::InitialRootOperation>,
         _charge: Option<IngressCharge>,
         query: Option<query::QueryReceipt>,
     },
@@ -1857,6 +1858,7 @@ impl FederationCoordinator {
             request_object_id,
             descriptor,
             header,
+            extension,
             result,
             query,
             ..
@@ -1876,6 +1878,7 @@ impl FederationCoordinator {
             FreshRequest {
                 key,
                 header,
+                extension,
                 descriptor,
                 request_object_id,
                 bound: None,
@@ -2128,12 +2131,4 @@ fn send_object(
         handle.try_send(line)?;
     }
     Ok(())
-}
-
-/// Encodes one schema object to its canonical bytes.
-fn encode_object(object: &SchemaObject) -> Result<Vec<u8>, RuntimeError> {
-    object
-        .encode_canonical()
-        .map(|bytes| bytes.as_slice().to_vec())
-        .map_err(|_| RuntimeError::InvalidValue)
 }
