@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1103
-reviewed_source_sha256 = "90f5598b5f4c5fd081a82f62f250754e41302029eb8e353eeb82955a7dd277f6"
+reviewed_source_files = 1106
+reviewed_source_sha256 = "dd69f8727493ef4c288a84fe2cb2d7bf36879a28fda79d9de9ff07a5b5c9be7d"
 deferred = []
 
 [[region]]
@@ -324,7 +324,7 @@ id = "terminal-certificate-retained-scope"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
 item = "certificate_id"
-source_sha256 = "3be22837f1cbbeff7afa0661bee165624a72905a10c2722e731084368945d1f0"
+source_sha256 = "73de65f59d86939d5551121dcf70bca683cc1feea13c9be439e85720b2c0a746"
 start_line = 138
 end_line = 146
 span_sha256 = "683a74ebefa61c1505c7f95a126898649783f6655b0e59a3e5d7bf84cb821ee4"
@@ -336,9 +336,9 @@ id = "terminal-certificate-row-shape"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
 item = "restore_terminal_certificates"
-source_sha256 = "3be22837f1cbbeff7afa0661bee165624a72905a10c2722e731084368945d1f0"
-start_line = 1556
-end_line = 1558
+source_sha256 = "73de65f59d86939d5551121dcf70bca683cc1feea13c9be439e85720b2c0a746"
+start_line = 1623
+end_line = 1625
 span_sha256 = "09e2e8ffc6485855125dafbfbc41c01ab1738260351e92efc34dd099b60ae3da"
 metric = "branches"
 reason = "A committed terminal row with the wrong role raises a recovery error instead of losing its standalone proof."
@@ -354,3 +354,39 @@ end_line = 1931
 span_sha256 = "ed15bc2168755eabfc10bf4ce3d58c530dd10b325d35303931818a3c2773347b"
 metric = "regions"
 reason = "A cached standalone certificate cannot bypass its originating log, and other objects retain the existing recovery, membership and policy constraints."
+
+[[region]]
+id = "sc002-negative-claim-admission"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/empty_claims.rs"
+item = "reserve"
+source_sha256 = "d84623c550ff7e57149b120c0e6242fb89215c8ad1e4de0521887aaf4f0dda79"
+start_line = 23
+end_line = 45
+span_sha256 = "e4c6825478c2ad9e7e3d730dd12c148664f411203b0991a248cb70fe4f7b86f2"
+metric = "regions"
+reason = "Per-claimant, global and process limits protect retained no-stock operations and preserve existing outcomes."
+
+[[region]]
+id = "sc002-claim-release"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/request_expiry/claims.rs"
+item = "remove"
+source_sha256 = "ae060a6136e9d9fa92046cb2367618508f660da2f04f28cac5a8b2b53aff86b7"
+start_line = 117
+end_line = 122
+span_sha256 = "f74b1c095105e2b3d770bb31f88694d237d48382e62d9def4f55ce2d583cf454"
+metric = "regions"
+reason = "An empty claim relinquishes only its resident slot, while a claimed mapping relinquishes its signed package owner in the transaction."
+
+[[region]]
+id = "sc002-restore-claim-slot"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
+item = "restore_claim_slot"
+source_sha256 = "73de65f59d86939d5551121dcf70bca683cc1feea13c9be439e85720b2c0a746"
+start_line = 345
+end_line = 364
+span_sha256 = "6ddb4e000ab3f2399183b8bb6b5da03866bcc4ee5d64f33af6aa4d940637f72c"
+metric = "regions"
+reason = "Only retained empty outcomes take a bounded slot on reload; claimed rows remain readable and admission refusals cannot become results."

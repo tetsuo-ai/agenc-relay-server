@@ -8,6 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::Bound::{Excluded, Unbounded};
+use std::sync::Arc;
 
 use super::limits::{
     ATTACH_CHALLENGE_TIMEOUT_SECONDS, KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS,
@@ -171,6 +173,53 @@ struct ClaimRecord {
     retain_until: u64,
 }
 
+/// The exact result staged by the exclusive directory writer.
+/// Dropping this plan leaves the stock and operation mappings unchanged.
+pub struct PlannedClaim {
+    key: (Id, Id16),
+    record: ClaimRecord,
+    fresh: bool,
+}
+
+impl PlannedClaim {
+    /// Whether a new mapping and any stock removal must be committed.
+    #[must_use]
+    pub const fn is_fresh(&self) -> bool {
+        self.fresh
+    }
+
+    /// The answer associated with this operation.
+    #[must_use]
+    pub const fn outcome(&self) -> &ClaimOutcome {
+        &self.record.outcome
+    }
+
+    /// The persisted cutoff, including the dispensed package's lifetime.
+    #[must_use]
+    pub const fn retain_until(&self) -> u64 {
+        self.record.retain_until
+    }
+
+    /// Replays the committed operation on its originating directory. As with
+    /// `restore_claim`, the durable writer owns ordering. It holds off later
+    /// directory work until this result has either committed or been discarded.
+    pub fn apply_committed(self, directory: &mut Directory) -> ClaimOutcome {
+        if self.fresh {
+            if let ClaimOutcome::Claimed {
+                key_package_ref, ..
+            } = &self.record.outcome
+            {
+                directory.packages.remove(key_package_ref);
+            }
+            let outcome = self.record.outcome.clone();
+            Arc::make_mut(&mut directory.claims).insert(self.key, self.record);
+            outcome
+        } else {
+            self.record.outcome
+        }
+    }
+}
+
 /// The state of one account.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AccountEntry {
@@ -201,7 +250,8 @@ impl AccountEntry {
 pub struct Directory {
     accounts: BTreeMap<Id, AccountEntry>,
     packages: BTreeMap<Vec<u8>, Package>,
-    claims: BTreeMap<(Id, Id16), ClaimRecord>,
+    // Other directory operations stage temporary copies. Their claim rows are immutable.
+    claims: Arc<BTreeMap<(Id, Id16), ClaimRecord>>,
 }
 
 impl Directory {
@@ -230,7 +280,7 @@ impl Directory {
         outcome: ClaimOutcome,
         retain_until: u64,
     ) {
-        self.claims.insert(
+        Arc::make_mut(&mut self.claims).insert(
             (claimant_digest, operation_id),
             ClaimRecord {
                 parameters,
@@ -553,38 +603,53 @@ impl Directory {
         parameters: ClaimParameters,
         now: u64,
     ) -> Result<ClaimOutcome, DirectoryError> {
-        if let Some(record) = self.claims.get(&(claimant_digest, operation_id)) {
+        Ok(self
+            .plan_claim(claimant_digest, operation_id, parameters, now)?
+            .apply_committed(self))
+    }
+
+    /// Checks parameters, stock and the retention boundary without changing state.
+    /// A service can reserve resources and persist this result before publishing its plan.
+    pub fn plan_claim(
+        &self,
+        claimant_digest: Id,
+        operation_id: Id16,
+        parameters: ClaimParameters,
+        now: u64,
+    ) -> Result<PlannedClaim, DirectoryError> {
+        let key = (claimant_digest, operation_id);
+        if let Some(record) = self.claims.get(&key) {
             if record.parameters != parameters {
                 return Err(DirectoryError::OperationConflict);
             }
-            return Ok(record.outcome.clone());
+            return Ok(PlannedClaim {
+                key,
+                record: record.clone(),
+                fresh: false,
+            });
         }
         let outcome = self.dispense(&parameters, now)?;
+        let timeout = now
+            .checked_add(KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS)
+            .ok_or(DirectoryError::Overflow)?;
         let retain_until = match &outcome {
             ClaimOutcome::Claimed {
                 key_package_ref, ..
             } => self
                 .packages
                 .get(key_package_ref)
-                .map_or(now, |package| package.expires_at)
-                .max(now.saturating_add(KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS)),
-            ClaimOutcome::Unavailable => now.saturating_add(KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS),
+                .map_or(timeout, |package| package.expires_at.max(timeout)),
+            ClaimOutcome::Unavailable => timeout,
         };
-        if let ClaimOutcome::Claimed {
-            key_package_ref, ..
-        } = &outcome
-        {
-            self.packages.remove(key_package_ref);
-        }
-        self.claims.insert(
-            (claimant_digest, operation_id),
-            ClaimRecord {
+        Ok(PlannedClaim {
+            key,
+            record: ClaimRecord {
                 parameters,
-                outcome: outcome.clone(),
+                outcome,
                 retain_until,
             },
-        );
-        Ok(outcome)
+            fresh: true,
+        })
     }
 
     fn dispense(
@@ -639,6 +704,36 @@ impl Directory {
             .map(|record| (record.parameters, &record.outcome))
     }
 
+    /// The deadline of the claim mapping. A caller persisting the result
+    /// writes this value, including any longer published package lifetime.
+    #[must_use]
+    pub fn claim_retained_until(&self, claimant: &Id, operation: &Id16) -> Option<u64> {
+        self.claims
+            .get(&(*claimant, *operation))
+            .map(|record| record.retain_until)
+    }
+
+    /// Visits claim mappings after a maintenance cursor, in key order. The
+    /// caller limits how many entries it examines in one pass.
+    pub fn claims_after(
+        &self,
+        after: Option<(Id, Id16)>,
+    ) -> impl Iterator<Item = ((Id, Id16), u64, &ClaimOutcome)> {
+        let start = after.map_or(Unbounded, Excluded);
+        self.claims
+            .range((start, Unbounded))
+            .map(|(key, record)| (*key, record.retain_until, &record.outcome))
+    }
+
+    /// Removes a claim after its durable deletion has committed.
+    pub fn forget_claim(&mut self, claimant: &Id, operation: &Id16) {
+        let claims = Arc::make_mut(&mut self.claims);
+        claims.remove(&(*claimant, *operation));
+        if claims.is_empty() {
+            claims.clear();
+        }
+    }
+
     /// Published packages of one device.
     #[must_use]
     pub fn stock(&self, account_digest: &Id, device_id: &Id16) -> usize {
@@ -662,7 +757,7 @@ impl Directory {
         for reference in &burned {
             self.packages.remove(reference);
         }
-        self.claims.retain(|_, record| record.retain_until > now);
+        Arc::make_mut(&mut self.claims).retain(|_, record| record.retain_until > now);
         for entry in self.accounts.values_mut() {
             for attachment in entry.attachments.values_mut() {
                 if attachment

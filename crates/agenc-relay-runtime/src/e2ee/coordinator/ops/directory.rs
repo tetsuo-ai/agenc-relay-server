@@ -647,70 +647,86 @@ pub fn claim_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     })?;
     let claimant = exec.account_digest()?;
     exec.attached_device()?;
-    // A repeated operation replays the recorded claim; its rows are already
-    // durable, so only a fresh claim stages writes.
-    let fresh = exec
-        .coordinator
-        .state
-        .directory
-        .claim_status(&claimant, &operation_id)
-        .is_none();
     let parameters = ClaimParameters {
         target_account_digest: digest(exec, &target)?,
         target_device_id: device_id,
         suite,
     };
-    let mut directory = exec.coordinator.state.directory.clone();
-    let claim = directory
-        .claim_package(claimant, operation_id, parameters, exec.now)
+    let plan = exec
+        .coordinator
+        .state
+        .directory
+        .plan_claim(claimant, operation_id, parameters, exec.now)
         .map_err(|error| match error {
             agenc_relay_domain::e2ee::directory::DirectoryError::OperationConflict => {
                 Fail::with(E2eeReplyCode::OperationConflict, &operation_id)
             }
-            agenc_relay_domain::e2ee::directory::DirectoryError::DeviceInactive => {
-                Fail::with(E2eeReplyCode::KeyUnavailable, &device_id)
-            }
             _ => Fail::with(E2eeReplyCode::KeyUnavailable, &device_id),
         })?;
-    let mut outcome = claimed(exec, device_id, &claim)?;
-    if let ClaimOutcome::Claimed {
-        key_package_ref,
-        object_id,
-    } = &claim
-        && fresh
-    {
-        let key = PackageRow::claim_key(&claimant, &operation_id)
-            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
-        outcome.writes.push(state_row(
+    let mut outcome = claimed(exec, device_id, plan.outcome())?;
+    if !plan.is_fresh() {
+        return Ok(outcome);
+    }
+
+    use agenc_relay_storage::e2ee_records::ClaimOutcome as Stored;
+    let key = (claimant, operation_id);
+    let (result, reference, object, empty_slot) = match plan.outcome() {
+        ClaimOutcome::Claimed {
+            key_package_ref,
+            object_id,
+        } => {
+            let package = PackageRow::package_key(key_package_ref)
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+            outcome.writes.push(
+                crate::state_core::durable::AccountServiceDurableWrite::delete(
+                    TableId::E2eeState,
+                    package,
+                )
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+            );
+            (
+                Stored::Claimed,
+                key_package_ref.clone(),
+                Some(*object_id),
+                None,
+            )
+        }
+        ClaimOutcome::Unavailable => {
+            let slot = exec
+                .coordinator
+                .state
+                .empty_claims
+                .reserve(key, &exec.backing)
+                .map_err(|_| Fail::from(E2eeReplyCode::RateLimited))?;
+            (Stored::KeyUnavailable, Vec::new(), None, Some(slot))
+        }
+    };
+    let row = PackageRow::Claim {
+        target_account_digest: parameters.target_account_digest,
+        target_device_id: device_id,
+        suite,
+        outcome: result,
+        key_package_ref: reference,
+        object_id: object,
+        retain_until: plan.retain_until(),
+    };
+    // Stage the new owner before the stock release in the same atomic batch.
+    outcome.writes.insert(
+        0,
+        state_row(
             TableId::E2eeState,
             PACKAGE_ROW_KIND,
-            key,
-            PackageRow::Claim {
-                target_account_digest: parameters.target_account_digest,
-                target_device_id: device_id,
-                suite,
-                outcome: agenc_relay_storage::e2ee_records::ClaimOutcome::Claimed,
-                key_package_ref: key_package_ref.clone(),
-                object_id: Some(*object_id),
-                retain_until: exec.now.saturating_add(
-                    agenc_relay_domain::e2ee::limits::KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS,
-                ),
-            }
-            .encode()
-            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
-        )?);
-        let package_key = PackageRow::package_key(key_package_ref)
-            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
-        outcome.writes.push(
-            crate::state_core::durable::AccountServiceDurableWrite::delete(
-                TableId::E2eeState,
-                package_key,
-            )
-            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
-        );
-    }
+            PackageRow::claim_key(&claimant, &operation_id)
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+            row.encode()
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        )?,
+    );
     outcome.effects.push(Box::new(move |companion| {
-        companion.directory = directory;
+        plan.apply_committed(&mut companion.directory);
+        if let Some(permit) = empty_slot {
+            companion.empty_claims.insert(key, permit);
+        }
     }));
     Ok(outcome)
 }

@@ -112,9 +112,12 @@ fn prepare(
         advance_cursor(coordinator, context, &prepared);
         return Ok(None);
     }
-    // Covers one metadata delete per entry, keys, vector capacities and staging copies.
+    // Covers the replay metadata plus the staged claim owner's updated
+    // record, when this pass retires a claim.
     let backing = context
-        .reserve_output_backing(MAX_EXPIRY_ENTRIES * 4096 + 16_384)
+        .reserve_output_backing(
+            MAX_EXPIRY_ENTRIES * 4096 + 16_384 + prepared.claim_output_backing(),
+        )
         .map_err(|_| CompanionFault::Ceiling)?;
     let staged_after = context.head().storage_commit_sequence;
     let checkpoint = context

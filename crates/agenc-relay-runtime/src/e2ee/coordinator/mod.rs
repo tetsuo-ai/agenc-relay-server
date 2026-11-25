@@ -47,6 +47,7 @@ pub(crate) use delivery_owner::retention::maintenance::{
     Candidate as ReplayMaintenanceCandidate, Job as ReplayMaintenanceJob,
     Prepared as PreparedReplayMaintenance,
 };
+mod empty_claims;
 pub mod events;
 pub mod execute;
 pub(crate) mod mailbox_expiry;
@@ -213,6 +214,8 @@ pub struct CompanionState {
     pub lifecycles: BTreeMap<[u8; 32], Lifecycle>,
     /// The directory.
     pub directory: Directory,
+    /// Charged retained no-stock operations; they own no E2EE object.
+    empty_claims: empty_claims::Slots,
     /// Mailboxes.
     pub mailboxes: Mailboxes,
     /// Process-local cuts; opaque mailbox cursors never survive reconstruction.
