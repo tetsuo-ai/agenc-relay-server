@@ -11,14 +11,23 @@ use agenc_relay_crypto::{InitialRootExchange, InitialRootSecret};
 fn negotiate_root(client: &mut ArcClient) -> TestResult {
     client.send("CAP LS 302")?;
     let offered = client.read_until(|line| line.contains(" LS ") && !line.contains(" LS * :"))?;
-    assert_contains(
-        &offered,
-        &format!(
-            "agenc.ag/initial-root=v1.{}",
-            agenc_relay_types::INITIAL_ROOT_PROFILE_TOKEN
-        ),
-    )?;
+    if offered
+        .iter()
+        .any(|line| line.contains("agenc.ag/initial-root"))
+    {
+        return Err(failure(
+            "a fresh legacy listing received an unsolicited optional capability",
+        ));
+    }
     client.send("CAP REQ :agenc.ag/initial-root")?;
+    let expected = format!(
+        " NEW :agenc.ag/initial-root=v1.{}",
+        agenc_relay_types::INITIAL_ROOT_PROFILE_TOKEN
+    );
+    let discovered = client.read_until(|line| {
+        line.contains(" NEW ") || line.contains(" ACK ") || line.contains(" NAK ")
+    })?;
+    assert_contains(&discovered, &expected)?;
     let ack = client.read_until(|line| line.contains(" ACK ") || line.contains(" NAK "))?;
     assert_contains(&ack, " ACK :agenc.ag/initial-root")
 }
@@ -26,20 +35,14 @@ fn negotiate_root(client: &mut ArcClient) -> TestResult {
 fn registered_owner(
     fixture: &NodeFixture,
     nick: &str,
+    login: &str,
     seed: u8,
     account: AccountId,
 ) -> TestResult<ArcClient> {
     let mut client = ArcClient::connect(fixture)?;
     client.negotiate_sasl()?;
     negotiate_root(&mut client)?;
-    authenticate_live_account(
-        &mut client,
-        fixture,
-        "protected-creator",
-        ACCOUNT_PASSWORD,
-        seed,
-        account,
-    )?;
+    authenticate_live_account(&mut client, fixture, login, ACCOUNT_PASSWORD, seed, account)?;
     client.complete_registration(nick)?;
     Ok(client)
 }
@@ -123,7 +126,7 @@ fn registered_guarded_creation_choice_and_directory_survive_coordinator_restart(
             Some(&secret),
         )?
     };
-    let mut publisher = registered_owner(fixture, "Creator", 39, account)?;
+    let mut publisher = registered_owner(fixture, "Creator", "protected-creator", 39, account)?;
     let mut directory = authenticated_session(
         &network.edge_a,
         "Directory",
@@ -215,7 +218,7 @@ fn registered_guarded_creation_choice_and_directory_survive_coordinator_restart(
     let _ = daemon.stop()?;
 
     let mut daemon = DaemonProcess::start(&fixture.config_path)?;
-    let mut restored = registered_owner(fixture, "Returned", 47, account)?;
+    let mut restored = registered_owner(fixture, "Returned", "protected-creator", 47, account)?;
     assert!(
         claim(
             &mut restored,
@@ -227,6 +230,82 @@ fn registered_guarded_creation_choice_and_directory_survive_coordinator_restart(
             106
         )? == Some(published)
     );
+    let _ = daemon.stop()?;
+    Ok(())
+}
+
+#[test]
+fn separate_registered_legacy_account_cannot_read_or_choose_the_creators_claim() -> TestResult {
+    let network = build_network()?;
+    let fixture = &network.coordinator;
+    let mut daemon = DaemonProcess::start(&fixture.config_path)?;
+    let mut edge = DaemonProcess::start(&network.edge_a.config_path)?;
+    wait_for_link(&network.edge_a, 0)?;
+
+    // An unchanged client sees its closed base registry on either listener.
+    // Even an explicit 302 probe on an ordinary federation route receives a NAK.
+    let mut ordinary_edge = ArcClient::connect(&network.edge_a)?;
+    ordinary_edge.negotiate_sasl()?;
+    ordinary_edge.send("CAP REQ :agenc.ag/initial-root")?;
+    let refusal = ordinary_edge.read_until(|line| {
+        line.contains(" NAK ") || line.contains(" ACK ") || line.contains(" NEW ")
+    })?;
+    assert_contains(&refusal, " NAK :agenc.ag/initial-root")?;
+    drop(ordinary_edge);
+
+    let secret = InitialRootSecret::generate()?;
+    let requests = account_requests(110)?;
+    let mut creator = ArcClient::connect(fixture)?;
+    creator.negotiate_sasl()?;
+    negotiate_root(&mut creator)?;
+    let owner = create_account_with_root_option(
+        &mut creator,
+        fixture,
+        "reserved-owner",
+        requests,
+        Some(&secret),
+    )?;
+    drop(creator);
+    let mut ordinary = ArcClient::connect(fixture)?;
+    ordinary.negotiate_sasl()?;
+    let other = create_live_account(&mut ordinary, fixture, "ordinary-stranger", 113)?;
+    drop(ordinary);
+    assert_ne!(owner, other);
+
+    let mut stranger = registered_owner(fixture, "Stranger", "ordinary-stranger", 116, other)?;
+    let mut request_id = 121;
+    for target in [owner, other] {
+        for action in [ClaimAction::Read, ClaimAction::Choose([9; 32])] {
+            // Both the original START and the secret belong to the real guarded owner.
+            assert!(
+                claim(
+                    &mut stranger,
+                    fixture,
+                    target,
+                    requests[0],
+                    &secret,
+                    action,
+                    request_id
+                )?
+                .is_none()
+            );
+            request_id += 1;
+        }
+    }
+    drop(stranger);
+    let mut returned = registered_owner(fixture, "Owner", "reserved-owner", 126, owner)?;
+    assert!(
+        claim(
+            &mut returned,
+            fixture,
+            owner,
+            requests[0],
+            &secret,
+            ClaimAction::Read,
+            129
+        )? == Some(ClaimState::Reserved)
+    );
+    let _ = edge.stop()?;
     let _ = daemon.stop()?;
     Ok(())
 }

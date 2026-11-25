@@ -137,7 +137,9 @@ impl CapabilityProfile {
         &self.capabilities
     }
 
-    pub(crate) fn contains(&self, name: &str) -> bool {
+    /// Whether this exact capability has a current offer.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
         self.capabilities
             .iter()
             .any(|capability| capability.name == name)
