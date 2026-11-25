@@ -266,3 +266,36 @@ fn a_non_council_direct_invitee_must_name_a_bound_account_and_its_roster_device(
     }
     Ok(())
 }
+
+#[test]
+fn a_live_non_council_device_cannot_replace_its_principal_root_in_the_plan() -> TestResult {
+    use agenc_relay_testkit::e2ee_client::{principal, root_fingerprint, roster_id};
+    let mut f = unsigned(ArcConversationKind::Direct)?;
+    let updated = principal(41, &OTHER, &[9, 21])?;
+    let actual_root = root_fingerprint(&updated.root)?;
+    let mut pins = f.package.binding.tbs.principals.as_slice().to_vec();
+    pins.get_mut(1).ok_or("principal pin")?.roster_id = roster_id(&updated.roster)?;
+    f.package.binding.tbs.principals = TlsVec::new(pins)?;
+    *f.principals.get_mut(1).ok_or("fixture principal")? = updated;
+    let mut planned = f.package.initial_member_plan.entries.as_slice().to_vec();
+    let mut extra = planned.last().ok_or("existing member")?.clone();
+    extra.device_id = [21; 16];
+    extra.capability_id = [21; 32];
+    assert_eq!(extra.root_fingerprint, actual_root);
+    planned.push(extra);
+    f.package.initial_member_plan.entries = TlsVec::new(planned.clone())?;
+    pin_plan(&mut f)?;
+    let checked = check(&f, &mut budget())?;
+    assert!(
+        !checked
+            .operational_policy()
+            .council
+            .iter()
+            .any(|m| m.device_id == [21; 16])
+    );
+    planned.last_mut().ok_or("extra member")?.root_fingerprint = [0xff; 32];
+    f.package.initial_member_plan.entries = TlsVec::new(planned)?;
+    pin_plan(&mut f)?;
+    assert!(check(&f, &mut budget()).is_err());
+    Ok(())
+}
