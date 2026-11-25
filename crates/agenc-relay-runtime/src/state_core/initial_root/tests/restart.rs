@@ -177,9 +177,9 @@ async fn guarded_initial_root_survives_four_reopens_and_a_signed_rotation_with_o
     };
     reserved_database(&mut fixture, &original).await?;
     let none = crate::sync::Arc::new(crate::budget::MemoryBudget::new(0));
-    let error = fixture
-        .recover_with_account_budget(&none)
-        .expect_err("fresh startup must reserve the private owner");
+    let Err(error) = fixture.recover_with_account_budget(&none) else {
+        return Err("fresh startup must reserve the private owner".into());
+    };
     assert!(matches!(
         error.downcast_ref::<RuntimeError>(),
         Some(RuntimeError::MemoryExhausted)
