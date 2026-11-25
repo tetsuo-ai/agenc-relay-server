@@ -31,12 +31,14 @@ fn optional_input_charges_only_the_exact_start_and_releases_on_retirement()
     assert!(edge.root_buffer.is_none());
     assert!(edge.admit_buffer(context, guarded, None, start));
     assert!(edge.admit_buffer(context, guarded, None, ("DATA", Some("a"), false)));
+    let expected = crate::budget::MemoryCharge::allocation(u64::try_from(
+        agenc_relay_client_wire::ACCOUNT_REQUEST_CHARACTERS,
+    )?)?
+    .bytes();
     assert!(
         edge.root_buffer
             .as_ref()
-            .is_some_and(|slot| slot._backing.bytes()
-                == u64::try_from(agenc_relay_client_wire::ACCOUNT_REQUEST_CHARACTERS)
-                    .unwrap_or_default())
+            .is_some_and(|slot| slot._backing.bytes() == expected)
     );
     edge.release_initial_buffer(guarded.into(), false);
     assert!(edge.root_buffer.is_some());

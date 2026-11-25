@@ -68,6 +68,7 @@ fn same_sealed_read_twice(
 }
 
 fn wait_for_public_account(client: &mut ArcClient, account: AccountId) -> TestResult {
+    let expected = URL_SAFE_NO_PAD.encode(account.to_text().as_bytes());
     let deadline = Instant::now() + Duration::from_secs(10);
     for attempt in 0_u32.. {
         let label = format!("guardedpublisher{attempt}");
@@ -75,7 +76,7 @@ fn wait_for_public_account(client: &mut ArcClient, account: AccountId) -> TestRe
         let reply = labeled_reply(client, &label)?;
         let words = result_words(completion_line(&reply)?)
             .ok_or_else(|| failure("missing scalar WHOAMI"))?;
-        if matches!(words.as_slice(), [kind,verb,id,..] if kind == "EKEY" && verb == "ACCOUNT" && id == &account.to_text())
+        if matches!(words.as_slice(), [kind,verb,id,..] if kind == "EKEY" && verb == "ACCOUNT" && id == &expected)
         {
             return Ok(());
         }
