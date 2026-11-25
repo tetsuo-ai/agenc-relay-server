@@ -2746,13 +2746,15 @@ mod tests {
             seed.storage().storage_key_generation(),
         )
         .map_err(|_| OfflineError::Storage)?;
-        let reconstruction = crate::state_core::reconstruct::reconstruct(
+        let budget = crate::daemon::memory_budget(&config).map_err(|_| OfflineError::Storage)?;
+        let reconstruction = crate::state_core::reconstruct::reconstruct_with_budget(
             &seed,
             &owner.port(),
             &keys,
             role,
             agenc_relay_types::MonotonicTick::from_ticks(1),
             UtcSecond::from_unix_seconds(1),
+            &budget,
         );
         owner.shutdown()?;
         Ok(reconstruction)

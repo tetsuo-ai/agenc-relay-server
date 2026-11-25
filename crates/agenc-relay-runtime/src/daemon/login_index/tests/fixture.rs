@@ -143,13 +143,15 @@ impl FaultFixture {
             recovered.database_binding(),
             recovered.storage_key_generation(),
         )?;
-        let reconstruction = reconstruct(
+        let budget = crate::daemon::memory_budget(&self.config)?;
+        let reconstruction = crate::state_core::reconstruct::reconstruct_with_budget(
             &seed,
             &owner.port(),
             &keys,
             self.config.network.role,
             MonotonicTick::from_ticks(0),
             UtcSecond::from_unix_seconds(60),
+            &budget,
         )?;
         assert_eq!(
             reconstruction.account_service.login_index_key_state(),
@@ -175,7 +177,7 @@ impl FaultFixture {
             60,
         )?;
         Ok(LiveStorage {
-            budget: crate::daemon::memory_budget(&self.config)?,
+            budget,
             companion_spool: None,
             owner,
             limit_writer,

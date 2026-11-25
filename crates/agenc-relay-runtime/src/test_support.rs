@@ -59,7 +59,7 @@ use crate::registration::{AccountServiceRole, RegistrationRouter, RegistrationRo
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::{CloseReason, SourceAddressKey};
-use crate::state_core::reconstruct::reconstruct;
+use crate::state_core::reconstruct::reconstruct_with_budget;
 use crate::state_core::session::BoundSession;
 use crate::state_core::timers::SECRET_CHANNEL_FLOOR_MILLIS;
 use crate::state_core::{
@@ -328,16 +328,15 @@ fn compose_test_state(
     // The fixture database is seeded like a coordinator's, fake OPAQUE
     // record included, so it reconstructs under the stricter role.
     let budget = Arc::new(MemoryBudget::new(512 * 1_024 * 1_024));
-    let reconstruction = crate::state_core::durable::DurableIndex::new()
-        .with_initial_root_budget(&budget)
-        .reconstruct(
-            &seed,
-            &owner.port(),
-            &keys,
-            NodeRole::Coordinator,
-            MonotonicTick::from_ticks(10),
-            UtcSecond::from_unix_seconds(1_000),
-        )?;
+    let reconstruction = reconstruct_with_budget(
+        &seed,
+        &owner.port(),
+        &keys,
+        NodeRole::Coordinator,
+        MonotonicTick::from_ticks(10),
+        UtcSecond::from_unix_seconds(1_000),
+        &budget,
+    )?;
     let (storage_bridge, storage_completions, storage_reads, storage_checkpoints) =
         StorageBridge::start(owner.port())?;
     let (crypto_bridge, crypto_completions) =
@@ -700,6 +699,14 @@ impl StateCoreFixture {
     /// Reconstructs the durable account-service state from the live owner and
     /// counts the stale transaction cleanups a restart would schedule.
     pub(crate) fn recovered_startup_cleanup_count(&self) -> TestResult<usize> {
+        self.recover_with_account_budget(&Arc::new(MemoryBudget::new(512 * 1_024 * 1_024)))
+    }
+
+    /// Attempts a separate startup reconstruction with exactly the supplied process budget.
+    pub(crate) fn recover_with_account_budget(
+        &self,
+        budget: &Arc<MemoryBudget>,
+    ) -> TestResult<usize> {
         let owner = self.owner.as_ref().ok_or("storage owner")?;
         let seed = StateCoreSeed::from_storage(owner)?;
         let storage = seed.storage();
@@ -708,13 +715,14 @@ impl StateCoreFixture {
             storage.database_binding(),
             storage.storage_key_generation(),
         )?;
-        let reconstruction = reconstruct(
+        let reconstruction = reconstruct_with_budget(
             &seed,
             &owner.port(),
             &keys,
             NodeRole::Coordinator,
             MonotonicTick::from_ticks(10),
             UtcSecond::from_unix_seconds(1_000),
+            budget,
         )?;
         Ok(reconstruction
             .account_service
