@@ -915,7 +915,7 @@ fn packages_publish_once_and_claim_once_per_operation() -> TestResult {
     let package = key_package_bytes(&harness)?;
     let mut publish = DEVICE_ID.to_vec();
     publish.extend_from_slice(&1_u16.to_be_bytes());
-    publish.extend_from_slice(&50_000_u64.to_be_bytes());
+    publish.extend_from_slice(&LEAF_INTERVAL.1.to_be_bytes());
     let outcome = ok(harness.run(Op::PublishPackage, &publish, Some(&package))?)?;
     assert_eq!(
         outcome.result,

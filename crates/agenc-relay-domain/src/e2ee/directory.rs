@@ -31,7 +31,7 @@ pub enum DirectoryError {
     HeadMismatch,
     /// The device is not active in the current roster.
     DeviceInactive,
-    /// A KeyPackage reference is already published.
+    /// A KeyPackage reference is already published or was dispensed.
     DuplicatePackage,
     /// The package expiry exceeds the lifetime ceiling or is in the past.
     ExpiryOutOfRange,
@@ -53,7 +53,7 @@ impl fmt::Display for DirectoryError {
             Self::GenerationGap => "generation is not the head plus one",
             Self::HeadMismatch => "the object names a stale head",
             Self::DeviceInactive => "the device is not active in the roster",
-            Self::DuplicatePackage => "the key package is already published",
+            Self::DuplicatePackage => "the key package was already published or dispensed",
             Self::ExpiryOutOfRange => "the package expiry is out of range",
             Self::KeyUnavailable => "no acceptable key package is available",
             Self::OperationConflict => "operation id reused with different parameters",
@@ -135,6 +135,8 @@ pub struct Package {
     pub device_id: Id16,
     /// Cipher suite.
     pub suite: u16,
+    /// Earliest valid second in the signed KeyPackage lifetime.
+    pub not_before: u64,
     /// Expiry second.
     pub expires_at: u64,
     /// The retained object identifier.
@@ -205,14 +207,8 @@ impl PlannedClaim {
     /// directory work until this result has either committed or been discarded.
     pub fn apply_committed(self, directory: &mut Directory) -> ClaimOutcome {
         if self.fresh {
-            if let ClaimOutcome::Claimed {
-                key_package_ref, ..
-            } = &self.record.outcome
-            {
-                directory.packages.remove(key_package_ref);
-            }
             let outcome = self.record.outcome.clone();
-            Arc::make_mut(&mut directory.claims).insert(self.key, self.record);
+            directory.record_claim(self.key, self.record);
             outcome
         } else {
             self.record.outcome
@@ -252,6 +248,9 @@ pub struct Directory {
     packages: BTreeMap<Vec<u8>, Package>,
     // Other directory operations stage temporary copies. Their claim rows are immutable.
     claims: Arc<BTreeMap<(Id, Id16), ClaimRecord>>,
+    // A successful claim holds its reference until retirement. An older
+    // package row excluded from stock also withholds its named reference.
+    spent: Arc<BTreeMap<Vec<u8>, usize>>,
 }
 
 impl Directory {
@@ -266,9 +265,25 @@ impl Directory {
         self.accounts.insert(account_digest, entry);
     }
 
+    /// Installs the complete stock, claim and exclusion indexes after successful startup admission.
+    pub fn replace_package_rows(&mut self, recovered: Self) {
+        self.packages = recovered.packages;
+        self.claims = recovered.claims;
+        self.spent = recovered.spent;
+    }
+
     /// Restores one published package at startup.
     pub fn restore_package(&mut self, reference: Vec<u8>, package: Package) {
-        self.packages.insert(reference, package);
+        if !self.spent.contains_key(&reference) {
+            self.packages.insert(reference, package);
+        }
+    }
+
+    /// Withholds a reference named by a successful claim or by an existing
+    /// package row that cannot be restored as valid stock.
+    pub fn withhold_package(&mut self, reference: Vec<u8>) {
+        self.packages.remove(&reference);
+        *Arc::make_mut(&mut self.spent).entry(reference).or_default() += 1;
     }
 
     /// Restores one claim result at startup.
@@ -280,7 +295,7 @@ impl Directory {
         outcome: ClaimOutcome,
         retain_until: u64,
     ) {
-        Arc::make_mut(&mut self.claims).insert(
+        self.record_claim(
             (claimant_digest, operation_id),
             ClaimRecord {
                 parameters,
@@ -288,6 +303,45 @@ impl Directory {
                 retain_until,
             },
         );
+    }
+
+    fn record_claim(&mut self, key: (Id, Id16), record: ClaimRecord) {
+        if let ClaimOutcome::Claimed {
+            key_package_ref, ..
+        } = &record.outcome
+        {
+            self.withhold_package(key_package_ref.clone());
+        }
+        if let Some(previous) = Arc::make_mut(&mut self.claims).insert(key, record) {
+            Self::release_reference(&mut self.spent, &previous.outcome);
+        }
+    }
+
+    fn release_reference(spent: &mut Arc<BTreeMap<Vec<u8>, usize>>, outcome: &ClaimOutcome) {
+        if let ClaimOutcome::Claimed {
+            key_package_ref, ..
+        } = outcome
+        {
+            Self::release_withheld(spent, key_package_ref);
+        }
+    }
+
+    /// Releases the separate exclusion owned by a deleted legacy stock row.
+    pub fn release_withheld_package(&mut self, reference: &[u8]) {
+        Self::release_withheld(&mut self.spent, reference);
+    }
+
+    fn release_withheld(spent: &mut Arc<BTreeMap<Vec<u8>, usize>>, reference: &[u8]) {
+        let owners = Arc::make_mut(spent);
+        if let Some(count) = owners.get_mut(reference) {
+            *count -= 1;
+            if *count == 0 {
+                owners.remove(reference);
+                if owners.is_empty() {
+                    owners.clear();
+                }
+            }
+        }
     }
 
     /// The number of stored directory entries: account heads and
@@ -565,10 +619,11 @@ impl Directory {
         let ceiling = now
             .checked_add(MAX_KEY_PACKAGE_LIFETIME_SECONDS)
             .ok_or(DirectoryError::Overflow)?;
-        if package.expires_at <= now || package.expires_at > ceiling {
+        if now < package.not_before || package.expires_at <= now || package.expires_at > ceiling {
             return Err(DirectoryError::ExpiryOutOfRange);
         }
-        if self.packages.contains_key(&key_package_ref) {
+        if self.packages.contains_key(&key_package_ref) || self.spent.contains_key(&key_package_ref)
+        {
             return Err(DirectoryError::DuplicatePackage);
         }
         self.packages.insert(key_package_ref, package);
@@ -671,6 +726,7 @@ impl Directory {
             package.account_digest == parameters.target_account_digest
                 && package.device_id == parameters.target_device_id
                 && package.suite == parameters.suite
+                && package.not_before <= now
                 && package.expires_at >= floor
         });
         Ok(match candidate {
@@ -728,7 +784,9 @@ impl Directory {
     /// Removes a claim after its durable deletion has committed.
     pub fn forget_claim(&mut self, claimant: &Id, operation: &Id16) {
         let claims = Arc::make_mut(&mut self.claims);
-        claims.remove(&(*claimant, *operation));
+        if let Some(record) = claims.remove(&(*claimant, *operation)) {
+            Self::release_reference(&mut self.spent, &record.outcome);
+        }
         if claims.is_empty() {
             claims.clear();
         }
@@ -757,7 +815,13 @@ impl Directory {
         for reference in &burned {
             self.packages.remove(reference);
         }
-        Arc::make_mut(&mut self.claims).retain(|_, record| record.retain_until > now);
+        Arc::make_mut(&mut self.claims).retain(|_, record| {
+            let keep = record.retain_until > now;
+            if !keep {
+                Self::release_reference(&mut self.spent, &record.outcome);
+            }
+            keep
+        });
         for entry in self.accounts.values_mut() {
             for attachment in entry.attachments.values_mut() {
                 if attachment

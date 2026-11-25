@@ -216,6 +216,8 @@ pub struct CompanionState {
     pub directory: Directory,
     /// Charged retained no-stock operations; they own no E2EE object.
     empty_claims: empty_claims::Slots,
+    /// One retained permit per successful claim or excluded legacy stock row.
+    spent_package_rows: BTreeMap<agenc_relay_storage::StoredKey, crate::budget::MemoryPermit>,
     /// Mailboxes.
     pub mailboxes: Mailboxes,
     /// Process-local cuts; opaque mailbox cursors never survive reconstruction.

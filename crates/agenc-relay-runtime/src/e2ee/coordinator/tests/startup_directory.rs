@@ -16,6 +16,12 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const DEVICE: u8 = 7;
 const ACCOUNT: [u8; 24] = *b"aaaaaaaaaaaaaaaaaaaaaaaa";
 
+fn package_backing(bytes: u64) -> crate::budget::BackingReservationPort {
+    crate::budget::BackingReservationPort::new(crate::sync::Arc::new(
+        crate::budget::MemoryBudget::new(bytes),
+    ))
+}
+
 fn foreign_key() -> TestResult<StoredKey> {
     Ok(RouteRow::key(&[0x55; 32])?)
 }
@@ -674,11 +680,28 @@ fn package_row(state: PackageState) -> PackageRow {
 
 #[test]
 fn only_published_packages_under_a_package_key_are_restocked() -> TestResult {
+    use super::super::tests::support::{KeyPackageSpec, default_capabilities, key_package};
     let mut state = CompanionState::default();
+    let package = key_package(&KeyPackageSpec {
+        identity: b"fixture",
+        leaf_seed: 4,
+        suite: 1,
+        lifetime: (100, 900),
+        capabilities: default_capabilities(),
+        leaf_extensions: Vec::new(),
+    })?;
+    let bytes = ArcWireObject::new(ArcWireObjectKind::KeyPackageMls, package)?.encode()?;
+    let retained = super::super::ops::directory::retained_key_package(&bytes).ok_or("package")?;
+    let id = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
+    state.objects.insert(id, bytes);
+    let mut published = package_row(PackageState::Published);
+    if let PackageRow::Package { object_id, .. } = &mut published {
+        *object_id = id;
+    }
     let rows = vec![
         (
-            PackageRow::package_key(b"published")?,
-            package_row(PackageState::Published),
+            PackageRow::package_key(&retained.key_package_ref)?,
+            published,
         ),
         (
             PackageRow::package_key(b"claimed")?,
@@ -690,7 +713,30 @@ fn only_published_packages_under_a_package_key_are_restocked() -> TestResult {
         ),
         (foreign_key()?, package_row(PackageState::Published)),
     ];
-    restore_packages(&mut state, rows)?;
+    // Decoding public MLS fields requires its own bounded temporary allocation.
+    let scratch = crate::budget::MemoryCharge::allocation(u64::try_from(
+        super::super::resident::PACKAGE_DECODE_BACKING,
+    )?)?
+    .bytes();
+    assert!(matches!(
+        restore_packages(
+            &mut state,
+            rows.clone(),
+            BTreeMap::new(),
+            Some(&package_backing(scratch - 1))
+        ),
+        Err(super::super::CompanionFault::Ceiling)
+    ));
+    assert_eq!(state.directory.stock(&[1; 32], &[2; 16]), 0);
+    assert!(state.spent_package_rows.is_empty());
+    let budget = crate::sync::Arc::new(crate::budget::MemoryBudget::new(scratch));
+    let port = crate::budget::BackingReservationPort::new(budget.clone());
+    restore_packages(&mut state, rows, BTreeMap::new(), Some(&port))?;
+    let permanent = crate::budget::MemoryCharge::allocation(u64::try_from(
+        super::super::resident::SPENT_PACKAGE_ROW_BACKING,
+    )?)?
+    .bytes();
+    assert_eq!(budget.charged(), 2 * permanent);
     assert_eq!(state.directory.stock(&[1; 32], &[2; 16]), 1);
     Ok(())
 }
@@ -716,6 +762,87 @@ fn claim_row(object_id: Option<[u8; 32]>) -> PackageRow {
 }
 
 #[test]
+fn reconstruction_reserves_claim_and_unreadable_stock_owners_before_publication() -> TestResult {
+    use super::super::resident::SPENT_PACKAGE_ROW_BACKING;
+    use crate::budget::{BackingReservationPort, MemoryBudget, MemoryCharge};
+    use agenc_relay_types::ServerId;
+    let charge = MemoryCharge::allocation(u64::try_from(SPENT_PACKAGE_ROW_BACKING)?)?.bytes();
+    let claim = PackageRow::claim_key(&[6; 32], &[1; 16])?;
+    let stock = PackageRow::package_key(b"withheld")?;
+    let mut unfunded = Restore::default();
+    assert!(matches!(
+        unfunded.admit_package(&claim, &claim_row(Some([3; 32])).encode()?, None),
+        Err(super::super::CompanionFault::Ceiling)
+    ));
+    let port = package_backing(2 * charge);
+    let positive = claim_row(Some([3; 32])).encode()?;
+    let empty = claim_row(None).encode()?;
+    let mut malformed = Restore::default();
+    assert!(matches!(
+        malformed.admit_package(&claim, &[0xff], Some(&port)),
+        Err(super::super::CompanionFault::Storage)
+    ));
+    for (first, second) in [
+        (&positive, &positive),
+        (&positive, &empty),
+        (&empty, &positive),
+        (&empty, &empty),
+    ] {
+        let mut duplicate = Restore::default();
+        duplicate.admit_package(&claim, first, Some(&port))?;
+        assert!(matches!(
+            duplicate.admit_package(&claim, second, Some(&port)),
+            Err(super::super::CompanionFault::Storage)
+        ));
+    }
+
+    for capacity in [charge - 1, charge, 2 * charge] {
+        let mut coordinator = CompanionCoordinator::new(
+            NETWORK,
+            ServerId::from_bytes([2; 16]),
+            "coordinator.test".into(),
+        );
+        let budget = crate::sync::Arc::new(MemoryBudget::new(capacity));
+        let port = BackingReservationPort::new(budget.clone());
+        for (key, row) in [
+            (&claim, claim_row(Some([3; 32]))),
+            (&stock, package_row(PackageState::Claimed)),
+        ] {
+            let value = PersistentRecordValue::new(
+                TableId::E2eeState,
+                PACKAGE_ROW_KIND,
+                1,
+                0,
+                None,
+                Vec::new(),
+                row.encode()?,
+            )?;
+            coordinator.admit_restored_with_backing(TableId::E2eeState, key, &value, &port);
+        }
+        let result = coordinator.finish_restore_with_backing(port);
+        if capacity < 2 * charge {
+            assert!(matches!(result, Err(super::super::CompanionFault::Ceiling)));
+            assert_eq!(budget.charged(), 0);
+            assert!(coordinator.state.spent_package_rows.is_empty());
+            assert!(
+                coordinator
+                    .state
+                    .directory
+                    .claim_status(&[6; 32], &[1; 16])
+                    .is_none()
+            );
+        } else {
+            result?;
+            assert_eq!(budget.charged(), 2 * charge);
+            assert!(coordinator.state.spent_package_rows.contains_key(&claim));
+            assert!(coordinator.state.spent_package_rows.contains_key(&stock));
+        }
+        assert_eq!(coordinator.state.directory.stock(&[1; 32], &[2; 16]), 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn claim_rows_restore_their_outcome_only_under_a_claim_key() -> TestResult {
     let mut state = CompanionState::default();
     let rows = vec![
@@ -725,7 +852,23 @@ fn claim_rows_restore_their_outcome_only_under_a_claim_key() -> TestResult {
         ),
         (PackageRow::claim_key(&[6; 32], &[2; 16])?, claim_row(None)),
     ];
-    restore_packages(&mut state, rows)?;
+    let port = package_backing(1 << 22);
+    // A result admitted without its durable row permit cannot enter the directory.
+    assert!(matches!(
+        restore_packages(&mut state, rows.clone(), BTreeMap::new(), Some(&port)),
+        Err(super::super::CompanionFault::Storage)
+    ));
+    assert!(state.directory.claim_status(&[6; 32], &[1; 16]).is_none());
+    let mut restore = Restore::default();
+    for (key, row) in &rows {
+        restore.admit_package(key, &row.encode()?, Some(&port))?;
+    }
+    restore_packages(
+        &mut state,
+        restore.packages,
+        restore.spent_package_rows,
+        Some(&port),
+    )?;
     assert_eq!(
         state.directory.claim_status(&[6; 32], &[1; 16]),
         Some(&ClaimOutcome::Claimed {
@@ -742,22 +885,33 @@ fn claim_rows_restore_their_outcome_only_under_a_claim_key() -> TestResult {
 
 #[test]
 fn package_restore_helpers_ignore_rows_of_the_other_arm() -> TestResult {
-    let mut state = CompanionState::default();
+    let state = CompanionState::default();
+    let mut restored = RestoredPackages {
+        directory: Default::default(),
+        spent: BTreeMap::new(),
+    };
     restore_package_row(
-        &mut state,
-        &PackageRow::package_key(b"published")?,
+        &mut restored,
+        &state.objects,
+        PackageRow::package_key(b"published")?,
         claim_row(None),
-    );
+        None,
+    )?;
     assert!(
         restore_claim_row(
-            &mut state,
+            &mut restored,
             &PackageRow::claim_key(&[6; 32], &[1; 16])?,
             package_row(PackageState::Published),
         )
         .is_err()
     );
-    assert!(restore_claim_row(&mut state, &foreign_key()?, claim_row(None)).is_err());
-    assert_eq!(state.directory.stock(&[1; 32], &[2; 16]), 0);
-    assert!(state.directory.claim_status(&[6; 32], &[1; 16]).is_none());
+    assert!(restore_claim_row(&mut restored, &foreign_key()?, claim_row(None)).is_err());
+    assert_eq!(restored.directory.stock(&[1; 32], &[2; 16]), 0);
+    assert!(
+        restored
+            .directory
+            .claim_status(&[6; 32], &[1; 16])
+            .is_none()
+    );
     Ok(())
 }

@@ -30,7 +30,7 @@ fn publish_stock(harness: &mut Harness) -> TestResult<Vec<u8>> {
     let package = key_package_bytes(harness)?;
     let mut publish = DEVICE_ID.to_vec();
     publish.extend_from_slice(&1_u16.to_be_bytes());
-    publish.extend_from_slice(&50_000_u64.to_be_bytes());
+    publish.extend_from_slice(&LEAF_INTERVAL.1.to_be_bytes());
     let outcome = ok(harness.run(Op::PublishPackage, &publish, Some(&package))?)?;
     assert_eq!(
         outcome.result,
@@ -198,6 +198,355 @@ fn claim_retirement_honors_the_signed_lifetime_of_an_old_row() -> TestResult {
     };
     assert!(capture(early)?.is_empty());
     assert!(!capture(LEAF_INTERVAL.1)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_retired_package_row_cannot_be_republished_without_a_claim_mapping() -> TestResult {
+    use agenc_relay_storage::e2ee_records::{PACKAGE_ROW_KIND, PackageState, object_key};
+    let mut harness = Harness::with_devices(&[DEVICE, SIBLING])?;
+    let bytes = stocked_then_sibling(&mut harness)?;
+    let package = super::super::ops::directory::retained_key_package(&bytes).ok_or("package")?;
+    let account_digest = account_id_digest(&NETWORK, &harness.account)?;
+    let id = object_id(&bytes);
+    // An old database can retain the terminal package row without a result
+    // row. The reference remains occupied even if its public body is missing.
+    let row = PackageRow::Package {
+        account_digest,
+        device_id: DEVICE_ID,
+        suite: 1,
+        expires_at: LEAF_INTERVAL.1,
+        object_id: id,
+        state: PackageState::Claimed,
+        claimed_by: Some((account_digest, OPERATION)),
+    };
+    let write = request::state_row(
+        TableId::E2eeState,
+        PACKAGE_ROW_KIND,
+        PackageRow::package_key(&package.key_package_ref)?,
+        row.encode()?,
+    )
+    .map_err(|code| format!("legacy package row: {code:?}"))?;
+    harness.apply_logical_write(&write)?;
+    let mut publish = DEVICE_ID.to_vec();
+    publish.extend_from_slice(&1_u16.to_be_bytes());
+    publish.extend_from_slice(&LEAF_INTERVAL.1.to_be_bytes());
+    for retained in [true, false] {
+        if !retained {
+            harness.apply_logical_write(&Write::delete(TableId::E2eeObject, object_key(&id)?)?)?;
+        }
+        let mut rebuilt = harness.reloaded()?;
+        rebuilt.attach_as(DEVICE)?;
+        assert!(
+            rebuilt
+                .coordinator
+                .state
+                .directory
+                .claim_status(&account_digest, &OPERATION)
+                .is_none()
+        );
+        assert_eq!(
+            rebuilt
+                .coordinator
+                .state
+                .directory
+                .stock(&account_digest, &DEVICE_ID),
+            0
+        );
+        assert_eq!(
+            code(rebuilt.run(Op::PublishPackage, &publish, Some(&bytes))?),
+            Some(E2eeReplyCode::OperationConflict)
+        );
+        let fresh =
+            ok(rebuilt.run(Op::ClaimPackage, &claim_params(&rebuilt, 1, [3; 16]), None)?)?;
+        assert_eq!(fresh.result, ResultBody::Empty(EmptyKind::Package));
+    }
+    Ok(())
+}
+
+#[test]
+fn stale_legacy_stock_cannot_be_claimed_and_retires_with_its_last_owner() -> TestResult {
+    use crate::e2ee::coordinator::request_expiry::MAX_EXPIRY_ENTRIES;
+    use agenc_relay_storage::e2ee_records::{PackageState, ReplayKey, ReplayRow};
+    let mut harness = Harness::with_devices(&[DEVICE, SIBLING])?;
+    let bytes = stocked_then_sibling(&mut harness)?;
+    let first = ok(harness.run(
+        Op::ClaimPackage,
+        &claim_params(&harness, 1, OPERATION),
+        None,
+    )?)?;
+    let ResultBody::Claimed(_, reference, object_id) = &first.result else {
+        return Err("expected signed package".into());
+    };
+    let claimant = account_id_digest(&NETWORK, &harness.account)?;
+    let stock_key = PackageRow::package_key(reference)?;
+    let claim_key = PackageRow::claim_key(&claimant, &OPERATION)?;
+    let deadline = harness.now + KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS;
+    let stale_row = |expires_at| {
+        PackageRow::Package {
+            account_digest: claimant,
+            device_id: DEVICE_ID,
+            suite: 1,
+            expires_at,
+            object_id: *object_id,
+            state: PackageState::Published,
+            claimed_by: None,
+        }
+        .encode()
+    };
+    // Model a previous release where the publisher submitted the spent package again.
+    // Even an old row with a falsely extended expiry must not outlive the claim evidence.
+    for recorded_expiry in [LEAF_INTERVAL.1, deadline + 10_000] {
+        let staged = request::state_row(
+            TableId::E2eeState,
+            agenc_relay_storage::e2ee_records::PACKAGE_ROW_KIND,
+            stock_key.clone(),
+            stale_row(recorded_expiry)?,
+        )
+        .map_err(|code| format!("stock row: {code:?}"))?;
+        harness.apply_logical_write(&staged)?;
+        let mut recovered = harness.reloaded()?;
+        assert!(
+            recovered
+                .coordinator
+                .state
+                .spent_package_rows
+                .contains_key(&claim_key)
+        );
+        assert_eq!(
+            recovered
+                .coordinator
+                .state
+                .spent_package_rows
+                .contains_key(&stock_key),
+            recorded_expiry != LEAF_INTERVAL.1
+        );
+        assert_eq!(
+            recovered
+                .coordinator
+                .state
+                .directory
+                .stock(&claimant, &DEVICE_ID),
+            0
+        );
+        let status = ok(recovered.run(Op::ClaimStatus, &OPERATION, None)?)?;
+        assert_eq!(response_bytes(&status), vec![bytes.clone()]);
+        // Two full maintenance pages share their primary row budget with
+        // both the spent claim and its redundant stock row on the first pass.
+        assert!(recovered.coordinator.state.replays.is_empty());
+        for index in 1..=2 * MAX_EXPIRY_ENTRIES - 2 {
+            let key = ReplayKey {
+                home_server_id: [1; 16],
+                server_incarnation: [2; 16],
+                origin_id: [3; 16],
+                origin_generation: 1,
+                operation_sequence: u64::try_from(index)?,
+            };
+            recovered.coordinator.state.replays.insert(
+                key,
+                ReplayRow {
+                    request_id: u128::try_from(index)?.to_be_bytes(),
+                    request_object_id: [4; 32],
+                    result_object_id: None,
+                    response_object_ids: Vec::new(),
+                    security_mutation: false,
+                    retain_until: 0,
+                },
+            );
+        }
+        let due = Prepared::capture(
+            &recovered.coordinator,
+            Default::default(),
+            deadline,
+            &recovered.backing,
+        )?;
+        let mut writes = due.writes(STATE_GENERATION)?;
+        assert!(writes.iter().any(
+            |w| matches!(w, Write::Delete {table: TableId::E2eeState, key} if key == &stock_key)
+        ));
+        let owners = recovered
+            .coordinator
+            .stage_owners(&mut writes, deadline, false, STATE_GENERATION)
+            .map_err(|code| format!("owner retirement: {code:?}"))?;
+        due.apply(&mut recovered.coordinator)?;
+        assert!(recovered.coordinator.state.spent_package_rows.is_empty());
+        owners.apply(&mut recovered.coordinator.state);
+        let second = Prepared::capture(
+            &recovered.coordinator,
+            due.next_cursor(),
+            deadline,
+            &recovered.backing,
+        )?;
+        assert!(second.is_empty());
+        assert!(!second.completes_cycle());
+        assert!(
+            Prepared::capture(
+                &recovered.coordinator,
+                second.next_cursor(),
+                deadline,
+                &recovered.backing,
+            )?
+            .completes_cycle()
+        );
+        for write in &writes {
+            recovered.apply_logical_write(write)?;
+        }
+        let mut rebuilt = recovered.reloaded()?;
+        rebuilt.now = deadline;
+        let fresh = ok(rebuilt.run(
+            Op::ClaimPackage,
+            &claim_params(&rebuilt, 1, [0x88; 16]),
+            None,
+        )?)?;
+        assert_eq!(fresh.result, ResultBody::Empty(EmptyKind::Package));
+        assert!(
+            rebuilt
+                .coordinator
+                .state
+                .owners
+                .account(object_id)
+                .ok_or("owner account")?
+                .owners
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_claims_for_one_package_release_only_the_committed_row_and_its_backing() -> TestResult {
+    use agenc_relay_storage::e2ee_records::{ClaimOutcome as Stored, PACKAGE_ROW_KIND};
+    let mut h = Harness::with_devices(&[DEVICE, SIBLING])?;
+    let _ = stocked_then_sibling(&mut h)?;
+    let first = ok(h.run(Op::ClaimPackage, &claim_params(&h, 1, OPERATION), None)?)?;
+    let ResultBody::Claimed(_, reference, id) = &first.result else {
+        return Err("missing original package claim".into());
+    };
+    let claimant = account_id_digest(&NETWORK, &h.account)?;
+    let deadline = h.now + KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS;
+    let later = [0xaf; 16];
+    let later_key = PackageRow::claim_key(&claimant, &later)?;
+    // A previous publisher could create a second successful operation for
+    // the same signed bytes. Both rows own the reference upon reopening.
+    let row = PackageRow::Claim {
+        target_account_digest: claimant,
+        target_device_id: DEVICE_ID,
+        suite: 1,
+        outcome: Stored::Claimed,
+        key_package_ref: reference.clone(),
+        object_id: Some(*id),
+        retain_until: deadline,
+    };
+    let legacy = request::state_row(
+        TableId::E2eeState,
+        PACKAGE_ROW_KIND,
+        later_key.clone(),
+        row.encode()?,
+    )
+    .map_err(|e| format!("legacy successful operation: {e:?}"))?;
+    h.apply_logical_write(&legacy)?;
+    let mut h = h.reloaded()?;
+    assert_eq!(h.coordinator.state.spent_package_rows.len(), 2);
+    h.now = deadline;
+    for op in [OPERATION, later] {
+        let expected = PackageRow::claim_key(&claimant, &op)?;
+        let due = Prepared::capture(&h.coordinator, Default::default(), deadline, &h.backing)?;
+        let mut writes = due.writes(STATE_GENERATION)?;
+        assert!(
+            matches!(writes.as_slice(), [Write::Delete {table: TableId::E2eeState, key}] if key == &expected)
+        );
+        let owners = h
+            .coordinator
+            .stage_owners(&mut writes, deadline, false, STATE_GENERATION)
+            .map_err(|e| format!("retire one stored operation: {e:?}"))?;
+        due.apply(&mut h.coordinator)?;
+        owners.apply(&mut h.coordinator.state);
+        for write in &writes {
+            h.apply_logical_write(write)?;
+        }
+        assert!(
+            !h.coordinator
+                .state
+                .spent_package_rows
+                .contains_key(&expected)
+        );
+        assert_eq!(
+            h.coordinator
+                .state
+                .spent_package_rows
+                .contains_key(&later_key),
+            op == OPERATION
+        );
+        h = h.reloaded()?;
+        if op == OPERATION {
+            let retained = ok(h.run(Op::ClaimStatus, &later, None)?)?;
+            assert_same_answer(&retained, &first, "second legacy owner after retirement");
+        }
+    }
+    assert!(h.coordinator.state.spent_package_rows.is_empty());
+    assert!(
+        h.coordinator
+            .state
+            .owners
+            .account(id)
+            .ok_or("retired object account")?
+            .owners
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn a_successful_claim_holds_its_own_backing_until_committed_retirement() -> TestResult {
+    use super::super::resident::SPENT_PACKAGE_ROW_BACKING;
+    use crate::budget::{BackingReservationPort, MemoryBudget, MemoryCharge};
+    let mut h = Harness::with_devices(&[DEVICE, SIBLING])?;
+    let _ = stocked_then_sibling(&mut h)?;
+    let claimant = account_id_digest(&NETWORK, &h.account)?;
+    let key = PackageRow::claim_key(&claimant, &OPERATION)?;
+    let params = claim_params(&h, 1, OPERATION);
+    let charge = MemoryCharge::allocation(u64::try_from(SPENT_PACKAGE_ROW_BACKING)?)?.bytes();
+
+    // No holder or durable result can be published if this additional owner cannot fit.
+    h.backing = BackingReservationPort::new(std::sync::Arc::new(MemoryBudget::new(charge - 1)));
+    assert_eq!(
+        code(h.run(Op::ClaimPackage, &params, None)?),
+        Some(E2eeReplyCode::RateLimited)
+    );
+    assert!(h.coordinator.state.spent_package_rows.is_empty());
+    assert_eq!(
+        h.coordinator.state.directory.stock(&claimant, &DEVICE_ID),
+        1
+    );
+    assert!(
+        h.coordinator
+            .state
+            .directory
+            .claim_status(&claimant, &OPERATION)
+            .is_none()
+    );
+
+    let budget = std::sync::Arc::new(MemoryBudget::new(1 << 23));
+    h.backing = BackingReservationPort::new(budget.clone());
+    let first = ok(h.run(Op::ClaimPackage, &params, None)?)?;
+    assert!(matches!(first.result, ResultBody::Claimed(..)));
+    assert!(h.coordinator.state.spent_package_rows.contains_key(&key));
+    assert_eq!(budget.charged(), charge);
+    let deadline = h.now + KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS;
+    let capture =
+        |h: &Harness| Prepared::capture(&h.coordinator, Default::default(), deadline, &h.backing);
+    drop(capture(&h)?);
+    assert_eq!(budget.charged(), charge);
+    assert_same_answer(
+        &ok(h.run(Op::ClaimPackage, &params, None)?)?,
+        &first,
+        "retry while retained",
+    );
+    let due = capture(&h)?;
+    due.apply(&mut h.coordinator)?;
+    drop(due);
+    assert!(h.coordinator.state.spent_package_rows.is_empty());
+    assert_eq!(budget.charged(), 0);
     Ok(())
 }
 

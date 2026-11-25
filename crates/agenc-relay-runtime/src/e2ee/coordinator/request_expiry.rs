@@ -63,8 +63,9 @@ impl Prepared {
         let start = cursor.replay.map_or(Unbounded, Excluded);
         let mut scanned = 0;
         prepared.claim = Claim::capture(&executor.state, &mut prepared.next.claim, now, backing)?;
-        let replay_limit =
-            MAX_EXPIRY_ENTRIES - prepared.grants.len() - usize::from(prepared.claim.is_some());
+        let replay_limit = MAX_EXPIRY_ENTRIES
+            - prepared.grants.len()
+            - prepared.claim.as_ref().map_or(0, Claim::delete_count);
         for (key, row) in executor
             .state
             .replays
@@ -127,7 +128,7 @@ impl Prepared {
             )
             .collect::<Result<Vec<_>, _>>()?;
         if let Some(claim) = &self.claim {
-            writes.push(claim.write()?);
+            claim.write(&mut writes)?;
         }
         Ok(writes)
     }

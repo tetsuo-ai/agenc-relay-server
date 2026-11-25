@@ -18,7 +18,7 @@ use agenc_relay_e2ee::limits::{
     MAX_ROSTER_OBJECT,
 };
 use agenc_relay_e2ee::mls_outer::{
-    MlsOuterMessage, parse_mls_message, verify_key_package_signatures,
+    MlsOuterMessage, PublicKeyPackage, parse_mls_message, verify_key_package_signatures,
 };
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
 use agenc_relay_e2ee::objects::attach::{
@@ -670,7 +670,9 @@ pub fn claim_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
 
     use agenc_relay_storage::e2ee_records::ClaimOutcome as Stored;
     let key = (claimant, operation_id);
-    let (result, reference, object, empty_slot) = match plan.outcome() {
+    let claim_key = PackageRow::claim_key(&claimant, &operation_id)
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    let (result, reference, object, permit) = match plan.outcome() {
         ClaimOutcome::Claimed {
             key_package_ref,
             object_id,
@@ -688,7 +690,9 @@ pub fn claim_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
                 Stored::Claimed,
                 key_package_ref.clone(),
                 Some(*object_id),
-                None,
+                exec.backing
+                    .reserve(super::super::resident::SPENT_PACKAGE_ROW_BACKING)
+                    .map_err(|_| Fail::from(E2eeReplyCode::RateLimited))?,
             )
         }
         ClaimOutcome::Unavailable => {
@@ -698,7 +702,7 @@ pub fn claim_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
                 .empty_claims
                 .reserve(key, &exec.backing)
                 .map_err(|_| Fail::from(E2eeReplyCode::RateLimited))?;
-            (Stored::KeyUnavailable, Vec::new(), None, Some(slot))
+            (Stored::KeyUnavailable, Vec::new(), None, slot)
         }
     };
     let row = PackageRow::Claim {
@@ -716,15 +720,16 @@ pub fn claim_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         state_row(
             TableId::E2eeState,
             PACKAGE_ROW_KIND,
-            PackageRow::claim_key(&claimant, &operation_id)
-                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+            claim_key.clone(),
             row.encode()
                 .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
         )?,
     );
     outcome.effects.push(Box::new(move |companion| {
         plan.apply_committed(&mut companion.directory);
-        if let Some(permit) = empty_slot {
+        if result == Stored::Claimed {
+            companion.spent_package_rows.insert(claim_key, permit);
+        } else {
             companion.empty_claims.insert(key, permit);
         }
     }));
@@ -780,6 +785,7 @@ pub fn publish_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     let credential = verify_key_package_credential(&exec.coordinator.network_id, roster, &package)
         .map_err(|_| Fail::from(E2eeReplyCode::BindingAuthInvalid))?;
     if credential.certificate.device_id != device_id
+        || credential.leaf.interval.not_after != expires_at
         || !credential
             .certificate
             .interval
@@ -793,6 +799,7 @@ pub fn publish_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         account_digest,
         device_id,
         suite,
+        not_before: credential.leaf.interval.not_before,
         expires_at,
         object_id,
     };
@@ -805,6 +812,13 @@ pub fn publish_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             }
             _ => Fail::from(E2eeReplyCode::BindingAuthInvalid),
         })?;
+    // Only an accepted publication stores this exact KeyPackage object. An
+    // older store may retain its body or terminal package row without a live
+    // claim mapping. Published package bodies have ordinary object retention,
+    // which extends beyond their maximum signed lifetime.
+    if exec.coordinator.state.objects.contains_key(&object_id) {
+        return Err(E2eeReplyCode::OperationConflict.into());
+    }
     let mut outcome = Outcome::scalar(ResultBody::Stored(StoreKind::Package, object_id));
     outcome
         .writes
@@ -830,6 +844,23 @@ pub fn publish_package(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         companion.directory = directory;
     }));
     Ok(outcome)
+}
+
+/// Reads the public, originally verified KeyPackage for stock recovery or claim retirement.
+pub(in crate::e2ee::coordinator) fn retained_key_package(
+    bytes: &[u8],
+) -> Option<Box<PublicKeyPackage>> {
+    let mut budget = DecodeBudget::new(MAX_KEY_PACKAGE_OBJECT, 1 << 14);
+    let object =
+        ArcWireObject::decode_kind(bytes, Some(ArcWireObjectKind::KeyPackageMls), &mut budget)
+            .ok()?;
+    let mut budget = DecodeBudget::new(MAX_KEY_PACKAGE_OBJECT, 1 << 14);
+    let MlsOuterMessage::KeyPackage(package) =
+        parse_mls_message(object.body(), &mut budget).ok()?
+    else {
+        return None;
+    };
+    Some(package)
 }
 
 /// `revoke_package`.
