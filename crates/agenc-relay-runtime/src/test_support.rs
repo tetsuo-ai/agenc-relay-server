@@ -707,6 +707,17 @@ impl StateCoreFixture {
         &self,
         budget: &Arc<MemoryBudget>,
     ) -> TestResult<usize> {
+        self.recover_with_directory_limit(
+            budget,
+            agenc_relay_e2ee::limits::MAX_DIRECTORY_BYTES_PER_ACCOUNT,
+        )
+    }
+
+    pub(crate) fn recover_with_directory_limit(
+        &self,
+        budget: &Arc<MemoryBudget>,
+        directory_limit: u64,
+    ) -> TestResult<usize> {
         let owner = self.owner.as_ref().ok_or("storage owner")?;
         let seed = StateCoreSeed::from_storage(owner)?;
         let storage = seed.storage();
@@ -715,15 +726,17 @@ impl StateCoreFixture {
             storage.database_binding(),
             storage.storage_key_generation(),
         )?;
-        let reconstruction = reconstruct_with_budget(
-            &seed,
-            &owner.port(),
-            &keys,
-            NodeRole::Coordinator,
-            MonotonicTick::from_ticks(10),
-            UtcSecond::from_unix_seconds(1_000),
-            budget,
-        )?;
+        let reconstruction = crate::state_core::durable::DurableIndex::new()
+            .with_initial_root_budget(budget)
+            .with_guarded_directory_limit(directory_limit)
+            .reconstruct(
+                &seed,
+                &owner.port(),
+                &keys,
+                NodeRole::Coordinator,
+                MonotonicTick::from_ticks(10),
+                UtcSecond::from_unix_seconds(1_000),
+            )?;
         Ok(reconstruction
             .account_service
             .startup_transaction_cleanups()

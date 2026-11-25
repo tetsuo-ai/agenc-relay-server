@@ -25,6 +25,35 @@ fn stale() -> RuntimeError {
 }
 
 impl Scan {
+    pub(super) fn check_guarded_directory(
+        &mut self,
+        keys: &KeyDeriver,
+        port: &StoragePort,
+    ) -> Result<(), RuntimeError> {
+        use agenc_relay_storage::e2ee_records::{prefix::OWNER, prefix_range_from};
+        if self.index.needs_directory_scan() {
+            let mut start = StoredKey::new(OWNER.to_vec())?;
+            loop {
+                let page = read_blocking(port, prefix_range_from(OWNER, &start, 8)?)?;
+                if page.records.is_empty() {
+                    break;
+                }
+                for record in page.records {
+                    let sealed = SealedRecord::decode(&record.sealed_record)?;
+                    let plain = keys.open(TableId::E2eeState, &record.key, &sealed)?;
+                    let value = PersistentRecordValue::decode(
+                        TableId::E2eeState,
+                        plain.expose_for_storage_codec(),
+                    )?;
+                    self.index
+                        .restore_directory_ownership(&record.key, &value)?;
+                    start = super::successor(&record.key)?;
+                }
+            }
+        }
+        self.index.verify_directory_totals(&self.directory_totals)
+    }
+
     pub(super) fn check_initial_roots(
         &self,
         keys: &KeyDeriver,

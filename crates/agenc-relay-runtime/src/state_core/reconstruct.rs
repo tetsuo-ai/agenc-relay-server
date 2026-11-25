@@ -419,6 +419,7 @@ fn recover_creation_invitation(
 #[derive(Default)]
 struct Scan {
     index: DurableIndex,
+    directory_totals: BTreeMap<[u8; 32], u64>,
     accounts: BTreeMap<AccountId, DurableAccount>,
     account_keys: BTreeMap<StoredKey, AccountId>,
     sessions: BTreeMap<SessionId, DurableSession>,
@@ -465,7 +466,7 @@ pub fn reconstruct_with_budget(
 
 impl DurableIndex {
     /// Restores using the index's configured retained-resource backing.
-    fn reconstruct(
+    pub(crate) fn reconstruct(
         self,
         seed: &StateCoreSeed,
         port: &StoragePort,
@@ -485,6 +486,7 @@ impl DurableIndex {
             })?;
         }
         scan.check_initial_roots(keys, port)?;
+        scan.check_guarded_directory(keys, port)?;
         scan.bind_nicknames(keys)?;
         scan.bind_channel_names(keys)?;
         let account_service = scan.account_service.finish(role)?;
@@ -617,12 +619,20 @@ impl Scan {
         self.index.record_known(table, key.clone(), existing);
         if table == TableId::E2eeState {
             self.admit_initial_root_row(keys, &key, &value)?;
+            self.index.restore_directory_row(
+                &key,
+                &value,
+                sealed.len(),
+                &mut self.directory_totals,
+            )?;
         }
         match (table, value.record_kind()) {
             (TableId::Account, TOMBSTONE_RECORD_KIND) => self.admit_account_tombstone(&key, &value),
             (TableId::Session, TOMBSTONE_RECORD_KIND) => self.admit_session_tombstone(&key, &value),
             (TableId::Channel, TOMBSTONE_RECORD_KIND) => self.admit_channel_tombstone(&key, &value),
-            (TableId::Account, LIVE_RECORD_KIND) => self.admit_account(key, &value),
+            (TableId::Account, LIVE_RECORD_KIND) => {
+                self.admit_account(keys.binding().network_id(), key, &value)
+            }
             (TableId::Session, LIVE_RECORD_KIND) => self.admit_session(key, &value),
             (TableId::Channel, LIVE_RECORD_KIND) => self.admit_channel(key, &value),
             (TableId::NicknameReservation, LIVE_RECORD_KIND) => {
@@ -1067,10 +1077,15 @@ impl Scan {
 
     fn admit_account(
         &mut self,
+        network: agenc_relay_types::NetworkId,
         key: StoredKey,
         value: &PersistentRecordValue,
     ) -> Result<(), RuntimeError> {
         let account = AccountRecordBody::decode(value.body())?;
+        if account.genesis_policy == agenc_relay_domain::AccountGenesisPolicy::Guarded {
+            self.index
+                .restore_guarded_account(network, account.account_id)?;
+        }
         if KeyDeriver::account_key(account.account_id)? != key
             || account.session_generation.get() != value.generation()
             || account.revision.get() != value.revision()

@@ -193,7 +193,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 47] = [
+const PREFIX_KINDS: [(&[u8], u16); 48] = [
     (direct_renewal::PREFIX, direct_renewal::KIND),
     (binding_admission::PREFIX, binding_admission::KIND),
     (prefix::RECOVERY_SUBMISSION, RECOVERY_SUBMISSION_ROW_KIND),
@@ -258,6 +258,7 @@ const PREFIX_KINDS: [(&[u8], u16); 47] = [
     ),
     (mailbox_sequence::PREFIX, MAILBOX_SEQUENCE_ROW_KIND),
     (initial_root::PREFIX, initial_root::KIND),
+    (initial_root::directory::PREFIX, initial_root::KIND),
     (initial_root::FORMAT_KEY, initial_root::KIND),
 ];
 
