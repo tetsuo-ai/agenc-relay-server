@@ -216,8 +216,7 @@ fn execute(
         generation: header.replay_key.origin_generation,
         sequence: header.replay_key.operation_sequence,
     };
-    let classified = classify(coordinator, &key, &header, object.object_id())?;
-    let mut fresh = FreshRequest {
+    let fresh = FreshRequest {
         key,
         header,
         extension: request.extension(),
@@ -229,6 +228,12 @@ fn execute(
         mutation: MutationContext::default(),
         charge,
     };
+    if fresh.extension.is_some() && super::origin::after_deleted_cut(coordinator, &fresh.key) {
+        let result = expired_result(coordinator, &fresh)?;
+        coordinator.send_result(context, link, peer, descriptor, &result);
+        return Ok(());
+    }
+    let classified = classify(coordinator, &key, &header, object.object_id())?;
     match classified {
         Classified::Replay => {
             if fresh.extension.is_some()
@@ -249,34 +254,67 @@ fn execute(
             run_operation(coordinator, context, link, peer, fresh, operation)
         }
         Request::Enhanced(request) => {
-            fresh.root_intake = Some(coordinator.admit_initial_root(context, &header)?);
-            if context.is_quiescing() {
-                return Err(Violation::Phase);
-            }
-            let bound = request
-                .session
-                .map(|id| {
-                    super::convert::hosted_session(context.domain(), peer, id)
-                        .map(|(_, bound)| bound)
-                })
-                .transpose();
-            if !bound.is_ok_and(|bound| {
-                coordinator
-                    .bind_remote_account_request(context, peer, &mut fresh, header.opcode, bound)
-                    .is_ok()
-            }) {
-                return finish_failed(
-                    coordinator,
-                    context,
-                    link,
-                    peer,
-                    fresh,
-                    DomainError::Forbidden,
-                );
-            }
-            coordinator.queue_remote_carrier(context, link, peer, fresh, request.envelope.to_vec())
+            run_enhanced(coordinator, context, link, peer, fresh, request)
         }
     }
+}
+
+fn run_enhanced(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    mut fresh: FreshRequest,
+    request: agenc_relay_federation_wire::InitialRootRequest<'_>,
+) -> Result<(), Violation> {
+    if context.is_quiescing() {
+        return Err(Violation::Phase);
+    }
+    let header = fresh.header;
+    let Some(slot) = coordinator.admit_initial_root(context, &header)? else {
+        // A full optional result budget closes just the caller's virtual origin.
+        // No account job or response count has been admitted at this cut.
+        super::origin::close_full_request(coordinator, context, peer, &fresh.key)?;
+        return persist_expired(coordinator, context, link, peer, fresh);
+    };
+    fresh.root_intake = Some(slot);
+    let bound = request
+        .session
+        .map(|id| {
+            super::convert::hosted_session(context.domain(), peer, id).map(|(_, bound)| bound)
+        })
+        .transpose();
+    if !bound.is_ok_and(|bound| {
+        coordinator
+            .bind_remote_account_request(context, peer, &mut fresh, header.opcode, bound)
+            .is_ok()
+    }) {
+        return finish_failed(
+            coordinator,
+            context,
+            link,
+            peer,
+            fresh,
+            DomainError::Forbidden,
+        );
+    }
+    coordinator.queue_remote_carrier(context, link, peer, fresh, request.envelope.to_vec())
+}
+
+fn expired_result(
+    coordinator: &FederationCoordinator,
+    fresh: &FreshRequest,
+) -> Result<Vec<u8>, Violation> {
+    encode_result(
+        coordinator,
+        fresh,
+        &ResultArm::Failed {
+            code: "ORIGIN_EXPIRED".into(),
+            context: String::new(),
+        },
+        None,
+        vec![],
+    )
 }
 
 /// An expired replay ends its origin without advancing or rewriting its
@@ -292,20 +330,21 @@ fn expire_request(
         .origins
         .fence(&fresh.key.origin)
         .map_err(|_| Violation::Origin)?;
+    persist_expired(coordinator, context, link, peer, fresh)
+}
+
+fn persist_expired(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+) -> Result<(), Violation> {
     let entry = coordinator
         .origins
         .origin(&fresh.key.origin)
         .ok_or(Violation::Origin)?;
-    let result = encode_result(
-        coordinator,
-        &fresh,
-        &ResultArm::Failed {
-            code: "ORIGIN_EXPIRED".to_owned(),
-            context: String::new(),
-        },
-        None,
-        Vec::new(),
-    )?;
+    let result = expired_result(coordinator, &fresh)?;
     let plan = context
         .domain()
         .plan_account_service_checkpoint()

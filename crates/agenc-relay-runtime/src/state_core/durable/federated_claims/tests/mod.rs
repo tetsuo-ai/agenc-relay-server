@@ -23,6 +23,7 @@ fn row(raw: Key) -> Mapping {
         digest: [33; 32],
         deadline: WEEK,
         closing: false,
+        observed: false,
     }
 }
 

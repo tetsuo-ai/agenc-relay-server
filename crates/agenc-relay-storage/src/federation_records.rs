@@ -394,25 +394,53 @@ impl CoordinatorResultRecord {
         )
     }
 
+    /// Borrows the exact, length-checked result in a fully consumed record.
+    pub fn result_bytes(body: &[u8]) -> Result<&[u8], StorageError> {
+        Ok(BorrowedResult::decode(body)?.result)
+    }
+
     /// Decodes one wrapped body.
     pub fn decode(body: &[u8]) -> Result<Self, StorageError> {
-        let inner = unwrap(TableId::RequestResult, COORDINATOR_RESULT_KIND, body)?;
-        let mut decoder = Decoder::new(&inner);
+        let record = BorrowedResult::decode(body)?;
+        Ok(Self {
+            request_id: record.request,
+            request_object_id: record.object,
+            result_object_id: record.digest,
+            result_object: record.result.to_vec(),
+            completion_event_id: record.completion,
+            resulting_state_generation: record.generation,
+        })
+    }
+}
+
+struct BorrowedResult<'a> {
+    request: [u8; ID_BYTES],
+    object: [u8; HASH_BYTES],
+    digest: [u8; HASH_BYTES],
+    result: &'a [u8],
+    completion: Option<[u8; ID_BYTES]>,
+    generation: u64,
+}
+impl<'a> BorrowedResult<'a> {
+    fn decode(body: &'a [u8]) -> Result<Self, StorageError> {
+        let inner =
+            ProtocolRecordBody::borrow(TableId::RequestResult, COORDINATOR_RESULT_KIND, body)?;
+        let mut decoder = Decoder::new(inner);
         expect_version(&mut decoder)?;
-        let request_id = decoder.array::<ID_BYTES>()?;
-        let request_object_id = decoder.array::<HASH_BYTES>()?;
-        let result_object_id = decoder.array::<HASH_BYTES>()?;
-        let result_object = decoder.vector_u32(MAX_OPERATION_OBJECT_BYTES)?.to_vec();
-        if result_object.is_empty() {
+        let request = decoder.array()?;
+        let object = decoder.array()?;
+        let digest = decoder.array()?;
+        let result = decoder.vector_u32(MAX_OPERATION_OBJECT_BYTES)?;
+        if result.is_empty() {
             return Err(StorageError::InvalidEncoding);
         }
         let record = Self {
-            request_id,
-            request_object_id,
-            result_object_id,
-            result_object,
-            completion_event_id: take_optional_fixed::<ID_BYTES>(&mut decoder)?,
-            resulting_state_generation: decoder.u64()?,
+            request,
+            object,
+            digest,
+            result,
+            completion: take_optional_fixed::<ID_BYTES>(&mut decoder)?,
+            generation: decoder.u64()?,
         };
         decoder.finish()?;
         Ok(record)

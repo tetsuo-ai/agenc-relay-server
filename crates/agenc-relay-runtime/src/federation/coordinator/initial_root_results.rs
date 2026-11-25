@@ -4,7 +4,11 @@
 use super::{FederationCoordinator, Violation};
 use crate::state_core::StateCoreContext;
 use crate::state_core::durable::federated_claims::{Key, WEEK};
-use agenc_relay_federation_wire::RequestHeader;
+use agenc_relay_federation_wire::{
+    DecodeBudget, FederationProfile, InitialRootResult, OperationDescriptor, RequestHeader,
+    ResultHeader,
+};
+use agenc_relay_types::{FederationResultKind, NetworkId, ServerId};
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -30,11 +34,7 @@ impl Drop for Intake {
 }
 
 pub(crate) fn trusted_now(context: &StateCoreContext) -> Option<u64> {
-    let wall = context.utc_now().ok()?;
-    context
-        .drift()
-        .accepts_wall(context.now(), wall)
-        .then_some(wall.get())
+    context.trusted_federation_utc().ok()
 }
 
 pub(super) fn replayable(context: &StateCoreContext, key: &Key) -> Result<bool, Violation> {
@@ -50,7 +50,7 @@ impl FederationCoordinator {
         &mut self,
         context: &StateCoreContext,
         header: &RequestHeader,
-    ) -> Result<Arc<Intake>, Violation> {
+    ) -> Result<Option<Arc<Intake>>, Violation> {
         let deadline = trusted_now(context)
             .and_then(|now| now.checked_add(WEEK))
             .ok_or(Violation::Origin)?;
@@ -59,13 +59,14 @@ impl FederationCoordinator {
         let pending = owners
             .iter()
             .filter(|other| context.index().federated_claim(other).is_none());
-        context
-            .index()
-            .require_federated_claim_room(&key, pending)
-            .map_err(|_| Violation::Ceiling)?;
-        let backing = context
-            .reserve_output_backing(512)
-            .map_err(|_| Violation::Ceiling)?;
+        match context.index().require_federated_claim_room(&key, pending) {
+            Ok(()) => {}
+            Err(crate::RuntimeError::LimitExceeded) => return Ok(None),
+            Err(_) => return Err(Violation::Origin),
+        }
+        let Ok(backing) = context.reserve_output_backing(512) else {
+            return Ok(None);
+        };
         if !owners.insert(key) {
             return Err(Violation::Origin);
         }
@@ -75,82 +76,92 @@ impl FederationCoordinator {
             owners: self.root_intakes.0.clone(),
             _backing: backing,
         });
-        Ok(slot)
+        Ok(Some(slot))
     }
 }
 
 pub(super) fn authorized_output<'a>(
     context: &StateCoreContext,
-    network: agenc_relay_types::NetworkId,
-    peer: agenc_relay_types::ServerId,
-    descriptor: &agenc_relay_federation_wire::OperationDescriptor,
+    network: NetworkId,
+    peer: ServerId,
+    descriptor: &OperationDescriptor,
     encoded: &'a [u8],
 ) -> Result<std::borrow::Cow<'a, [u8]>, Violation> {
-    use crate::federation::codec::results::ResultArm;
-    use agenc_relay_federation_wire::{DecodeBudget, FederationProfile, InitialRootResult};
     let mut budget = DecodeBudget::new(1 << 20, 4_096);
     let checked = InitialRootResult::decode(FederationProfile::InitialRoot, encoded, &mut budget)
         .map_err(|_| Violation::Codec)?;
-    let h = checked.layout;
-    let key = h.replay_key;
-    if h.network_id != network
-        || key.home_server_id != peer
-        || key.server_incarnation != descriptor.server_incarnation
-        || key.origin_id != descriptor.origin_id
-        || key.origin_generation != descriptor.origin_generation
-        || key.operation_sequence != descriptor.operation_sequence
-        || h.request_id != descriptor.request_id
-        || h.request_object_id != descriptor.object_id
-    {
+    if !matches_request(network, peer, descriptor, &checked.layout) {
         return Err(Violation::Origin);
     }
     let now = trusted_now(context).ok_or(Violation::Phase)?;
-    let k = key.to_bytes();
-    if let Some(held) = context.index().federated_claim(&k) {
-        if held.may_replay(now) && context.index().holds_federated_claim(&k, encoded) {
+    let key = checked.layout.replay_key.to_bytes();
+    if let Some(held) = context.index().federated_claim(&key) {
+        if !held.may_replay(now) {
+            return Ok(std::borrow::Cow::Owned(expired_output(checked.layout)?));
+        }
+        if context.index().holds_federated_claim(&key, encoded) {
             return Ok(std::borrow::Cow::Borrowed(encoded));
         }
-        if !held.may_replay(now) {
-            let denied = ResultArm::Failed {
-                code: "ORIGIN_EXPIRED".into(),
-                context: String::new(),
-            }
-            .to_object()
-            .map_err(|_| Violation::Codec)?;
-            let header = agenc_relay_federation_wire::ResultHeader {
-                result_kind: agenc_relay_types::FederationResultKind::Failed,
-                completion_event_id: None,
-                ..h
-            };
-            let bytes = InitialRootResult::encode_failed(
-                FederationProfile::InitialRoot,
-                &header,
-                &denied,
-                vec![],
-            )
-            .map_err(|_| Violation::Codec)?;
-            return Ok(std::borrow::Cow::Owned(bytes));
-        }
-        return Err(Violation::Origin);
+    } else if terminal_refusal(&checked, &mut budget)? {
+        return Ok(std::borrow::Cow::Borrowed(encoded));
     }
-    // The terminal ORIGIN_EXPIRED classification is the one refusal which has no original row.
-    if checked.sealed.is_none()
-        && checked
+    Err(Violation::Origin)
+}
+
+fn matches_request(
+    network: NetworkId,
+    peer: ServerId,
+    descriptor: &OperationDescriptor,
+    header: &ResultHeader,
+) -> bool {
+    let key = header.replay_key;
+    header.network_id == network
+        && key.home_server_id == peer
+        && key.server_incarnation == descriptor.server_incarnation
+        && key.origin_id == descriptor.origin_id
+        && key.origin_generation == descriptor.origin_generation
+        && key.operation_sequence == descriptor.operation_sequence
+        && header.request_id == descriptor.request_id
+        && header.request_object_id == descriptor.object_id
+}
+
+fn expired_output(header: ResultHeader) -> Result<Vec<u8>, Violation> {
+    use crate::federation::codec::results::ResultArm;
+    let denied = ResultArm::Failed {
+        code: "ORIGIN_EXPIRED".into(),
+        context: String::new(),
+    }
+    .to_object()
+    .map_err(|_| Violation::Codec)?;
+    let header = ResultHeader {
+        result_kind: FederationResultKind::Failed,
+        completion_event_id: None,
+        ..header
+    };
+    InitialRootResult::encode_failed(FederationProfile::InitialRoot, &header, &denied, vec![])
+        .map_err(|_| Violation::Codec)
+}
+
+// A durable origin tombstone can answer after the individual result row has retired.
+fn terminal_refusal(
+    checked: &InitialRootResult<'_>,
+    budget: &mut DecodeBudget,
+) -> Result<bool, Violation> {
+    use crate::federation::codec::results::ResultArm;
+    if checked.sealed.is_some()
+        || !checked
             .indexed_replies()
             .map_err(|_| Violation::Codec)?
             .is_empty()
     {
-        let arm = checked
-            .failed_arm(&mut budget)
-            .map_err(|_| Violation::Codec)?;
-        let failed = ResultArm::from_object(agenc_relay_types::FederationResultKind::Failed, &arm)
-            .map_err(|_| Violation::Codec)?;
-        if matches!(failed, ResultArm::Failed{code,context} if code == "ORIGIN_EXPIRED" && context.is_empty())
-        {
-            return Ok(std::borrow::Cow::Borrowed(encoded));
-        }
+        return Ok(false);
     }
-    Err(Violation::Origin)
+    let arm = checked.failed_arm(budget).map_err(|_| Violation::Codec)?;
+    let failed =
+        ResultArm::from_object(FederationResultKind::Failed, &arm).map_err(|_| Violation::Codec)?;
+    Ok(
+        matches!(failed, ResultArm::Failed{code,context} if code == "ORIGIN_EXPIRED" && context.is_empty()),
+    )
 }
 
 #[cfg(test)]

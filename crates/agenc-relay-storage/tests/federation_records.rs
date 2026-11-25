@@ -168,6 +168,59 @@ fn every_arm_round_trips_and_binds_its_table_and_kind() -> TestResult {
 }
 
 #[test]
+fn coordinator_retention_inspects_the_original_result_and_expiry_without_copying_it() -> TestResult
+{
+    let fixture = coordinator_result();
+    let encoded = fixture.encode()?;
+    let borrowed = CoordinatorResultRecord::result_bytes(&encoded)?;
+    assert_eq!(borrowed, fixture.result_object);
+    let offset = encoded
+        .windows(borrowed.len())
+        .position(|window| window == borrowed)
+        .ok_or("missing result in stored record")?;
+    assert_eq!(
+        encoded.get(offset..).ok_or("result offset")?.as_ptr(),
+        borrowed.as_ptr()
+    );
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    let short = encoded.split_last().ok_or("empty result fixture")?.1;
+    for malformed in [&trailing[..], short, &edge_request().encode()?] {
+        assert!(CoordinatorResultRecord::result_bytes(malformed).is_err());
+        assert!(CoordinatorResultRecord::decode(malformed).is_err());
+    }
+    for expiry in [None, Some(45_000)] {
+        let stored = PersistentRecordValue::new(
+            TableId::RequestResult,
+            COORDINATOR_RESULT_KIND,
+            1,
+            0,
+            expiry,
+            vec![],
+            encoded.clone(),
+        )?
+        .encode()?;
+        assert_eq!(
+            PersistentRecordValue::generation_expiry(&stored, COORDINATOR_RESULT_KIND, 0)?,
+            expiry
+        );
+        assert_eq!(
+            PersistentRecordValue::generation_expiry(&stored, EDGE_REQUEST_KIND, 0)?,
+            None
+        );
+        assert_eq!(
+            PersistentRecordValue::generation_expiry(&stored, COORDINATOR_RESULT_KIND, 2)?,
+            None
+        );
+        assert_eq!(
+            PersistentRecordValue::decode(TableId::RequestResult, &stored)?.expires_at(),
+            expiry
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn optional_fields_and_phases_cover_every_shape() -> TestResult {
     let mut bare = peer();
     bare.accepted_epochs.clear();

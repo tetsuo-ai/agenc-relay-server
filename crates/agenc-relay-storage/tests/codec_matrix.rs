@@ -2266,6 +2266,14 @@ fn domain_record_envelope_covers_every_union_and_length_boundary() -> Result<(),
         .ok_or("missing expiry bytes")?
         .copy_from_slice(&1_u64.to_be_bytes());
     assert!(
+        agenc_relay_storage::PersistentRecordValue::generation_expiry(
+            &noncanonical_absent_expiry,
+            1,
+            0
+        )
+        .is_err()
+    );
+    assert!(
         agenc_relay_storage::PersistentRecordValue::decode(
             TableId::Audit,
             &noncanonical_absent_expiry,
@@ -2277,6 +2285,10 @@ fn domain_record_envelope_covers_every_union_and_length_boundary() -> Result<(),
         .get_mut(20..22)
         .ok_or("missing expiry discriminator")?
         .copy_from_slice(&2_u16.to_be_bytes());
+    assert!(
+        agenc_relay_storage::PersistentRecordValue::generation_expiry(&unknown_expiry_arm, 1, 0)
+            .is_err()
+    );
     assert!(
         agenc_relay_storage::PersistentRecordValue::decode(TableId::Audit, &unknown_expiry_arm,)
             .is_err()

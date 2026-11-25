@@ -1839,6 +1839,7 @@ impl RegistrationRouter {
         let changed = matches!(
             &outcome,
             crate::federation::edge::RemoteCarrierOutcome::CredentialChanged { .. }
+                | crate::federation::edge::RemoteCarrierOutcome::OriginExpired
         );
         let login = match (&outcome, kind) {
             (

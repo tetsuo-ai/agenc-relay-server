@@ -178,6 +178,22 @@ async fn through_both_floors(closed_at: u64, deadline: u64) -> TestResult {
         crate::state_core::durable::federated_claims::read(&StoredKey::new(vec![40; 64])?, &value)
             .is_err()
     );
+    // A request arrived at START. The decision has to survive an additional 400 s until staging.
+    fixture
+        .context_mut()?
+        .set_untrusted_wall_for_test(Some(START + 400));
+    assert!(
+        stage(
+            &mut fixture,
+            vec![AccountServiceDurableWrite::put(
+                TableId::RequestResult,
+                case.key.clone(),
+                value.encode()?
+            )?]
+        )
+        .is_err()
+    );
+    fixture.context_mut()?.set_wall_for_test(START + 400);
     stage(
         &mut fixture,
         vec![AccountServiceDurableWrite::put(
@@ -195,7 +211,14 @@ async fn through_both_floors(closed_at: u64, deadline: u64) -> TestResult {
     fixture.commit_staged_batch().await?;
     fixture.restart_registration_storage(vec![49; 32_768])?;
     let context = fixture.context_mut()?;
-    context.set_wall_for_test(closed_at);
+    let pending = context
+        .index()
+        .federated_claim(&case.raw)
+        .ok_or("original committed result")?;
+    assert_eq!(pending.deadline, START + 400 + WEEK);
+    assert!(!pending.observed);
+    // The first independent disk observation is another 500 s later.
+    context.set_wall_for_test(START + 900);
     assert!(
         context
             .index()
@@ -206,6 +229,19 @@ async fn through_both_floors(closed_at: u64, deadline: u64) -> TestResult {
             .index()
             .holds_federated_claim(&case.raw, b"unrelated later result")
     );
+    let first_observation = cleanup(&mut fixture, &case, false)?;
+    assert_eq!(first_observation.len(), 1);
+    stage(&mut fixture, first_observation)?;
+    fixture.commit_staged_batch().await?;
+    fixture.restart_registration_storage(vec![52; 32_768])?;
+    let observed = fixture
+        .context_mut()?
+        .index()
+        .federated_claim(&case.raw)
+        .ok_or("live observed result")?;
+    assert_eq!(observed.deadline, START + 900 + WEEK);
+    assert!(observed.observed && !observed.closing);
+    fixture.context_mut()?.set_wall_for_test(closed_at);
     assert!(cleanup(&mut fixture, &case, false)?.is_empty());
     assert!(read(&case, &mut fixture)? == case.outer);
     let writes = cleanup(&mut fixture, &case, true)?;
@@ -280,6 +316,6 @@ async fn through_both_floors(closed_at: u64, deadline: u64) -> TestResult {
 
 #[tokio::test]
 async fn exact_remote_results_survive_reopen_until_both_origin_and_security_floors() -> TestResult {
-    through_both_floors(START + DAY, START + WEEK).await?;
+    through_both_floors(START + DAY, START + 900 + WEEK).await?;
     through_both_floors(START + WEEK + DAY, START + WEEK + 2 * DAY).await
 }
