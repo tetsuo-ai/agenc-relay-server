@@ -96,7 +96,11 @@ async fn normal_gate_and_route_share_a_receipt_and_reopen_after_a_lost_callback(
                 .await?
                 .is_none()
         );
-        let claim_key = ClaimRow::reservation_key(fixture.parameters[..16].try_into()?)?;
+        let grant = fixture
+            .parameters
+            .first_chunk::<16>()
+            .ok_or("missing reservation ID")?;
+        let claim_key = ClaimRow::reservation_key(grant)?;
         let claim = stored(&mut core, TableId::E2eeState, &claim_key)
             .await?
             .ok_or("reserved route claim")?;
