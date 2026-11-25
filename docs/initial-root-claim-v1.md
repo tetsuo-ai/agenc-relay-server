@@ -83,13 +83,18 @@ key and start request ID. The existing `ACCTCREATE FINISH`, authenticated
 completion and terminal remain unchanged. The coordinator accepts this
 cross-version pair only for the exact transaction created by the guarded
 start. The ordinary start cannot acquire a claim at finish. With a successful
-finish, the allocated account, credential, private login index, applicable
-invitation redemption, claim `Reserved(epoch, start_id, owner)` and committed
+finish, the allocated account marked **Guarded**, credential, private login
+index, applicable invitation redemption, claim `Reserved(epoch, start_id, owner)` and committed
 completion form **one durable decision**. Rejection, abort, expiry, wrong
 binding and a failed commit grant nothing. Duplicate accepted requests follow
 the existing exact-result rules. The claim is private, keyed by the Network ID
 and Account ID and bounded to one permanent row per guarded account. Account
-and directory quotas include all of its terminal states.
+and directory quotas include all of its terminal states. The authoritative
+account record independently identifies its permanent genesis policy,
+**Legacy** or **Guarded**. Pre-extension account records decode as Legacy.
+Claim absence cannot synthesize Legacy. An absent account has no publication
+authority. For a Guarded account, an absent claim or mismatched identity
+fences publication and reports a protected storage inconsistency.
 
 ## Read or bind the choice
 
@@ -233,6 +238,16 @@ discover an independently created, unpublished offline identity, establish
 freshness after an untrusted rollback or reveal a private root holder.
 [ARC-MLS root validation](arc-mls-e2ee-extension.md#82-account-root-and-signatures)
 
+The local caller receives a distinct, actionable outcome when its protected
+bootstrap material is unavailable. Retain the account and pending operation
+and identify the original installation or previously accepted root as the
+recovery dependency. On a changed recovery epoch, report the descriptor
+change and the original reservation's suspended status. Even after explicit
+descriptor confirmation, a new fingerprint cannot be selected under the old
+claim. When the pinned service gives an indistinguishable denial, report an
+unavailable reservation. Do not claim to know which private predicate failed.
+All three outcomes prohibit issuing fresh authority from this evidence.
+
 ## Acceptance
 
 For an encoding control, use homogeneous byte strings `01` for Network ID,
@@ -256,7 +271,9 @@ creation, confirmation, choose, root publication and replies on both sides
 of commit. Reopen both stores, retry from a new origin and recover the same
 choice and signed object. Check original-response expiry, wrong network,
 recovery epoch, account, profile, secret, operation and fingerprint. Prove
-that an older writer refuses protected storage, surviving siblings cannot
+that a present Guarded account with a missing claim fails closed, a missing
+account has no genesis authority, a Legacy account still follows its original
+path, an older writer refuses protected storage, surviving siblings cannot
 issue a second root, and all normal peer lineage and rotation checks still
 pass on the real Linux relay. Record independent implementation review and
 the actual profile hashes before advertising the capability.
