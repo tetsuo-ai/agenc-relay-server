@@ -23,6 +23,7 @@ agenc-relay-storage.workspace = true
 [dev-dependencies]
 agenc-relay-admin.workspace = true
 agenc-relay-auth.workspace = true
+agenc-relay-client-wire.workspace = true
 agenc-relay-crypto.workspace = true
 agenc-relay-testkit.workspace = true
 agenc-relay-types.workspace = true

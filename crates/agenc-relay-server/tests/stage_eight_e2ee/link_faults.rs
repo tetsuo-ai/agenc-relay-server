@@ -54,9 +54,29 @@ pub(super) fn link_events(network: &Network) -> (usize, usize) {
 /// A guest registers on `fixture` from `source` and ends its connection.
 fn guest(fixture: &NodeFixture, source: Ipv4Addr, nickname: &str) -> TestResult {
     let mut client = ArcClient::connect_from(fixture, Some(source))?;
+    // Architecture 8.3 measures registration from the completed TLS handshake.
+    // A busy edge can still welcome this guest after the ordinary I/O timeout.
+    let window = Duration::from_millis(agenc_relay_client_wire::REGISTRATION_TIMEOUT_MILLIS);
+    let deadline = Instant::now() + window;
     client.send(&format!("NICK {nickname}"))?;
     client.send(&format!("USER {nickname} 0 * :Link Faults"))?;
-    let _welcome = client.read_until(|line| line.contains(&format!(" 001 {nickname} ")))?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(failure(
+            "guest registration expired before reading the welcome",
+        ));
+    }
+    client
+        .reader
+        .get_ref()
+        .sock
+        .set_read_timeout(Some(remaining))?;
+    let _welcome = client.read_until_deadline(TRANSCRIPT_LINES, remaining, |line| {
+        line.contains(&format!(" 001 {nickname} "))
+    })?;
+    if Instant::now() > deadline {
+        return Err(failure("guest welcome exceeded the registration deadline"));
+    }
     drop(client);
     Ok(())
 }
