@@ -2,10 +2,69 @@
 
 use super::*;
 use crate::bridge::crypto::InitialRootSealJob;
+use crate::state_core::durable::claim_replays::{CLAIM_REPLAY_SECONDS, ClaimReplay};
 use agenc_relay_auth::{
     InitialRootServiceEnvelope, InitialRootServiceResponse, initial_root::DurableClaimReplay,
 };
 use agenc_relay_types::SessionId;
+
+const REGISTERED_CLAIM_VERSION: u16 = 3;
+const MAX_IDLE_RETIREMENTS: usize = 32;
+
+pub(super) fn trusted_now(context: &StateCoreContext) -> Option<u64> {
+    context
+        .utc_now()
+        .ok()
+        .filter(|wall| context.drift().accepts_wall(context.now(), *wall))
+        .map(|wall| wall.get())
+}
+
+/// Reconstruct only the compact owner and authenticated deadline. The protected
+/// HPKE request/response remain solely in their original exact-result row.
+pub(crate) fn claim_replay_metadata(
+    key: &StoredKey,
+    value: &PersistentRecordValue,
+) -> Result<Option<ClaimReplay>, RuntimeError> {
+    if key.as_bytes().len() != 16 || value.record_kind() != REQUEST_RESULT_KIND {
+        return Ok(None);
+    }
+    let body =
+        ProtocolRecordBody::decode(TableId::RequestResult, REQUEST_RESULT_KIND, value.body())?;
+    if !body
+        .canonical_object()
+        .starts_with(&REGISTERED_CLAIM_VERSION.to_be_bytes())
+    {
+        // The previous account API used its own version and had no private expiry.
+        return if value.expires_at().is_none() {
+            Ok(None)
+        } else {
+            Err(RuntimeError::InvalidValue)
+        };
+    }
+    let expires = value
+        .expires_at()
+        .filter(|n| *n >= CLAIM_REPLAY_SECONDS)
+        .ok_or(RuntimeError::InvalidValue)?;
+    let (owner, result) = RegisteredClaim::decode(body.canonical_object())?;
+    let request = InitialRootServiceEnvelope::parse(result.request)
+        .map_err(|_| RuntimeError::InvalidValue)?;
+    let response = InitialRootServiceResponse::parse(result.response)
+        .map_err(|_| RuntimeError::InvalidValue)?;
+    let claim = agenc_relay_crypto::InitialRootExchange::Claim;
+    let id = request.client_request_id();
+    if request.message_kind() != claim
+        || response.response_kind() != claim
+        || response.client_request_id() != id
+        || key.as_bytes() != id.as_bytes()
+    {
+        return Err(RuntimeError::InvalidValue);
+    }
+    Ok(Some(ClaimReplay {
+        account: owner.account,
+        id,
+        expires,
+    }))
+}
 
 pub(super) struct GuardedStartRelease {
     pub(super) request: RequestContext,
@@ -40,7 +99,7 @@ pub(super) struct RegisteredClaim {
 impl RegisteredClaim {
     fn encode(self, result: &RequestResultRecord) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(2 + 24 + 16 + 8 + REQUEST_RESULT_BYTES);
-        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(&REGISTERED_CLAIM_VERSION.to_be_bytes());
         bytes.extend_from_slice(self.account.to_text().as_bytes());
         bytes.extend_from_slice(self.session.as_bytes());
         bytes.extend_from_slice(&self.generation.get().to_be_bytes());
@@ -53,7 +112,7 @@ impl RegisteredClaim {
             .split_at_checked(2 + 24 + 16 + 8)
             .ok_or(RuntimeError::InvalidValue)?;
         let mut fields = RequestResultCursor::new(binding);
-        if fields.read_u16()? != 2 {
+        if fields.read_u16()? != REGISTERED_CLAIM_VERSION {
             return Err(RuntimeError::InvalidValue);
         }
         let account = AccountId::parse_wire_bytes(&fields.read_array::<24>()?)
@@ -215,6 +274,50 @@ impl AccountServiceCoordinator {
         }
         Ok(vec![completion])
     }
+    /// A quiet relay also releases elapsed exact responses. Batches are small and
+    /// their memory charges remain held until the normal commit callback applies.
+    pub(crate) fn retire_claim_results(
+        &self,
+        context: &mut StateCoreContext,
+    ) -> Result<(), RuntimeError> {
+        if self.pending_authority.is_some()
+            || context.pending_len() != 0
+            || context.in_flight()
+            || context.is_quiescing()
+        {
+            return Ok(());
+        }
+        let Some(now) = trusted_now(context) else {
+            return Ok(());
+        };
+        let writes: Vec<_> = context
+            .index()
+            .expired_claim_replays(now, MAX_IDLE_RETIREMENTS)
+            .map(|id| {
+                AccountServiceDurableWrite::delete(TableId::RequestResult, request_result_key(id)?)
+            })
+            .collect::<Result<_, _>>()?;
+        if !writes.is_empty() {
+            let plan = context
+                .domain()
+                .plan_account_service_checkpoint()
+                .map_err(|_| RuntimeError::InvalidValue)?;
+            if !matches!(
+                context.stage_durable_with_account_service(
+                    plan,
+                    FanoutRequest::new(Vec::new(), Vec::new())?,
+                    None,
+                    0,
+                    writes,
+                ),
+                Ok(StageAccepted::Staged { .. })
+            ) {
+                return Err(RuntimeError::InvalidValue);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn queue_claim(
         &mut self,
         context: &StateCoreContext,
@@ -274,6 +377,23 @@ impl AccountServiceCoordinator {
         writes
             .try_reserve_exact(3)
             .map_err(|_| RuntimeError::MemoryExhausted)?;
+        let now = trusted_now(context).ok_or(RuntimeError::InvalidValue)?;
+        let id = request.envelope.client_request_id();
+        if context
+            .index()
+            .holds(TableId::RequestResult, &request_result_key(id)?)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        if let Some(expired) = context.index().claim_replay_room(scope.account, now)? {
+            writes.push(AccountServiceDurableWrite::delete(
+                TableId::RequestResult,
+                request_result_key(expired)?,
+            )?);
+        }
+        let expires = now
+            .checked_add(CLAIM_REPLAY_SECONDS)
+            .ok_or(RuntimeError::Overflow)?;
         let plan = context.plan_initial_root_choice(cut, prepared.new_choice(), &mut writes)?;
         let revision = plan.resulting_revision().get();
         let response = prepared.bytes_for_commit();
@@ -284,10 +404,11 @@ impl AccountServiceCoordinator {
             request: *request.envelope.as_bytes(),
             response: *response,
         };
-        writes.push(store_request_result(
+        writes.push(store_timed_request_result(
             revision,
-            request.envelope.client_request_id(),
+            id,
             scope.encode(&retained),
+            Some(expires),
         )?);
         context.join_remote_account_response(
             request.generation,
@@ -476,4 +597,38 @@ impl AccountServiceCoordinator {
         }
         self.replay_initial_root(context, request, stored)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_registered_receipt(
+    account: AccountId,
+    revision: u64,
+    expires: u64,
+    request: &InitialRootServiceEnvelope,
+    response: &[u8; ACCOUNT_SERVICE_RESPONSE_BYTES],
+) -> Result<AccountServiceDurableWrite, RuntimeError> {
+    let version = Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?;
+    let scope = RegisteredClaim {
+        session: SessionId::from_bytes([15; 16]),
+        account,
+        generation: version,
+    };
+    let original = RequestResultRecord {
+        route: ConnectionRoute {
+            origin_id: OriginId::from_bytes([11; 16]),
+            origin_generation: version,
+            connection_id: ConnectionId::from_bytes([12; 16]),
+            connection_nonce: [13; 32],
+        },
+        terminal: RequestTerminal::Accepted,
+        terminal_account: None,
+        request: *request.as_bytes(),
+        response: *response,
+    };
+    store_timed_request_result(
+        revision,
+        request.client_request_id(),
+        scope.encode(&original),
+        Some(expires),
+    )
 }

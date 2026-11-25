@@ -287,3 +287,4 @@ async fn guarded_initial_root_survives_four_reopens_and_a_signed_rotation_with_o
 }
 
 mod quota;
+mod replay_retention;

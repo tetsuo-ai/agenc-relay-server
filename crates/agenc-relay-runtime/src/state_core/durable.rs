@@ -237,6 +237,7 @@ pub(crate) enum AdminMutationAfterImage {
     Channel(DurableChannel),
 }
 
+pub(crate) mod claim_replays;
 pub(super) mod guarded_directory;
 mod initial_root;
 pub use initial_root::BackedRootClaim;
@@ -244,6 +245,10 @@ pub use initial_root::BackedRootClaim;
 /// One change the index applies after the batch it belongs to commits.
 #[derive(Clone, Eq, PartialEq)]
 pub enum IndexUpdate {
+    /// One exactly bound, process-budgeted private response was written.
+    RetainClaimReplay(std::sync::Arc<claim_replays::BackedClaimReplay>),
+    /// The original private response reached its authenticated retention boundary.
+    RemoveClaimReplay(agenc_relay_types::RequestId),
     /// Account-directory accounting and backed object ownership from this exact batch.
     GuardedDirectory(std::sync::Arc<guarded_directory::Updates>),
     /// An original, immutable guarded creation was committed.
@@ -301,6 +306,7 @@ pub enum IndexUpdate {
 /// Before-images and secondary-row ownership for every durable row.
 #[derive(Default)]
 pub struct DurableIndex {
+    claim_replays: claim_replays::Receipts,
     pub(super) guarded_directory: guarded_directory::Directory,
     pub(super) companion_disk: Option<agenc_relay_storage::CompanionDiskAccounting>,
     pub(super) initial_root_owners: BTreeMap<AccountId, std::sync::Arc<BackedRootClaim>>,
@@ -382,6 +388,8 @@ impl DurableIndex {
     fn apply_one(&mut self, update: &IndexUpdate) {
         match update {
             IndexUpdate::GuardedDirectory(changes) => self.guarded_directory.apply(changes),
+            IndexUpdate::RetainClaimReplay(held) => self.claim_replays.put(held),
+            IndexUpdate::RemoveClaimReplay(id) => self.claim_replays.remove(*id),
             IndexUpdate::InitialRootOwner(owner) => {
                 self.initial_root_owners
                     .insert(owner.row().account, owner.clone());
@@ -1172,10 +1180,14 @@ impl Projection<'_> {
                 key,
                 plaintext,
             } => {
-                if !matches!(*table, TableId::LoginIndex | TableId::LoginIndexKeyState)
-                    && PersistentRecordValue::decode(*table, plaintext)?.revision() != revision
-                {
-                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                if !matches!(*table, TableId::LoginIndex | TableId::LoginIndexKeyState) {
+                    let row = PersistentRecordValue::decode(*table, plaintext)?;
+                    if row.revision() != revision {
+                        return Err(RuntimeError::Storage(StorageError::StaleState));
+                    }
+                    if *table == TableId::RequestResult {
+                        self.project_claim_replay(key, &row)?;
+                    }
                 }
                 if *table == TableId::E2eeState {
                     self.project_initial_root_record(key, plaintext)?;
@@ -1188,7 +1200,12 @@ impl Projection<'_> {
             } if agenc_relay_storage::e2ee_records::initial_root::is_reserved_key(key) => {
                 Err(RuntimeError::Storage(StorageError::StaleState))
             }
-            AccountServiceDurableWrite::Delete { table, key } => self.delete(*table, key.clone()),
+            AccountServiceDurableWrite::Delete { table, key } => {
+                if *table == TableId::RequestResult {
+                    self.forget_claim_replay(key)?;
+                }
+                self.delete(*table, key.clone())
+            }
         }
     }
 

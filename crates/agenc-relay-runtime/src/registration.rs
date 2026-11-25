@@ -3244,6 +3244,9 @@ impl CommandRouter for RegistrationRouter {
             coordinator.continue_restore(context);
         }
         if event == crate::state_core::inbox::MaintenanceEvent::RetentionSweep {
+            if let Some(accounts) = &self.accounts {
+                let _retry_next_sweep = accounts.retire_claim_results(context);
+            }
             let pending = self
                 .e2ee
                 .as_ref()
