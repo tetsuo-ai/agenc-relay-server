@@ -18,6 +18,7 @@
 //! alone (companion 11.8, 11.9).
 #![forbid(unsafe_code)]
 
+use agenc_relay_testkit::{GUEST_REGISTRATION_WINDOW, guest_welcome};
 use std::io::Read;
 
 use super::stage_ten_drills::wait_for_account_authority;
@@ -56,8 +57,7 @@ fn guest(fixture: &NodeFixture, source: Ipv4Addr, nickname: &str) -> TestResult 
     let mut client = ArcClient::connect_from(fixture, Some(source))?;
     // Architecture 8.3 measures registration from the completed TLS handshake.
     // A busy edge can still welcome this guest after the ordinary I/O timeout.
-    let window = Duration::from_millis(agenc_relay_client_wire::REGISTRATION_TIMEOUT_MILLIS);
-    let deadline = client.tls_completed + window;
+    let deadline = client.tls_completed + GUEST_REGISTRATION_WINDOW;
     client.send(&format!("NICK {nickname}"))?;
     client.send(&format!("USER {nickname} 0 * :Link Faults"))?;
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -79,21 +79,6 @@ fn guest(fixture: &NodeFixture, source: Ipv4Addr, nickname: &str) -> TestResult 
     }
     drop(client);
     Ok(())
-}
-
-fn guest_welcome(line: &str, nickname: &str) -> bool {
-    use agenc_relay_client_wire::{
-        ServerCommand, ServerFramedLine, ServerPrefix, parse_server_message,
-    };
-    let Ok(frame) = ServerFramedLine::new(line) else {
-        return false;
-    };
-    parse_server_message(frame).is_ok_and(|message| {
-        matches!(message.prefix(), Some(ServerPrefix::Server(_)))
-            && message.command() == ServerCommand::Numeric(1)
-            && message.params().middle() == [nickname]
-            && message.params().trailing().is_some()
-    })
 }
 
 #[test]
