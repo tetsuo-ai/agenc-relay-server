@@ -92,12 +92,16 @@ async fn expiry_only_retires_the_exact_response_after_a_trusted_cut_and_reopen()
         [id]
     );
     context.set_wall_for_test(expires - 1);
+    AccountServiceCoordinator::require_live_claim_result(context, Some(expires))?;
+    assert!(AccountServiceCoordinator::require_live_claim_result(context, None).is_err());
     service.retire_claim_results(context)?;
     assert_eq!(context.pending_len(), 0);
     context.set_untrusted_wall_for_test(Some(expires + 86_400));
+    assert!(AccountServiceCoordinator::require_live_claim_result(context, Some(expires)).is_err());
     service.retire_claim_results(context)?;
     assert_eq!(context.pending_len(), 0);
     context.set_wall_for_test(expires);
+    assert!(AccountServiceCoordinator::require_live_claim_result(context, Some(expires)).is_err());
     service.retire_claim_results(context)?;
     assert!(context.index().holds(TableId::RequestResult, &key));
     fixture.commit_staged_batch().await?;

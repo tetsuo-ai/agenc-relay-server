@@ -5,6 +5,7 @@
 //! checks, fresh session identities, the ephemeral domain insertion, and
 //! bounded rendering into the connection sink.
 
+mod initial_root;
 mod initial_root_edge;
 mod join_names;
 pub(crate) mod replies;
@@ -116,6 +117,7 @@ struct CarrierObservation<'a> {
 struct ConnectionState {
     registration: RegistrationState,
     advertised: Arc<CapabilityProfile>,
+    initial_root_edge: Option<crate::federation::LinkId>,
     lease: Option<NicknameLease>,
     bound: Option<BoundSession>,
     nickname: Option<String>,
@@ -153,6 +155,7 @@ pub struct RegistrationRouter {
     config: RegistrationRuntimeConfig,
     advertised: ClientCapabilityProfiles,
     initial_root_profiles: ClientCapabilityProfiles,
+    last_initial_root_link: Option<crate::federation::LinkId>,
     accounts: Option<AccountServiceCoordinator>,
     commands: crate::channels::RegisteredCommandExecutor,
     connections: BTreeMap<ConnectionGeneration, ConnectionState>,
@@ -314,6 +317,7 @@ impl RegistrationRouter {
             },
             advertised,
             initial_root_profiles,
+            last_initial_root_link: None,
             accounts: hosted.map(AccountServiceCoordinator::new).transpose()?,
             commands,
             connections: BTreeMap::new(),
@@ -530,10 +534,16 @@ impl RegistrationRouter {
     ) -> RouteOutcome {
         let mut observation = Some(observation);
         let command = message.command().to_owned();
+        self.withdraw_stale_initial_root_clients(context);
         let Some(mut state) = self.connections.remove(&generation) else {
             complete_observation(context, &mut observation, ResultClass::Error);
             return RouteOutcome::Close(CloseReason::ProtocolError);
         };
+        if state.lost_initial_root_link(self.initial_root_link()) {
+            complete_observation(context, &mut observation, ResultClass::Closed);
+            self.connections.insert(generation, state);
+            return RouteOutcome::Close(CloseReason::ProtocolError);
+        }
         let authority_fenced = state.bound.is_some()
             && !authority_fence_exempt(&message)
             && self
@@ -621,70 +631,6 @@ impl RegistrationRouter {
         // path exactly once.
         self.connections.insert(generation, state);
         outcome
-    }
-
-    /// Only a current hosted authority can answer the protected capability probe.
-    fn initial_root_available(&self, _context: &StateCoreContext) -> bool {
-        self.accounts.is_some()
-    }
-
-    fn registration_message(
-        &self,
-        context: &StateCoreContext,
-        generation: ConnectionGeneration,
-        state: &mut ConnectionState,
-        message: agenc_relay_client_wire::ParsedMessage,
-    ) -> Result<Vec<RegistrationAction>, RegistrationError> {
-        use agenc_relay_types::INITIAL_ROOT_CAPABILITY;
-        let visible = state.advertised.contains(INITIAL_ROOT_CAPABILITY);
-        let available = self.initial_root_available(context);
-        let probe = !visible
-            && available
-            && state.registration.capability_state().supports_multiline()
-            && message.command() == "CAP"
-            && matches!(message.middle(), [verb] if verb == "REQ")
-            && message.trailing() == Some(INITIAL_ROOT_CAPABILITY);
-        if !probe && (!visible || available) {
-            return state
-                .registration
-                .message(message, context.now().get(), &state.advertised);
-        }
-
-        let profiles = if probe {
-            &self.initial_root_profiles
-        } else {
-            &self.advertised
-        };
-        let profile = context
-            .sessions()
-            .connection(generation)
-            .and_then(|entry| profiles.for_purpose(entry.purpose()))
-            .ok_or(RegistrationError::InvalidCommand)?;
-        let mut actions = state.registration.apply_capability_profile(&profile)?;
-        state.advertised = profile;
-        if !probe {
-            // Stop the opted-in origin on withdrawal even when no transfer has started.
-            if !actions
-                .iter()
-                .any(|action| matches!(action, RegistrationAction::CapabilityReconnectRequired(_)))
-            {
-                actions.push(RegistrationAction::CapabilityReconnectRequired(
-                    INITIAL_ROOT_CAPABILITY.to_owned(),
-                ));
-            }
-            return Ok(actions);
-        }
-
-        // CAP NEW carries the pin before the ordinary request handler produces its ACK.
-        let mut request =
-            state
-                .registration
-                .message(message, context.now().get(), &state.advertised)?;
-        actions
-            .try_reserve(request.len())
-            .map_err(|_| RegistrationError::AllocationFailed)?;
-        actions.append(&mut request);
-        Ok(actions)
     }
 
     fn refresh_deadline(
@@ -1357,6 +1303,7 @@ impl RegistrationRouter {
         context: &mut StateCoreContext,
         completions: Vec<crate::federation::edge::EdgeCompletion>,
     ) {
+        self.withdraw_stale_initial_root_clients(context);
         for completion in completions {
             self.apply_edge_completion(context, completion);
         }
@@ -1547,10 +1494,11 @@ impl RegistrationRouter {
                         .get(&generation)
                         .is_some_and(|carrier| carrier.root_link == Some(link))
                     && self.connections.get(&generation).is_some_and(|state| {
-                        state
-                            .registration
-                            .capability_state()
-                            .enabled("agenc.ag/initial-root")
+                        state.initial_root_edge == Some(link)
+                            && state
+                                .registration
+                                .capability_state()
+                                .enabled("agenc.ag/initial-root")
                     });
                 if current {
                     self.edge_carrier_outcome(
@@ -1603,6 +1551,7 @@ impl RegistrationRouter {
                 .as_ref()
                 .and_then(EdgeFederation::initial_root_link);
             if live.is_none()
+                || state.initial_root_edge != live
                 || !state
                     .registration
                     .capability_state()
@@ -3287,6 +3236,7 @@ impl CommandRouter for RegistrationRouter {
         context: &mut StateCoreContext,
         event: crate::state_core::inbox::MaintenanceEvent,
     ) {
+        self.withdraw_stale_initial_root_clients(context);
         self.retry_session_closes(context);
         if let Some(edge) = self.edge.as_mut() {
             edge.continue_request_journal(context);
@@ -3429,6 +3379,7 @@ impl CommandRouter for RegistrationRouter {
                 ConnectionState {
                     registration,
                     advertised,
+                    initial_root_edge: None,
                     lease: None,
                     bound: None,
                     nickname: None,

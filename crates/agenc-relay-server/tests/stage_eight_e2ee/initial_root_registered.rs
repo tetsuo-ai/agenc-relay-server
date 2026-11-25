@@ -431,3 +431,67 @@ fn lost_chosen_reply_is_recovered_privately_after_restore_while_older_reserved_i
     }
     Ok(())
 }
+
+#[test]
+fn enhanced_edge_retires_its_idle_opted_client_on_link_loss_and_requires_fresh_consent()
+-> TestResult {
+    let network = build_network()?;
+    for node in [&network.coordinator, &network.edge_a] {
+        let text = fs::read_to_string(&node.config_path)?;
+        let section = "[[federation.peer]]\n";
+        if !text.contains(section) {
+            return Err(failure("fixture has no configured federation peer"));
+        }
+        fs::write(
+            &node.config_path,
+            text.replace(
+                section,
+                "[[federation.peer]]\ninitial_root_profile = true\n",
+            ),
+        )?;
+    }
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut edge = DaemonProcess::start(&network.edge_a.config_path)?;
+    wait_for_link(&network.edge_a, 0)?;
+    drop(register_when_available(&network.edge_a, "FirstProbe")?);
+    let mut opted = ArcClient::connect(&network.edge_a)?;
+    negotiate_root(&mut opted)?;
+    let seen = links_established(&network.edge_a);
+    // No client input and no active transfer: the old receipt still belongs only to this link.
+    assert!(coordinator.stop()?.success());
+    let lost = opted.read_until(|line| line.contains(" DEL :agenc.ag/initial-root"))?;
+    assert_contains(&lost, " DEL :agenc.ag/initial-root")?;
+    if opted.read_until(|_| true).is_ok() {
+        return Err(failure("withdrawn connection remained open"));
+    }
+    let mut ordinary = ArcClient::connect(&network.edge_a)?;
+    ordinary.send("CAP LS 302")?;
+    let listed = ordinary.read_until(|line| line.contains(" LS ") && !line.contains(" LS * :"))?;
+    assert!(
+        !listed
+            .iter()
+            .any(|line| line.contains("agenc.ag/initial-root"))
+    );
+    ordinary.send("CAP REQ :agenc.ag/initial-root")?;
+    let unavailable = ordinary.read_until(|line| {
+        line.contains(" NAK ") || line.contains(" ACK ") || line.contains(" NEW ")
+    })?;
+    assert_contains(&unavailable, " NAK :agenc.ag/initial-root")?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    wait_for_link(&network.edge_a, seen)?;
+    drop(register_when_available(&network.edge_a, "FreshProbe")?);
+    // A surviving ordinary connection gets no unsolicited capability on link replacement.
+    ordinary.send("PING :new-link")?;
+    let ordinary_reply = ordinary.read_until(|line| line.contains("new-link"))?;
+    assert!(
+        !ordinary_reply
+            .iter()
+            .any(|line| line.contains("agenc.ag/initial-root"))
+    );
+    let mut fresh = ArcClient::connect(&network.edge_a)?;
+    negotiate_root(&mut fresh)?;
+    drop((fresh, ordinary, opted));
+    assert!(edge.stop()?.success());
+    assert!(coordinator.stop()?.success());
+    Ok(())
+}
