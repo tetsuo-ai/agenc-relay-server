@@ -586,6 +586,7 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
+        context.bind_verified_root_replay(request.generation, response.as_bytes());
         let frames = self.response_frames(context, &request, response.as_bytes(), true)?;
         context
             .send_to(request.generation, frames)

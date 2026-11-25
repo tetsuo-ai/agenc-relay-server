@@ -147,6 +147,8 @@ pub(crate) struct RemoteCarrier {
 pub(crate) struct InFlightCarrier {
     pub(super) link: LinkId,
     pub(super) fresh: FreshRequest,
+    // The transaction can settle before the account service releases its paced reply.
+    committed: Option<Vec<u8>>,
     /// The request opcode, which fixes the permitted result kind.
     pub opcode: FederationOpcode,
     /// The carrier generation the account service reports back.
@@ -394,6 +396,7 @@ impl FederationCoordinator {
                 opcode,
                 envelope,
                 in_flight: Box::new(InFlightCarrier {
+                    committed: None,
                     link,
                     fresh,
                     opcode,
@@ -612,9 +615,23 @@ impl FederationCoordinator {
         }
         let link = in_flight.link;
         let answered = (in_flight.opcode, in_flight.carrier_generation);
-        if let Some(committed) = context.take_remote_account_result(generation) {
-            let bytes = committed.bytes.clone();
-            if self.record_remote_result(committed).is_err() {
+        let committed = if let Some(bytes) = in_flight.committed {
+            Some(bytes)
+        } else if let Some(result) = context.take_remote_account_result(generation) {
+            if self.record_remote_result(&result).is_err() {
+                self.fail_link(context, link, peer, Violation::Origin);
+                return None;
+            }
+            Some(result.bytes)
+        } else {
+            None
+        };
+        if let Some(bytes) = committed {
+            if let Some(operation) = in_flight.fresh.extension
+                && !crate::federation::codec::initial_root::released_response(
+                    operation, &bytes, &arm,
+                )
+            {
                 self.fail_link(context, link, peer, Violation::Origin);
                 return None;
             }
@@ -634,7 +651,10 @@ impl FederationCoordinator {
             self.send_result(context, link, peer, in_flight.fresh.descriptor, &bytes);
             return Some(answered);
         }
-        if in_flight.fresh.extension.is_some() && !matches!(arm, ResultArm::Failed { .. }) {
+        if in_flight.fresh.extension.is_some()
+            && !matches!(arm, ResultArm::Failed { .. })
+            && !context.verified_root_replay(generation, &arm)
+        {
             context.forget_remote_account_result(generation);
             self.fail_link(context, link, peer, Violation::Origin);
             return None;
@@ -921,9 +941,29 @@ pub(crate) fn challenge_object(bytes: &[u8]) -> Option<SchemaObject> {
 }
 
 impl FederationCoordinator {
+    pub(super) fn settle_remote_result(
+        &mut self,
+        generation: ConnectionGeneration,
+        result: crate::state_core::remote_result::CommittedRemoteResult,
+    ) -> Result<(), Violation> {
+        self.record_remote_result(&result)?;
+        if let Some(flight) = self
+            .remote_accounts
+            .carriers
+            .get_mut(&generation)
+            .and_then(|carrier| carrier.in_flight.as_mut())
+            && flight.fresh.header.replay_key == result.header.replay_key
+            && flight.fresh.header.request_id == result.header.request_id
+            && flight.fresh.request_object_id == result.request_object_id
+        {
+            flight.committed = Some(result.bytes);
+        }
+        Ok(())
+    }
+
     pub(super) fn record_remote_result(
         &mut self,
-        result: crate::state_core::remote_result::CommittedRemoteResult,
+        result: &crate::state_core::remote_result::CommittedRemoteResult,
     ) -> Result<(), Violation> {
         let replay = result.header.replay_key;
         let key = agenc_relay_domain::federation::OperationKey {

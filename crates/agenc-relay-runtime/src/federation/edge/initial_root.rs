@@ -15,6 +15,34 @@ use crate::federation::codec::operations::FederatedOperation;
 use crate::federation::codec::results::ResultArm;
 use crate::state_core::StateCoreContext;
 
+/// Exact registered origin admitted at the first byte of a private claim.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct Principal {
+    session: agenc_relay_types::SessionId,
+    account: agenc_relay_types::AccountId,
+    account_generation: u64,
+    origin_generation: u64,
+}
+
+impl EdgeFederation {
+    pub(crate) fn initial_root_principal(
+        &self,
+        connection: ConnectionGeneration,
+    ) -> Option<Principal> {
+        let origin = self
+            .origins
+            .get(&connection)
+            .filter(|origin| !origin.deleted)?;
+        let (account, account_generation) = origin.account?;
+        Some(Principal {
+            session: origin.session?.0,
+            account,
+            account_generation,
+            origin_generation: origin.generation,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Carrier {
     GuardedStart,

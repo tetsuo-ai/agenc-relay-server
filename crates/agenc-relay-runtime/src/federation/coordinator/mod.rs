@@ -1470,9 +1470,9 @@ impl FederationCoordinator {
     }
 
     fn settle_remote_results(&mut self, context: &mut StateCoreContext) {
-        for result in context.take_committed_remote_results() {
+        for (generation, result) in context.take_committed_remote_results() {
             let peer = result.header.replay_key.home_server_id;
-            if self.record_remote_result(result).is_err()
+            if self.settle_remote_result(generation, result).is_err()
                 && let Some(link) = self
                     .peers
                     .get(&peer)

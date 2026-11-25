@@ -1,6 +1,9 @@
 //! Negotiated, registered prospective authority through a real coordinator and its persistent directory.
 #![forbid(unsafe_code)]
 
+#[path = "initial_root_registered/federated.rs"]
+mod federated;
+
 use super::*;
 use agenc_relay_auth::{
     InitialRootServiceResponse,

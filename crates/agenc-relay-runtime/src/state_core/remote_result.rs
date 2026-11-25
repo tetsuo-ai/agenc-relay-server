@@ -22,6 +22,7 @@ pub(crate) struct RemoteResultBinding {
     request_object_id: FederationHash32,
     origin: AccountServiceDurableWrite,
     prepared: Option<(u64, Vec<u8>)>,
+    replay: Option<FederationHash32>,
 }
 
 pub(crate) struct CommittedRemoteResult {
@@ -47,6 +48,7 @@ impl StateCoreContext {
                 request_object_id,
                 origin,
                 prepared: None,
+                replay: None,
             },
         );
     }
@@ -138,6 +140,36 @@ impl StateCoreContext {
         Ok(())
     }
 
+    /// An already-authenticated local replay can acquire a new outer sequence, without
+    /// producing another HPKE response or reapplying its account mutation.
+    pub(crate) fn bind_verified_root_replay(
+        &mut self,
+        generation: ConnectionGeneration,
+        response: &[u8],
+    ) {
+        if let Some(binding) = self.remote_account_results.get_mut(&generation)
+            && binding.extension == Some(InitialRootOperation::Claim)
+        {
+            binding.replay = Some(federation_object_id(response));
+        }
+    }
+
+    pub(crate) fn verified_root_replay(
+        &self,
+        generation: ConnectionGeneration,
+        arm: &ResultArm,
+    ) -> bool {
+        let ResultArm::InitialRoot(InitialRootOperation::Claim, response) = arm else {
+            return false;
+        };
+        self.remote_account_results
+            .get(&generation)
+            .is_some_and(|binding| {
+                binding.extension == Some(InitialRootOperation::Claim)
+                    && binding.replay == Some(federation_object_id(response))
+            })
+    }
+
     pub(crate) fn take_remote_account_result(
         &mut self,
         generation: ConnectionGeneration,
@@ -158,11 +190,16 @@ impl StateCoreContext {
         })
     }
 
-    pub(crate) fn take_committed_remote_results(&mut self) -> Vec<CommittedRemoteResult> {
+    pub(crate) fn take_committed_remote_results(
+        &mut self,
+    ) -> Vec<(ConnectionGeneration, CommittedRemoteResult)> {
         let generations: Vec<_> = self.remote_account_results.keys().copied().collect();
         generations
             .into_iter()
-            .filter_map(|generation| self.take_remote_account_result(generation))
+            .filter_map(|generation| {
+                self.take_remote_account_result(generation)
+                    .map(|result| (generation, result))
+            })
             .collect()
     }
 
