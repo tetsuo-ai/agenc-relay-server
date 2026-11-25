@@ -2,6 +2,9 @@
 
 //! End-to-end Stage-04 account-protocol and malicious-edge tests.
 
+#[path = "stage_four/initial_root.rs"]
+mod initial_root;
+
 use agenc_relay_auth::profile::{
     AgencOpaqueSuite, FallibleOpaqueRng, FixedArgon2id, opaque_context, opaque_identifiers,
 };
@@ -1234,6 +1237,7 @@ fn account_creation_and_authentication_complete_with_bound_receipts()
     )?;
     let creation_outcome = creation_outcome.seal(1)?;
     let creation_intent = creation_outcome.result()?;
+    assert!(creation_intent.initial_root_claim().is_none());
     let account_id = creation_intent.account_id();
     assert_eq!(creation_intent.invitation_id(), None);
     assert_eq!(creation_intent.invitation_expires_at(), None);

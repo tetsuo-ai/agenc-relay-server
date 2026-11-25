@@ -19,7 +19,7 @@ pub mod profile;
 mod service;
 mod transaction;
 mod wire;
-pub use wire::initial_root;
+pub use wire::{claimed_creation, initial_root};
 
 pub use channel_key::{
     CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_ITERATIONS, CHANNEL_KEY_LANES, CHANNEL_KEY_MEMORY_KIB,
@@ -45,12 +45,13 @@ pub use service::{
     AuthenticationGrant, AuthenticationGrantRecord, AuthenticationGrantRestartMetadata,
     AuthenticationLookup, AuthenticationStartParameters, AuthenticationTransactionRecord,
     CREATION_TRANSACTION_RECORD_BYTES, CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES,
-    CreateAccountIntent, CreationAdmission, CreationTransactionRecord,
+    CreateAccountIntent, CreatedRootClaim, CreationAdmission, CreationTransactionRecord,
     CreationTransactionRestartMetadata, CredentialChangeStartParameters, CredentialChangeState,
     CredentialChangeTransactionRecord, CredentialChangeTransactionRestartMetadata,
     CredentialReplacementIntent, DestructiveAccountSnapshot, FreshAuthenticationProof,
-    SealedAccountFinishOutcome, SealedAccountStart, authentication_completion,
-    begin_account_creation, begin_account_deletion, begin_authentication, begin_credential_change,
+    GuardedAccountStart, GuardedCreationTransactionRecord, SealedAccountFinishOutcome,
+    SealedAccountStart, authentication_completion, begin_account_creation, begin_account_deletion,
+    begin_authentication, begin_credential_change, begin_guarded_account_creation,
     finish_account_authentication, finish_account_creation, finish_credential_change,
 };
 pub use transaction::{

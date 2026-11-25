@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_relay_auth::{
-    AuthenticationGrantRecord, AuthenticationTransactionRecord, CreationTransactionRecord,
+    AuthenticationGrantRecord, AuthenticationTransactionRecord, CreationTransactionRestartMetadata,
     CredentialChangeTransactionRecord, OPAQUE_REGISTRATION_RECORD_BYTES, OpaqueRegistrationRecord,
 };
 use agenc_relay_config::NodeRole;
@@ -804,8 +804,7 @@ impl Scan {
         value: &PersistentRecordValue,
         keyed_transaction: TransactionId,
     ) -> Result<RecoveredTransaction, RuntimeError> {
-        let metadata = CreationTransactionRecord::parse(value.body())
-            .and_then(CreationTransactionRecord::into_restart_cleanup_metadata)
+        let metadata = CreationTransactionRestartMetadata::parse(value.body())
             .map_err(|_| invalid_account_service_record())?;
         if metadata.transaction_id() != keyed_transaction
             || value.expires_at() != Some(metadata.durable_expires_at_utc().get())
