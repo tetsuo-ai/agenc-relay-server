@@ -4747,7 +4747,7 @@ async fn resync_account_transaction_contains_its_exact_federation_response() -> 
         .encode()?,
     )
     .map_err(|error| format!("{error:?}"))?;
-    context.bind_remote_account_result(generation, header, None, request_object_id, origin);
+    context.bind_remote_account_result(generation, header, None, request_object_id, origin, None);
     let arm = ResultArm::Failed {
         code: "NOT_ALLOWED".to_owned(),
         context: String::new(),
@@ -4838,6 +4838,7 @@ fn remote_account_staging_request(
     let request_object_id = FederationHash32::from_bytes([74; 32]);
     let fresh = crate::federation::coordinator::FreshRequest {
         extension: None,
+        root_intake: None,
         key: OperationKey {
             origin: key,
             generation: 0,

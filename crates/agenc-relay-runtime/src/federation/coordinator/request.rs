@@ -46,6 +46,7 @@ pub(crate) struct FreshRequest {
     pub(super) key: OperationKey,
     pub(super) header: RequestHeader,
     pub(super) extension: Option<agenc_relay_federation_wire::InitialRootOperation>,
+    pub(super) root_intake: Option<std::sync::Arc<super::initial_root_results::Intake>>,
     pub(super) descriptor: OperationDescriptor,
     pub(super) request_object_id: FederationHash32,
     pub(super) bound: Option<BoundSession>,
@@ -220,6 +221,7 @@ fn execute(
         key,
         header,
         extension: request.extension(),
+        root_intake: None,
         descriptor,
         request_object_id: object.object_id(),
         bound: None,
@@ -228,7 +230,14 @@ fn execute(
         charge,
     };
     match classified {
-        Classified::Replay => return replay(coordinator, context, link, peer, descriptor, &header),
+        Classified::Replay => {
+            if fresh.extension.is_some()
+                && !super::initial_root_results::replayable(context, &header.replay_key.to_bytes())?
+            {
+                return expire_request(coordinator, context, link, peer, fresh);
+            }
+            return replay(coordinator, context, link, peer, descriptor, &header);
+        }
         Classified::Expired => return expire_request(coordinator, context, link, peer, fresh),
         Classified::Fresh => {}
     }
@@ -240,6 +249,7 @@ fn execute(
             run_operation(coordinator, context, link, peer, fresh, operation)
         }
         Request::Enhanced(request) => {
+            fresh.root_intake = Some(coordinator.admit_initial_root(context, &header)?);
             if context.is_quiescing() {
                 return Err(Violation::Phase);
             }
@@ -1407,13 +1417,20 @@ fn request_rows(
     .map_err(|_| Violation::Codec)?;
     let result_key =
         request_result_key(fresh.header.replay_key.to_bytes()).map_err(|_| Violation::Codec)?;
-    let result_write = row(
+    let result_value = PersistentRecordValue::new(
         TableId::RequestResult,
         COORDINATOR_RESULT_KIND,
-        result_key,
         row_revision,
+        0,
+        fresh.root_intake.as_ref().map(|slot| slot.deadline),
+        Vec::new(),
         result_body,
-    )?;
+    )
+    .and_then(|row| row.encode())
+    .map_err(|_| Violation::Codec)?;
+    let result_write =
+        AccountServiceDurableWrite::put(TableId::RequestResult, result_key, result_value)
+            .map_err(|_| Violation::Codec)?;
     let next_sequence = fresh
         .key
         .sequence
