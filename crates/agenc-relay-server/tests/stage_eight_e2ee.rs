@@ -1120,7 +1120,7 @@ impl ArcClient {
             return work();
         }
         thread::scope(|scope| {
-            let (finish, closed) = std::sync::mpsc::channel::<()>();
+            let (finish, closed) = std::sync::mpsc::sync_channel::<()>(0);
             let heartbeat = scope.spawn(move || -> TestResult {
                 loop {
                     self.send("PING :large-welcome-transfer")?;
