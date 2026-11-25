@@ -408,6 +408,7 @@ impl ConfigDiff {
         let identity_changed = a.server_name != c.server_name
             || a.role != c.role
             || a.recovery_epoch != c.recovery_epoch
+            || a.initial_root_profile != c.initial_root_profile
             || a.certificate_spki_sha256 != c.certificate_spki_sha256
             || a.signing_public_key != c.signing_public_key;
         self.push_restart(identity_changed, RestartOnlyField::PeerIdentity);

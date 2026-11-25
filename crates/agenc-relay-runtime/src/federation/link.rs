@@ -16,7 +16,7 @@ use agenc_relay_e2ee::federation::frames::{
 };
 use agenc_relay_federation_wire::{
     AssemblyProgress, FederationCommandTag, FederationFrame, FederationLine, FederationLineText,
-    FragmentAssembler, FragmentDescriptorKey, FrameError,
+    FederationProfile, FragmentAssembler, FragmentDescriptorKey, FrameError,
 };
 use agenc_relay_types::{
     BASE_FRAGMENT_IDLE_SECONDS, EntropySource, FEDERATION_KEEPALIVE_IDLE_SECONDS,
@@ -101,6 +101,7 @@ pub struct FrameReader<S> {
     rejected: bool,
     buffer: Vec<u8>,
     expected_prefix: String,
+    profile: FederationProfile,
 }
 
 impl<S: AsyncRead + Unpin> FrameReader<S> {
@@ -119,7 +120,12 @@ impl<S: AsyncRead + Unpin> FrameReader<S> {
             rejected: false,
             buffer,
             expected_prefix: expected_prefix.to_owned(),
+            profile: FederationProfile::Base,
         })
+    }
+
+    pub(super) fn select_profile(&mut self, profile: FederationProfile) {
+        self.profile = profile;
     }
 
     /// Borrows the transport, for writes during the hello exchange.
@@ -165,7 +171,7 @@ impl<S: AsyncRead + Unpin> FrameReader<S> {
                 if failure.is_some() {
                     return;
                 }
-                match parse_line(line.as_str(), expected_prefix) {
+                match parse_line_for_profile(line.as_str(), expected_prefix, self.profile) {
                     Ok(frame) => pending.push_back(frame),
                     Err(error) => failure = Some(error),
                 }
@@ -198,6 +204,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> FrameReader<S> {
                 rejected: self.rejected,
                 buffer: self.buffer,
                 expected_prefix: self.expected_prefix,
+                profile: self.profile,
             },
             write,
         )
@@ -208,6 +215,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> FrameReader<S> {
 /// line must carry the authenticated peer prefix and, when tagged, the
 /// companion tag key; a base line never carries the companion key.
 pub fn parse_line(line: &str, expected_prefix: &str) -> Result<ParsedLine, ReadFailure> {
+    parse_line_for_profile(line, expected_prefix, FederationProfile::Base)
+}
+
+fn parse_line_for_profile(
+    line: &str,
+    expected_prefix: &str,
+    profile: FederationProfile,
+) -> Result<ParsedLine, ReadFailure> {
     let parts = split_line(line).map_err(|_| ReadFailure::Framing)?;
     if is_companion_command(parts.command) {
         if parts.prefix != expected_prefix {
@@ -230,7 +245,7 @@ pub fn parse_line(line: &str, expected_prefix: &str) -> Result<ParsedLine, ReadF
     if parts.companion_tag {
         return Err(ReadFailure::Framing);
     }
-    parse_base_frame(parts, expected_prefix).map(ParsedLine::Base)
+    parse_base_frame(parts, expected_prefix, profile).map(ParsedLine::Base)
 }
 
 /// Parses one complete line into a base frame; a companion line fails.
@@ -244,6 +259,7 @@ pub fn parse_frame(line: &str, expected_prefix: &str) -> Result<FederationFrame,
 fn parse_base_frame(
     parts: crate::federation::line::LineParts<'_>,
     expected_prefix: &str,
+    profile: FederationProfile,
 ) -> Result<FederationFrame, ReadFailure> {
     let tags: Vec<FederationCommandTag<'_>> = parts
         .tag_value
@@ -255,9 +271,10 @@ fn parse_base_frame(
             )
         })
         .collect();
-    FederationFrame::parse(
+    FederationFrame::parse_for_profile(
         FederationLine::new(Some(parts.prefix), &tags, parts.command, &parts.parameters),
         expected_prefix,
+        profile,
     )
     .map_err(ReadFailure::Frame)
 }

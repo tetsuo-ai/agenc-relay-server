@@ -11,9 +11,9 @@ use std::time::Duration;
 use agenc_relay_crypto::Ed25519SecretKey;
 use agenc_relay_federation_wire::{
     CanonicalEncode as _, DecodeBudget, EpochTransition, EventDescriptor,
-    FEDERATION_EXPORTER_LABEL, FederationFrame, FederationHash32, HelloRejection,
-    OperationDescriptor, PeerContinuity, ReplayKey, ResultHeader, SchemaObject, WireValue,
-    exporter_context, federation_object_id, split_fragments,
+    FEDERATION_EXPORTER_LABEL, FederationFrame, FederationHash32, FederationProfile,
+    HelloRejection, OperationDescriptor, PeerContinuity, ReplayKey, ResultHeader, SchemaObject,
+    WireValue, exporter_context, federation_object_id, split_fragments,
 };
 use agenc_relay_runtime::cancel::CancellationToken;
 use agenc_relay_runtime::federation::hello::{
@@ -279,7 +279,25 @@ async fn mutual_tls_binds_pin_uri_and_alpn() -> TestResult {
 
 #[tokio::test]
 async fn hello_exchange_authenticates_both_directions() -> TestResult {
-    let pair = make_pair()?;
+    use FederationProfile::{Base, InitialRoot};
+    for (coordinator, edge) in [
+        (Base, Base),
+        (InitialRoot, InitialRoot),
+        (Base, InitialRoot),
+        (InitialRoot, Base),
+    ] {
+        exchange_with_profiles(coordinator, edge).await?;
+    }
+    Ok(())
+}
+
+async fn exchange_with_profiles(
+    coordinator: FederationProfile,
+    edge: FederationProfile,
+) -> TestResult {
+    let mut pair = make_pair()?;
+    pair.edge.as_peer = pair.edge.as_peer.with_profile(coordinator);
+    pair.coordinator.as_peer = pair.coordinator.as_peer.with_profile(edge);
     let (server, client) = connect(&pair, &pair.coordinator.as_peer).await?;
     let exporter =
         exporter_of(|out, label, context| server.export_keying_material(out, label, context))?;
@@ -305,8 +323,14 @@ async fn hello_exchange_authenticates_both_directions() -> TestResult {
             &mut edge_entropy,
         ),
     );
+    if coordinator != edge {
+        assert!(coordinator_outcome.is_err() && edge_outcome.is_err());
+        return Ok(());
+    }
     let coordinator_outcome = coordinator_outcome?;
     let edge_outcome = edge_outcome?;
+    assert_eq!(coordinator_outcome.profile, coordinator);
+    assert_eq!(edge_outcome.profile, edge);
     assert_eq!(coordinator_outcome.transition, EpochTransition::Initial);
     assert_eq!(
         coordinator_outcome.peer_incarnation,

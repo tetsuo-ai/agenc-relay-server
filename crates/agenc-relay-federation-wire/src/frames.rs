@@ -17,6 +17,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use zeroize::Zeroize as _;
 
+use crate::FederationProfile;
 use crate::codec::CodecError;
 use crate::objects::FederationHello;
 use crate::text::{
@@ -595,6 +596,15 @@ impl FederationFrame {
 
     /// Parses one line whose prefix must equal the authenticated peer name.
     pub fn parse(line: FederationLine<'_>, expected_prefix: &str) -> Result<Self, FrameError> {
+        Self::parse_for_profile(line, expected_prefix, FederationProfile::Base)
+    }
+
+    /// Parses the line under the single profile configured for this peer.
+    pub fn parse_for_profile(
+        line: FederationLine<'_>,
+        expected_prefix: &str,
+        profile: FederationProfile,
+    ) -> Result<Self, FrameError> {
         let prefix = line.prefix.ok_or(FrameError::MissingPrefix)?;
         if prefix != expected_prefix {
             return Err(FrameError::WrongPrefix);
@@ -610,13 +620,22 @@ impl FederationFrame {
             parameters,
             next: 0,
         };
-        let frame = parse_form(descriptor.form, &mut cursor, tags)?;
+        let frame = parse_form(descriptor.form, &mut cursor, tags, profile)?;
         cursor.finish()?;
         Ok(frame)
     }
 
     /// Renders the one canonical line including CRLF.
     pub fn render(&self, server_name: &str) -> Result<FederationLineText, FrameError> {
+        self.render_for_profile(server_name, FederationProfile::Base)
+    }
+
+    /// Renders the selected signed hello and original grammar for other base frames.
+    pub fn render_for_profile(
+        &self,
+        server_name: &str,
+        profile: FederationProfile,
+    ) -> Result<FederationLineText, FrameError> {
         validate_server_name(server_name)?;
         let mut text = String::new();
         if let Some(fragment) = self.fragment() {
@@ -640,21 +659,25 @@ impl FederationFrame {
         if let Some(subcommand) = subcommand {
             push_parameter(&mut text, subcommand)?;
         }
-        self.render_parameters(&mut text)?;
+        self.render_parameters(&mut text, profile)?;
         reserve(&mut text, CRLF.len())?;
         text.push_str(CRLF);
         Ok(FederationLineText { text })
     }
 
     // agenc-review: focus owner=federation-wire reviewed=2026-09-02 reason=one closed dispatcher writes every registered form's exact parameter tuple
-    fn render_parameters(&self, text: &mut String) -> Result<(), FrameError> {
+    fn render_parameters(
+        &self,
+        text: &mut String,
+        profile: FederationProfile,
+    ) -> Result<(), FrameError> {
         match self {
             Self::Hello {
                 peer_server_id,
                 hello,
             } => {
                 push_id(text, peer_server_id.as_bytes())?;
-                let encoded = hello.encode()?;
+                let encoded = profile.encode_hello(hello)?;
                 push_parameter(text, &URL_SAFE_NO_PAD.encode(encoded.as_slice()))
             }
             Self::Ready {
@@ -906,11 +929,12 @@ fn parse_form(
     form: &str,
     cursor: &mut Parameters<'_>,
     tags: FederationCommandTags,
+    profile: FederationProfile,
 ) -> Result<FederationFrame, FrameError> {
     Ok(match form {
         "FHELLO" => {
             let peer_server_id = ServerId::from_bytes(cursor.id16()?);
-            let hello = decode_hello(cursor.take()?)?;
+            let hello = decode_hello(cursor.take()?, profile)?;
             FederationFrame::Hello {
                 peer_server_id,
                 hello,
@@ -1074,7 +1098,7 @@ fn parse_form(
     })
 }
 
-fn decode_hello(token: &str) -> Result<FederationHello, FrameError> {
+fn decode_hello(token: &str, profile: FederationProfile) -> Result<FederationHello, FrameError> {
     let mut decoded = [0_u8; 260];
     let written = URL_SAFE_NO_PAD
         .decode_slice(token.as_bytes(), &mut decoded)
@@ -1082,7 +1106,7 @@ fn decode_hello(token: &str) -> Result<FederationHello, FrameError> {
     if written != decoded.len() || URL_SAFE_NO_PAD.encode(decoded) != token {
         return Err(FederationTextError::NonCanonical.into());
     }
-    Ok(FederationHello::decode(&decoded)?)
+    Ok(profile.decode_hello(decoded)?)
 }
 
 fn take_fragment(

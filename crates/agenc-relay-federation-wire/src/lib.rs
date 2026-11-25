@@ -13,6 +13,7 @@ mod frames;
 mod hashes;
 mod hello;
 mod history;
+mod initial_root;
 mod objects;
 mod schema;
 mod semantics;
@@ -42,6 +43,9 @@ pub use hello::{
 };
 pub use history::{
     HistoryAuthorizationObject, HistoryMessageObject, HistoryPage, HistorySelectorObject,
+};
+pub use initial_root::{
+    FederationProfile, INITIAL_ROOT_PROFILE_SHA256, INITIAL_ROOT_PROFILE_TOKEN,
 };
 pub use objects::{
     CrossProfilePart, EventHeader, FEDERATION_EXPORTER_CONTEXT_BYTES, FEDERATION_EXPORTER_LABEL,
