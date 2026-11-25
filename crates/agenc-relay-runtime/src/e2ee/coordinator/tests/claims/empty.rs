@@ -4,6 +4,7 @@
 use super::*;
 use crate::e2ee::coordinator::CompanionFault;
 use crate::e2ee::coordinator::empty_claims::{GLOBAL, PER_ACCOUNT};
+use agenc_relay_domain::e2ee::directory::ClaimOutcome;
 use agenc_relay_storage::PersistentRecordValue;
 use agenc_relay_storage::e2ee_records::{ClaimOutcome as Stored, PACKAGE_ROW_KIND};
 
@@ -401,6 +402,59 @@ fn committed_package_and_claim_keys_and_outcome_tags_must_agree_at_startup() -> 
                 .contains(&([6; 32], OPERATION))
         );
     }
+    Ok(())
+}
+
+#[test]
+fn an_empty_claim_requires_backing_when_its_durable_row_is_admitted() -> TestResult {
+    let mut h = ready()?;
+    let claimant = account_id_digest(&NETWORK, &h.account)?;
+    let key = PackageRow::claim_key(&claimant, &OPERATION)?;
+    let row = PersistentRecordValue::new(
+        TableId::E2eeState,
+        PACKAGE_ROW_KIND,
+        1,
+        0,
+        None,
+        vec![],
+        empty_row(claimant, h.now + KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS).encode()?,
+    )?;
+    h.coordinator.admit_restored(TableId::E2eeState, &key, &row);
+    assert!(matches!(
+        h.coordinator.finish_restore_with_backing(h.backing.clone()),
+        Err(CompanionFault::Ceiling)
+    ));
+    assert!(
+        !h.coordinator
+            .state
+            .empty_claims
+            .contains(&(claimant, OPERATION))
+    );
+    assert!(
+        h.coordinator
+            .state
+            .directory
+            .stored_claim(&claimant, &OPERATION)
+            .is_none()
+    );
+
+    h.coordinator
+        .admit_restored_with_backing(TableId::E2eeState, &key, &row, &h.backing);
+    h.coordinator
+        .finish_restore_with_backing(h.backing.clone())?;
+    assert!(
+        h.coordinator
+            .state
+            .empty_claims
+            .contains(&(claimant, OPERATION))
+    );
+    assert_eq!(
+        h.coordinator
+            .state
+            .directory
+            .claim_status(&claimant, &OPERATION),
+        Some(&ClaimOutcome::Unavailable)
+    );
     Ok(())
 }
 
