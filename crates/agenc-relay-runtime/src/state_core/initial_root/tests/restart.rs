@@ -20,15 +20,19 @@ fn registered_rows(
     account: AccountId,
     revision: u64,
 ) -> TestResult<Vec<AccountServiceDurableWrite>> {
+    let digest = account_id_digest(
+        fixture.identity.network_id.as_bytes(),
+        account.to_text().as_bytes(),
+    )?;
     let key = LoginIndexStoredKey::new(
         fixture.key_state.current_generation(),
-        LoginIndexDigest::from_storage_key([21; 32]),
+        LoginIndexDigest::from_storage_key(digest),
     )?;
     let login = LoginIndexValue::new(
         &key,
         LoginIndexValueKind::Live {
             account_id: account,
-            opaque_credential_id: OpaqueCredentialId::from_bytes([22; 32]),
+            opaque_credential_id: OpaqueCredentialId::from_bytes(digest),
         },
     )?;
     let account_key = crate::state_core::durable::KeyDeriver::account_key(account)?;
@@ -56,11 +60,18 @@ async fn reserved_database(fixture: &mut StateCoreFixture, who: &RootClaimOwner)
     let plan = context.domain().plan_account_created(account)?;
     let revision = plan.resulting_revision().get();
     let mut writes = registered_rows(fixture, who.account, revision)?;
-    writes.push(initial_root_write(
-        revision,
-        StoredKey::new(FORMAT_KEY.to_vec())?,
-        InitialRootRow::format()?,
-    )?);
+    let fence = StoredKey::new(FORMAT_KEY.to_vec())?;
+    if !fixture
+        .context_mut()?
+        .index
+        .holds(TableId::E2eeState, &fence)
+    {
+        writes.push(initial_root_write(
+            revision,
+            fence,
+            InitialRootRow::format()?,
+        )?);
+    }
     writes.push(owned_write(revision, who)?);
     stage(fixture.context_mut()?, plan, writes)?;
     fixture
@@ -287,3 +298,4 @@ async fn guarded_initial_root_survives_four_reopens_and_a_signed_rotation_with_o
 }
 
 mod quota;
+mod stock;
