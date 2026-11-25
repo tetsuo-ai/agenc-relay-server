@@ -111,6 +111,8 @@ mod direct_offline;
 mod direct_plaintext;
 #[path = "stage_eight_e2ee/encrypted_clients.rs"]
 mod encrypted_clients;
+#[path = "stage_eight_e2ee/initial_root_registered.rs"]
+mod initial_root_registered;
 #[path = "stage_eight_e2ee/link_faults.rs"]
 mod link_faults;
 #[path = "stage_eight_e2ee/listing_pages.rs"]
@@ -328,6 +330,7 @@ struct NodeFixture {
     /// Stage 10 campaign and drills need to operate the node like an operator.
     seed: u8,
     server_id: ServerId,
+    provisioned_epoch: String,
     admin_socket: PathBuf,
     data_dir: PathBuf,
     operator_id: OperatorId,
@@ -522,6 +525,7 @@ impl NodeFixture {
             client_tls,
             seed,
             server_id: identity.server_id,
+            provisioned_epoch: identity.recovery_epoch.to_base64url(),
             admin_socket: runtime_dir.join("admin.sock"),
             data_dir,
             operator_id,
@@ -1452,6 +1456,15 @@ fn account_recovery_epoch(
     if config.network.network_id != network_id {
         return Err(failure("account request network differs from the fixture"));
     }
+    if fixture.server_id == config.network.coordinator_server_id {
+        return Ok(RecoveryEpoch::from_bytes(
+            URL_SAFE_NO_PAD
+                .decode(&fixture.provisioned_epoch)
+                .map_err(|_| failure("fixture coordinator epoch encoding"))?
+                .as_slice()
+                .try_into()?,
+        ));
+    }
     config
         .federation
         .peers
@@ -1613,15 +1626,30 @@ impl ArcClient {
         envelope: &[u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
         token: AccountResponseOpenToken,
     ) -> TestResult<AccountServiceResponsePayload> {
-        let command = carrier.command();
+        let decoded = self.account_carrier_bytes(
+            carrier.command(),
+            phase.command(),
+            phase.response(),
+            envelope,
+        )?;
+        open_account_payload(token, decoded)
+    }
+
+    fn account_carrier_bytes(
+        &mut self,
+        command: &str,
+        selector: &str,
+        response_type: &str,
+        envelope: &[u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
+    ) -> TestResult<Vec<u8>> {
         self.send(&format!(
             "{command} {} {ACCOUNT_SERVICE_ENVELOPE_BYTES}",
-            phase.command()
+            selector
         ))?;
         let ready = read_line_for(&mut self.reader, "account carrier READY")?;
         let ready_marker = format!(
             " {command} READY {} {ACCOUNT_SERVICE_ENVELOPE_BYTES}",
-            phase.command()
+            selector
         );
         if !ready.contains(&ready_marker) {
             return Err(failure(format!(
@@ -1639,15 +1667,10 @@ impl ArcClient {
         self.send(&format!("{command} END"))?;
 
         let response_start = read_line_for(&mut self.reader, "account carrier response header")
-            .map_err(|error| {
-                failure(format!(
-                    "{command} {} response header: {error}",
-                    phase.command()
-                ))
-            })?;
+            .map_err(|error| failure(format!("{command} {} response header: {error}", selector)))?;
         let response_marker = format!(
             " {command} {} {ACCOUNT_SERVICE_RESPONSE_BYTES}",
-            phase.response()
+            response_type
         );
         if !response_start.contains(&response_marker) {
             return Err(failure(format!(
@@ -1693,7 +1716,7 @@ impl ArcClient {
         if URL_SAFE_NO_PAD.encode(&decoded) != encoded_response {
             return Err(failure("account response was not canonical Base64url"));
         }
-        open_account_payload(token, decoded)
+        Ok(decoded)
     }
 
     fn begin_sasl(&mut self) -> TestResult {
@@ -1826,36 +1849,72 @@ fn create_live_account_with(
     login_name: &str,
     requests: [RequestId; 2],
 ) -> TestResult<AccountId> {
+    create_account_with_root_option(client, fixture, login_name, requests, None)
+}
+
+fn create_account_with_root_option(
+    client: &mut ArcClient,
+    fixture: &NodeFixture,
+    login_name: &str,
+    requests: [RequestId; 2],
+    secret: Option<&agenc_relay_crypto::InitialRootSecret>,
+) -> TestResult<AccountId> {
     let [start_request, finish_request] = requests;
     let mut rng = FallibleOpaqueRng::new(OsEntropy);
     let registration = ClientRegistration::<AgencOpaqueSuite>::start(&mut rng, ACCOUNT_PASSWORD)?;
     let registration_request = OpaqueRegistrationRequest::from_bytes(
         registration.message.serialize().as_slice().try_into()?,
     )?;
-    let (start_envelope, start_token) = seal_account_payload(
-        fixture,
-        NETWORK_ID,
-        start_request,
-        AccountRequestPayload::CreationStart(CreationStart {
-            network_id: NETWORK_ID,
-            login: NormalizedLogin::prepare(login_name)?,
-            registration_request,
-            invitation: None,
-        }),
-    )?;
-    let challenge = client.account_exchange(
-        AccountCarrier::Create,
-        AccountPhase::Start,
-        &start_envelope,
-        start_token,
-    )?;
-    let AccountServiceResponsePayload::CreationChallenge {
-        transaction_id,
-        credential_id,
-        response,
-    } = challenge
-    else {
-        return Err(failure("account creation returned the wrong challenge"));
+    let payload = CreationStart {
+        network_id: NETWORK_ID,
+        login: NormalizedLogin::prepare(login_name)?,
+        registration_request,
+        invitation: None,
+    };
+    let (transaction_id, credential_id, response) = if let Some(secret) = secret {
+        let key = AccountHpkePrivateKey::from_bytes(ACCOUNT_HPKE_PRIVATE)?.public_key()?;
+        let binding = AccountRequestBinding::new(
+            NETWORK_ID,
+            account_recovery_epoch(fixture, NETWORK_ID)?,
+            key.key_id(),
+            start_request,
+            agenc_relay_crypto::InitialRootExchange::ClaimedCreateStart,
+        );
+        let (envelope, token) =
+            agenc_relay_auth::claimed_creation::seal_start(key, binding, &payload, secret)?;
+        let bytes = client.account_carrier_bytes(
+            "ACCTCREATE",
+            "CLAIMSTART",
+            "CHALLENGE",
+            envelope.as_bytes(),
+        )?;
+        token
+            .open(&agenc_relay_auth::InitialRootServiceResponse::parse(
+                bytes
+                    .try_into()
+                    .map_err(|_| failure("guarded challenge width"))?,
+            )?)?
+            .into_registration()
+    } else {
+        let (envelope, token) = seal_account_payload(
+            fixture,
+            NETWORK_ID,
+            start_request,
+            AccountRequestPayload::CreationStart(payload),
+        )?;
+        match client.account_exchange(
+            AccountCarrier::Create,
+            AccountPhase::Start,
+            &envelope,
+            token,
+        )? {
+            AccountServiceResponsePayload::CreationChallenge {
+                transaction_id,
+                credential_id,
+                response,
+            } => (transaction_id, credential_id, response),
+            _ => return Err(failure("account creation returned the wrong challenge")),
+        }
     };
     let registration_finish = registration.state.finish(
         &mut rng,

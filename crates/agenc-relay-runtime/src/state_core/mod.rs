@@ -19,6 +19,7 @@ pub mod fanout;
 pub(crate) mod history;
 pub mod inbox;
 mod initial_root;
+pub(crate) use initial_root::InitialRootCut;
 pub(crate) mod local_join;
 mod pending;
 pub mod projector;

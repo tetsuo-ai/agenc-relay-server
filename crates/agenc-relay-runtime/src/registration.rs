@@ -220,14 +220,24 @@ impl ClientCapabilityProfiles {
     /// The same profiles with the E2EE capability and its fixed value added
     /// (companion 11.1).
     fn with_e2ee(&self) -> Result<Self, RuntimeError> {
+        self.with_capability(
+            crate::e2ee::edge::E2EE_CAPABILITY,
+            agenc_relay_e2ee::limits::CAPABILITY_VALUE,
+        )
+    }
+
+    fn with_initial_root(&self) -> Result<Self, RuntimeError> {
+        self.with_capability(
+            agenc_relay_types::INITIAL_ROOT_CAPABILITY,
+            &format!("v1.{}", agenc_relay_types::INITIAL_ROOT_PROFILE_TOKEN),
+        )
+    }
+
+    fn with_capability(&self, name: &str, value: &str) -> Result<Self, RuntimeError> {
         let extend = |profile: &CapabilityProfile| -> Result<Arc<CapabilityProfile>, RuntimeError> {
             let mut capabilities = profile.capabilities().to_vec();
             capabilities.push(
-                CapabilitySpec::new(
-                    crate::e2ee::edge::E2EE_CAPABILITY,
-                    Some(agenc_relay_e2ee::limits::CAPABILITY_VALUE),
-                )
-                .map_err(|_| RuntimeError::InvalidValue)?,
+                CapabilitySpec::new(name, Some(value)).map_err(|_| RuntimeError::InvalidValue)?,
             );
             CapabilityProfile::new(capabilities)
                 .map(Arc::new)
@@ -282,6 +292,11 @@ impl RegistrationRouter {
             } => (creation_policy, recovery_epoch, None),
         };
         let advertised = ClientCapabilityProfiles::new(creation_policy, recovery_epoch)?;
+        let advertised = if hosted.is_some() {
+            advertised.with_initial_root()?
+        } else {
+            advertised
+        };
         Ok(Self {
             config: RegistrationRuntimeConfig {
                 network_id,
@@ -993,7 +1008,14 @@ impl RegistrationRouter {
                         AccountCarrierKind::Credentials,
                         message,
                     ),
-                    RegistrationAuthCarrier::InitialRoot(_) => CarrierRoute::Close,
+                    RegistrationAuthCarrier::InitialRoot(family) => accounts.route_account(
+                        context,
+                        generation,
+                        carrier_generation,
+                        &target,
+                        family,
+                        message,
+                    ),
                 };
                 return self.complete_carrier_route(
                     context,

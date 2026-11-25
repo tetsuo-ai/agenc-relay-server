@@ -145,7 +145,7 @@ pub(super) fn request(
         carrier_generation,
         target: "tester".to_owned(),
         route,
-        envelope,
+        envelope: envelope.into(),
         carrier: RequestCarrier::Account(AccountCarrierKind::Create),
         phase,
     }

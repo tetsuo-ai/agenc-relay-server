@@ -1,0 +1,479 @@
+//! Registered private account operations share the OPAQUE actor's replay and commit barrier.
+
+use super::*;
+use crate::bridge::crypto::InitialRootSealJob;
+use agenc_relay_auth::{
+    InitialRootServiceEnvelope, InitialRootServiceResponse, initial_root::DurableClaimReplay,
+};
+use agenc_relay_types::SessionId;
+
+pub(super) struct GuardedStartRelease {
+    pub(super) request: RequestContext,
+    pub(super) sealed: Box<agenc_relay_auth::GuardedAccountStart>,
+    pub(super) reservation: Option<CreationReservation>,
+}
+
+impl GuardedStartRelease {
+    pub(super) fn cleanup(&self) -> TransactionCleanup {
+        TransactionCleanup::creation(self.sealed.transaction_id(), self.reservation.clone())
+    }
+}
+
+impl PendingRead {
+    pub(super) fn guarded_cleanup(&self) -> Option<TransactionCleanup> {
+        match self {
+            Self::GuardedResult(start) | Self::GuardedTransaction { start, .. } => {
+                Some(start.cleanup())
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) struct RegisteredClaim {
+    account: AccountId,
+    session: SessionId,
+    generation: Generation,
+}
+
+impl RegisteredClaim {
+    fn encode(self, result: &RequestResultRecord) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(2 + 24 + 16 + 8 + REQUEST_RESULT_BYTES);
+        bytes.extend_from_slice(&2u16.to_be_bytes());
+        bytes.extend_from_slice(self.account.to_text().as_bytes());
+        bytes.extend_from_slice(self.session.as_bytes());
+        bytes.extend_from_slice(&self.generation.get().to_be_bytes());
+        bytes.extend_from_slice(&result.encode());
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> Result<(Self, RequestResultRecord), RuntimeError> {
+        let (binding, result) = bytes
+            .split_at_checked(2 + 24 + 16 + 8)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let mut fields = RequestResultCursor::new(binding);
+        if fields.read_u16()? != 2 {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let account = AccountId::parse_wire_bytes(&fields.read_array::<24>()?)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let session = SessionId::from_bytes(fields.read_array()?);
+        let generation =
+            Generation::new(fields.read_u64()?).map_err(|_| RuntimeError::InvalidValue)?;
+        fields.finish()?;
+        let stored = RequestResultRecord::decode(result)?;
+        if stored.terminal != RequestTerminal::Accepted || stored.terminal_account.is_some() {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok((
+            Self {
+                account,
+                session,
+                generation,
+            },
+            stored,
+        ))
+    }
+}
+
+impl AccountServiceCoordinator {
+    pub(super) fn read_guarded_result(
+        &mut self,
+        context: &mut StateCoreContext,
+        start: GuardedStartRelease,
+    ) -> Option<CarrierCompletion> {
+        let generation = start.request.generation;
+        let close = CarrierCompletion::closed(generation, start.request.carrier_generation);
+        let cleanup = start.cleanup();
+        let stage = || request_result_key(start.request.envelope.client_request_id());
+        if self.connections.contains_key(&generation)
+            && let Ok(key) = stage()
+            && let Ok(id) =
+                context.submit_storage_read(ReadPlan::exact(TableId::RequestResult, key))
+            && !self.reads.contains_key(&id)
+        {
+            self.reads.insert(id, PendingRead::GuardedResult(start));
+            return None;
+        }
+        let _queued = self.queue_transaction_cleanup(
+            context,
+            generation,
+            LiveTransactionClass::Creation,
+            cleanup,
+        );
+        Some(close)
+    }
+
+    pub(super) fn read_guarded_transaction(
+        &mut self,
+        context: &mut StateCoreContext,
+        start: GuardedStartRelease,
+        result: ReadResult,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let request = &start.request;
+        let key = request_result_key(request.envelope.client_request_id())?;
+        let value = read_optional_persistent(context, result, TableId::RequestResult, &key)?
+            .ok_or(RuntimeError::InvalidValue)?;
+        if value.record_kind() != REQUEST_RESULT_KIND {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let body =
+            ProtocolRecordBody::decode(TableId::RequestResult, REQUEST_RESULT_KIND, value.body())?;
+        let replay = RequestResultRecord::decode(body.canonical_object())?;
+        if replay.route != request.route
+            || replay.request != *request.envelope.as_bytes()
+            || replay.terminal != RequestTerminal::Start
+            || replay.terminal_account.is_some()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let key = StoredKey::new(start.sealed.transaction_id().as_bytes().to_vec())?;
+        let id = context.submit_storage_read(ReadPlan::exact(TableId::AuthTransaction, key))?;
+        if self
+            .reads
+            .insert(
+                id,
+                PendingRead::GuardedTransaction {
+                    start,
+                    replay: Box::new(replay),
+                },
+            )
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(Vec::new())
+    }
+
+    pub(super) fn release_guarded_start(
+        &mut self,
+        context: &mut StateCoreContext,
+        start: GuardedStartRelease,
+        replay: RequestResultRecord,
+        result: ReadResult,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let key = StoredKey::new(start.sealed.transaction_id().as_bytes().to_vec())?;
+        let value = read_optional_persistent(context, result, TableId::AuthTransaction, &key)?
+            .ok_or(RuntimeError::InvalidValue)?;
+        if value.record_kind() != CREATION_TRANSACTION_KIND {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let utc = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
+        start
+            .sealed
+            .live_record_expiry(context.now(), utc)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let saved_request = InitialRootServiceEnvelope::parse(replay.request)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let saved_response = InitialRootServiceResponse::parse(replay.response)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let record = agenc_relay_auth::GuardedCreationTransactionRecord::parse(value.body())
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let transaction_id = start.sealed.transaction_id();
+        if !self
+            .connections
+            .get(&start.request.generation)
+            .is_some_and(|c| {
+                c.route == start.request.route
+                    && c.creation.initial_root_family() == Some(InitialRootCarrier::GuardedCreation)
+            })
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let transaction = start
+            .sealed
+            .into_committed(
+                &saved_request,
+                &saved_response,
+                &record,
+                context.head().account_service_response_count,
+            )
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let request = start.request;
+        let frames = self.response_frames(context, &request, saved_response.as_bytes(), false)?;
+        let completion = self
+            .install_creation(
+                context,
+                request.generation,
+                request.carrier_generation,
+                transaction,
+                start.reservation,
+            )
+            .ok_or(RuntimeError::InvalidValue)?;
+        if !completion.close && context.send_to(request.generation, frames).is_err() {
+            context
+                .timers_mut()
+                .cancel(TimerKind::Reservation, TimedId::Transaction(transaction_id));
+            self.transaction_owners.remove(&transaction_id);
+            let _discarded = self.take_live_transaction(
+                request.generation,
+                LiveTransactionClass::Creation,
+                transaction_id,
+            );
+            return Err(RuntimeError::MemoryExhausted);
+        }
+        Ok(vec![completion])
+    }
+    pub(super) fn queue_claim(
+        &mut self,
+        context: &StateCoreContext,
+        request: RequestContext,
+        opened: OpenedClaim,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let scope = self.registered_claim(context, request.generation)?;
+        self.push_ready_seal(ReadySeal::Claim {
+            request,
+            scope,
+            opened,
+        })?;
+        Ok(Vec::new())
+    }
+
+    pub(super) fn prepare_claim(
+        &self,
+        context: &StateCoreContext,
+        request: RequestContext,
+        scope: RegisteredClaim,
+        opened: OpenedClaim,
+        count: u64,
+    ) -> Result<(PendingCrypto, RuntimeCryptoJob), CarrierCompletion> {
+        let close = CarrierCompletion::closed(request.generation, request.carrier_generation);
+        if self.registered_claim(context, request.generation).ok() != Some(scope) {
+            return Err(close);
+        }
+        let (cut, record) = context
+            .initial_root_admission(scope.account, scope.generation)
+            .map_err(|_| close)?;
+        let job = InitialRootSealJob::new(opened, scope.account, record, count);
+        Ok((
+            PendingCrypto::ClaimSeal {
+                request,
+                scope,
+                cut,
+            },
+            RuntimeCryptoJob::InitialRootSeal(Box::new(job)),
+        ))
+    }
+
+    pub(super) fn stage_claim(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        scope: RegisteredClaim,
+        cut: InitialRootCut,
+        prepared: Box<PreparedClaim>,
+    ) -> Result<(), RuntimeError> {
+        if self.registered_claim(context, request.generation)? != scope
+            || context.head().account_service_response_count.checked_add(1)
+                != Some(prepared.next_response_count())
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let mut writes = Vec::new();
+        writes
+            .try_reserve_exact(3)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        let plan = context.plan_initial_root_choice(cut, prepared.new_choice(), &mut writes)?;
+        let revision = plan.resulting_revision().get();
+        let response = prepared.bytes_for_commit();
+        let retained = RequestResultRecord {
+            route: request.route,
+            terminal: RequestTerminal::Accepted,
+            terminal_account: None,
+            request: *request.envelope.as_bytes(),
+            response: *response,
+        };
+        writes.push(store_request_result(
+            revision,
+            request.envelope.client_request_id(),
+            scope.encode(&retained),
+        )?);
+        context.join_remote_account_response(
+            request.generation,
+            revision,
+            response,
+            None,
+            &mut writes,
+        )?;
+        // Local ciphertext is released from the exact recorded operation after the commit callback.
+        let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
+        if !matches!(
+            context.stage_durable_with_account_service(
+                plan,
+                fanout,
+                Some(StagedOrigin::silent(request.generation)),
+                1,
+                writes
+            ),
+            Ok(StageAccepted::Staged { .. })
+        ) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.pending_authority = Some(PendingAuthority::Claim {
+            request,
+            scope,
+            prepared,
+        });
+        Ok(())
+    }
+
+    pub(super) fn read_committed_claim(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        scope: RegisteredClaim,
+        prepared: Box<PreparedClaim>,
+    ) -> Result<(), RuntimeError> {
+        let key = request_result_key(request.envelope.client_request_id())?;
+        let read = context.submit_storage_read(ReadPlan::exact(TableId::RequestResult, key))?;
+        if self
+            .reads
+            .insert(
+                read,
+                PendingRead::CommittedClaim {
+                    request,
+                    scope,
+                    prepared,
+                },
+            )
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(())
+    }
+
+    pub(super) fn release_claim(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        scope: RegisteredClaim,
+        prepared: Box<PreparedClaim>,
+        result: ReadResult,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let key = request_result_key(request.envelope.client_request_id())?;
+        let value = read_optional_persistent(context, result, TableId::RequestResult, &key)?
+            .ok_or(RuntimeError::InvalidValue)?;
+        if value.record_kind() != REQUEST_RESULT_KIND
+            || self.registered_claim(context, request.generation)? != scope
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let body =
+            ProtocolRecordBody::decode(TableId::RequestResult, REQUEST_RESULT_KIND, value.body())?;
+        let (stored_scope, stored) = RegisteredClaim::decode(body.canonical_object())?;
+        if stored_scope != scope
+            || stored.route != request.route
+            || stored.request != *request.envelope.as_bytes()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let saved_request = InitialRootServiceEnvelope::parse(stored.request)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let saved_response = InitialRootServiceResponse::parse(stored.response)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let record = context.initial_root_claim(scope.account)?;
+        let verified = prepared
+            .into_committed(DurableClaimReplay {
+                request: &saved_request,
+                response: &saved_response,
+                response_count: context.head().account_service_response_count,
+                record: record.as_ref(),
+            })
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let frames = self.response_frames(context, &request, verified.as_bytes(), true)?;
+        context
+            .send_to(request.generation, frames)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        Ok(vec![CarrierCompletion::finished(
+            request.generation,
+            request.carrier_generation,
+            ResultClass::Ok,
+        )])
+    }
+
+    pub(super) fn registered_claim(
+        &self,
+        context: &StateCoreContext,
+        connection: ConnectionGeneration,
+    ) -> Result<RegisteredClaim, RuntimeError> {
+        let bound = context
+            .sessions()
+            .connection(connection)
+            .filter(|entry| !entry.sink_gone())
+            .and_then(|entry| entry.session())
+            .ok_or(RuntimeError::InvalidValue)?;
+        let session = context
+            .domain()
+            .session(bound.user_id)
+            .filter(|s| s.session_id() == bound.session_id)
+            .ok_or(RuntimeError::InvalidValue)?;
+        let account = session.account_id().ok_or(RuntimeError::InvalidValue)?;
+        let generation = session.account_session_generation();
+        if !context
+            .domain()
+            .account(account)
+            .is_some_and(|a| a.session_generation() == generation)
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let scope = RegisteredClaim {
+            account,
+            session: bound.session_id,
+            generation,
+        };
+        let owner = self
+            .connections
+            .get(&connection)
+            .ok_or(RuntimeError::InvalidValue)?;
+        if owner.claim_scope.is_some_and(|original| original != scope) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        Ok(scope)
+    }
+
+    pub(super) fn replay_initial_root(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        stored: RequestResultRecord,
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let Some(RequestKind::InitialRoot(expected)) = request.expected_message_kind() else {
+            return Err(RuntimeError::InvalidValue);
+        };
+        let response = InitialRootServiceResponse::parse(stored.response)
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        if stored.route != request.route
+            || stored.request != *request.envelope.as_bytes()
+            || stored.terminal_account.is_some()
+            || response.response_kind() != expected
+            || response.client_request_id() != request.envelope.client_request_id()
+        {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let frames = self.response_frames(context, &request, response.as_bytes(), true)?;
+        context
+            .send_to(request.generation, frames)
+            .map_err(|_| RuntimeError::MemoryExhausted)?;
+        Ok(vec![CarrierCompletion::finished(
+            request.generation,
+            request.carrier_generation,
+            ResultClass::Ok,
+        )])
+    }
+
+    pub(super) fn replay_registered_claim(
+        &mut self,
+        context: &mut StateCoreContext,
+        request: RequestContext,
+        bytes: &[u8],
+    ) -> Result<Vec<CarrierCompletion>, RuntimeError> {
+        let current = self.registered_claim(context, request.generation)?;
+        let (original, stored) = RegisteredClaim::decode(bytes)?;
+        if current != original {
+            return Err(RuntimeError::InvalidValue);
+        }
+        self.replay_initial_root(context, request, stored)
+    }
+}
