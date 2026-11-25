@@ -37,11 +37,11 @@ impl Restartable {
 
     /// Rebuilds the coordinator from what storage holds.
     async fn restart(&mut self) -> TestResult {
-        self.restart_with(standalone_coordinator(self.edge.server_id))
+        self.restart_with(Box::new(standalone_coordinator(self.edge.server_id)))
             .await
     }
 
-    async fn restart_with(&mut self, mut coordinator: FederationCoordinator) -> TestResult {
+    async fn restart_with(&mut self, mut coordinator: Box<FederationCoordinator>) -> TestResult {
         coordinator.startup(self.core.context_mut()?);
         for _ in 0..64 {
             if coordinator.loaded() {
@@ -57,7 +57,7 @@ impl Restartable {
         if !coordinator.loaded() {
             return Err("the coordinator never finished loading".into());
         }
-        self.coordinator = coordinator;
+        self.coordinator = *coordinator;
         Ok(())
     }
 

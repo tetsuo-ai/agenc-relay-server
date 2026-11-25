@@ -287,7 +287,10 @@ async fn a_full_origins_refusal_and_del_wait_for_their_own_storage_receipt_acros
         affected.generation
     ));
     drop(slots);
-    let coordinator = standalone_coordinator_pair(f.edge.server_id, other.server_id);
+    let coordinator = Box::new(standalone_coordinator_pair(
+        f.edge.server_id,
+        other.server_id,
+    ));
     f.restart_with(coordinator).await?;
     assert_eq!(
         f.coordinator
