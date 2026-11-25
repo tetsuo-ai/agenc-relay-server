@@ -775,13 +775,26 @@ fn reconstruction_reserves_claim_and_unreadable_stock_owners_before_publication(
         Err(super::super::CompanionFault::Ceiling)
     ));
     let port = package_backing(2 * charge);
-    let mut duplicate = Restore::default();
     let positive = claim_row(Some([3; 32])).encode()?;
-    duplicate.admit_package(&claim, &positive, Some(&port))?;
+    let empty = claim_row(None).encode()?;
+    let mut malformed = Restore::default();
     assert!(matches!(
-        duplicate.admit_package(&claim, &positive, Some(&port)),
+        malformed.admit_package(&claim, &[0xff], Some(&port)),
         Err(super::super::CompanionFault::Storage)
     ));
+    for (first, second) in [
+        (&positive, &positive),
+        (&positive, &empty),
+        (&empty, &positive),
+        (&empty, &empty),
+    ] {
+        let mut duplicate = Restore::default();
+        duplicate.admit_package(&claim, first, Some(&port))?;
+        assert!(matches!(
+            duplicate.admit_package(&claim, second, Some(&port)),
+            Err(super::super::CompanionFault::Storage)
+        ));
+    }
 
     for capacity in [charge - 1, charge, 2 * charge] {
         let mut coordinator = CompanionCoordinator::new(

@@ -351,7 +351,10 @@ impl Restore {
         backing: Option<&crate::budget::BackingReservationPort>,
     ) -> Result<(), super::CompanionFault> {
         use agenc_relay_storage::e2ee_records::ClaimOutcome;
-        if self.spent_package_rows.contains_key(key) || self.empty_claims.contains(&claim) {
+        // The no-stock owner checks its own duplicates when reserving its slot.
+        if self.spent_package_rows.contains_key(key)
+            || (outcome == ClaimOutcome::Claimed && self.empty_claims.contains(&claim))
+        {
             return Err(super::CompanionFault::Storage);
         }
         match outcome {

@@ -414,6 +414,89 @@ fn stale_legacy_stock_cannot_be_claimed_and_retires_with_its_last_owner() -> Tes
 }
 
 #[test]
+fn legacy_claims_for_one_package_release_only_the_committed_row_and_its_backing() -> TestResult {
+    use agenc_relay_storage::e2ee_records::{ClaimOutcome as Stored, PACKAGE_ROW_KIND};
+    let mut h = Harness::with_devices(&[DEVICE, SIBLING])?;
+    let _ = stocked_then_sibling(&mut h)?;
+    let first = ok(h.run(Op::ClaimPackage, &claim_params(&h, 1, OPERATION), None)?)?;
+    let ResultBody::Claimed(_, reference, id) = &first.result else {
+        return Err("missing original package claim".into());
+    };
+    let claimant = account_id_digest(&NETWORK, &h.account)?;
+    let deadline = h.now + KEY_PACKAGE_CLAIM_TIMEOUT_SECONDS;
+    let later = [0xaf; 16];
+    let later_key = PackageRow::claim_key(&claimant, &later)?;
+    // A previous publisher could create a second successful operation for
+    // the same signed bytes. Both rows own the reference upon reopening.
+    let row = PackageRow::Claim {
+        target_account_digest: claimant,
+        target_device_id: DEVICE_ID,
+        suite: 1,
+        outcome: Stored::Claimed,
+        key_package_ref: reference.clone(),
+        object_id: Some(*id),
+        retain_until: deadline,
+    };
+    let legacy = request::state_row(
+        TableId::E2eeState,
+        PACKAGE_ROW_KIND,
+        later_key.clone(),
+        row.encode()?,
+    )
+    .map_err(|e| format!("legacy successful operation: {e:?}"))?;
+    h.apply_logical_write(&legacy)?;
+    let mut h = h.reloaded()?;
+    assert_eq!(h.coordinator.state.spent_package_rows.len(), 2);
+    h.now = deadline;
+    for op in [OPERATION, later] {
+        let expected = PackageRow::claim_key(&claimant, &op)?;
+        let due = Prepared::capture(&h.coordinator, Default::default(), deadline, &h.backing)?;
+        let mut writes = due.writes(STATE_GENERATION)?;
+        assert!(
+            matches!(writes.as_slice(), [Write::Delete {table: TableId::E2eeState, key}] if key == &expected)
+        );
+        let owners = h
+            .coordinator
+            .stage_owners(&mut writes, deadline, false, STATE_GENERATION)
+            .map_err(|e| format!("retire one stored operation: {e:?}"))?;
+        due.apply(&mut h.coordinator)?;
+        owners.apply(&mut h.coordinator.state);
+        for write in &writes {
+            h.apply_logical_write(write)?;
+        }
+        assert!(
+            !h.coordinator
+                .state
+                .spent_package_rows
+                .contains_key(&expected)
+        );
+        assert_eq!(
+            h.coordinator
+                .state
+                .spent_package_rows
+                .contains_key(&later_key),
+            op == OPERATION
+        );
+        h = h.reloaded()?;
+        if op == OPERATION {
+            let retained = ok(h.run(Op::ClaimStatus, &later, None)?)?;
+            assert_same_answer(&retained, &first, "second legacy owner after retirement");
+        }
+    }
+    assert!(h.coordinator.state.spent_package_rows.is_empty());
+    assert!(
+        h.coordinator
+            .state
+            .owners
+            .account(id)
+            .ok_or("retired object account")?
+            .owners
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
 fn a_successful_claim_holds_its_own_backing_until_committed_retirement() -> TestResult {
     use super::super::resident::SPENT_PACKAGE_ROW_BACKING;
     use crate::budget::{BackingReservationPort, MemoryBudget, MemoryCharge};
