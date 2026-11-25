@@ -79,7 +79,7 @@ fn restart_requires_every_binding_admission_and_its_exact_terminal_and_packages(
     // Keep the complete real route and all its recovery gates intact. A
     // separate, internally keyed admission must not gain authority by itself.
     let mut unbound = h.reloaded()?;
-    let mut extra = admitted.clone();
+    let mut extra = *admitted;
     extra.conversation_id[0] ^= 1;
     unbound.writes.push(
         crate::e2ee::coordinator::request::state_row(
