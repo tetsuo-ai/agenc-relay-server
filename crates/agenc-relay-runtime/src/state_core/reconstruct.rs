@@ -432,7 +432,9 @@ struct Scan {
 
 /// Reads every reconstructed table and restores the domain state. `role` is
 /// the configured node role; it decides which account-service rows the
-/// database must hold.
+/// database must hold. This entry point preserves the pre-guarded format's
+/// behavior. Use [`reconstruct_with_budget`] for a database that may contain
+/// guarded accounts. Their retained state requires a real process reservation.
 pub fn reconstruct(
     seed: &StateCoreSeed,
     port: &StoragePort,
@@ -444,9 +446,26 @@ pub fn reconstruct(
     DurableIndex::new().reconstruct(seed, port, keys, role, monotonic_now, utc_now)
 }
 
+/// Reconstructs all supported account formats against the caller's shared process
+/// budget. The resulting index retains one reservation per live guarded account;
+/// insufficient capacity refuses reconstruction before a listener can open.
+pub fn reconstruct_with_budget(
+    seed: &StateCoreSeed,
+    port: &StoragePort,
+    keys: &KeyDeriver,
+    role: NodeRole,
+    monotonic_now: MonotonicTick,
+    utc_now: UtcSecond,
+    budget: &crate::sync::Arc<crate::budget::MemoryBudget>,
+) -> Result<Reconstruction, RuntimeError> {
+    DurableIndex::new()
+        .with_initial_root_budget(budget)
+        .reconstruct(seed, port, keys, role, monotonic_now, utc_now)
+}
+
 impl DurableIndex {
     /// Restores using the index's configured retained-resource backing.
-    pub(crate) fn reconstruct(
+    fn reconstruct(
         self,
         seed: &StateCoreSeed,
         port: &StoragePort,

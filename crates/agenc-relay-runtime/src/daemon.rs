@@ -114,9 +114,7 @@ use crate::state_core::inbox::{
     lifecycle_channel,
 };
 use crate::state_core::projector::FederationProjector;
-use crate::state_core::reconstruct::Reconstruction;
-#[cfg(test)]
-use crate::state_core::reconstruct::reconstruct;
+use crate::state_core::reconstruct::{Reconstruction, reconstruct_with_budget};
 use crate::state_core::{
     StateCore, StateCoreClocks, StateCoreConfig, StateCoreExit, StateCoreInputs, admin_core_channel,
 };
@@ -541,19 +539,16 @@ impl LiveStorage {
             .utc_now()
             .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
         let budget = memory_budget(config)?;
-        let mut reconstruction = crate::state_core::durable::DurableIndex::new()
-            .with_initial_root_budget(&budget)
-            .reconstruct(
-                &seed,
-                &owner.port(),
-                &keys,
-                config.network.role,
-                process_clock.now(),
-                reconstruction_utc,
-            )
-            .map_err(|error| {
-                DaemonError::Reconstruction(ReconstructionSurface::DurableState, error)
-            })?;
+        let mut reconstruction = reconstruct_with_budget(
+            &seed,
+            &owner.port(),
+            &keys,
+            config.network.role,
+            process_clock.now(),
+            reconstruction_utc,
+            &budget,
+        )
+        .map_err(|error| DaemonError::Reconstruction(ReconstructionSurface::DurableState, error))?;
         reconcile_recovered_sessions(
             &owner.port(),
             &mut reconstruction,
@@ -1592,7 +1587,7 @@ fn attach_edge_role(
     Ok(router.with_edge(edge).with_e2ee_edge(e2ee_edge)?)
 }
 
-fn memory_budget(config: &Config) -> Result<Arc<MemoryBudget>, DaemonError> {
+pub(crate) fn memory_budget(config: &Config) -> Result<Arc<MemoryBudget>, DaemonError> {
     let purposes = enabled_runtime_purposes(config)?;
     let parsed_arena = config.limits.values.get(LimitKey::ParsedArenaBytes);
     let pool = startup_arithmetic(
