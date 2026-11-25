@@ -109,6 +109,14 @@ async fn a_quota_closure_shortens_a_committed_deletion_only_at_its_exact_pending
         Some(&request.generation)
     );
     assert!(TerminalOrigin::at_capacity(&relay.coordinator, &request).is_err());
+    relay.restart().await?;
+    let reloaded = relay
+        .coordinator
+        .origins
+        .origin(&key)
+        .ok_or("missing stored terminal origin")?;
+    assert_eq!(reloaded.status, OriginStatus::Deleted);
+    assert_eq!(reloaded.deleted_after, Some(request.sequence));
     relay.coordinator.origins.fence(&key)?;
     assert!(TerminalOrigin::at_capacity(&relay.coordinator, &request).is_err());
     Ok(())
@@ -117,6 +125,7 @@ async fn a_quota_closure_shortens_a_committed_deletion_only_at_its_exact_pending
 #[derive(Clone, Copy)]
 enum ReceiptFault {
     Early,
+    OtherStorageHead,
     OtherRevision,
     ChangedDeclaration,
     AlreadyFenced,
@@ -139,11 +148,14 @@ async fn verify_receipt(fault: ReceiptFault) -> TestResult {
     )
     .map_err(|_| "expected valid deletion projection")?;
     let revision_offset = u64::from(matches!(fault, ReceiptFault::OtherRevision));
-    let receipt = stage_terminal(&mut relay, terminal, revision_offset)?;
+    let mut receipt = stage_terminal(&mut relay, terminal, revision_offset)?;
     if !matches!(fault, ReceiptFault::Early) {
         relay.core.commit_staged_batch().await?;
     }
     match fault {
+        ReceiptFault::OtherStorageHead => {
+            receipt.staged_after = relay.core.context_mut()?.head().storage_commit_sequence;
+        }
         ReceiptFault::ChangedDeclaration => relay.coordinator.origins.restore_origin(
             key,
             agenc_relay_domain::federation::OriginEntry {
@@ -183,6 +195,7 @@ async fn terminal_publication_checks_the_exact_storage_head_and_origin_and_prese
 -> TestResult {
     for fault in [
         ReceiptFault::Early,
+        ReceiptFault::OtherStorageHead,
         ReceiptFault::OtherRevision,
         ReceiptFault::ChangedDeclaration,
         ReceiptFault::AlreadyFenced,
