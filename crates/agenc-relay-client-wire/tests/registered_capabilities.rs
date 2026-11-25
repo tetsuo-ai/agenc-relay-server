@@ -47,6 +47,10 @@ fn only_an_explicit_current_root_profile_can_forward_its_transfer() -> TestResul
         CapabilitySpec::new("agenc.ag/account-create", Some("v1"))?,
         CapabilitySpec::new(INITIAL_ROOT_CAPABILITY, Some(&value))?,
     ])?;
+    let claim_only = CapabilityProfile::new(vec![CapabilitySpec::new(
+        INITIAL_ROOT_CAPABILITY,
+        Some(&value),
+    )?])?;
     let begin = "ACCTCREATE CLAIMSTART 4726";
     let mut create = RegistrationState::new(0, AccessTokenPolicy::IgnoreCompatibilityPass)?;
     create.message(parsed("CAP LS 302")?, 1, &offered)?;
@@ -54,6 +58,9 @@ fn only_an_explicit_current_root_profile_can_forward_its_transfer() -> TestResul
     create.message(parsed("CAP REQ :agenc.ag/initial-root")?, 3, &offered)?;
     assert!(create.message(parsed(begin)?, 4, &offered).is_err());
     create.message(parsed("CAP REQ :agenc.ag/account-create")?, 5, &offered)?;
+    for withdrawn in [&baseline, &claim_only] {
+        assert!(create.message(parsed(begin)?, 6, withdrawn).is_err());
+    }
     let transfer = create.message(parsed(begin)?, 6, &offered)?;
     let [
         RegistrationAction::ForwardAuthCarrier {
@@ -82,6 +89,13 @@ fn only_an_explicit_current_root_profile_can_forward_its_transfer() -> TestResul
             .message(parsed("CAP REQ :-agenc.ag/initial-root")?, 9, &offered)
             .is_err()
     );
+    for withdrawn in [&baseline, &claim_only] {
+        assert!(
+            create
+                .message(parsed("ACCTCREATE FINISH 4726")?, 10, withdrawn)
+                .is_err()
+        );
+    }
     assert!(
         create
             .apply_capability_profile(&baseline)?
@@ -99,6 +113,7 @@ fn only_an_explicit_current_root_profile_can_forward_its_transfer() -> TestResul
     assert!(account.message(parsed(claim)?, 5, &offered).is_err());
     account.message(parsed("CAP LS 302")?, 6, &offered)?;
     account.message(parsed("CAP REQ :agenc.ag/initial-root")?, 7, &offered)?;
+    assert!(account.message(parsed(claim)?, 8, &baseline).is_err());
     assert!(matches!(
         account.message(parsed(claim)?, 8, &offered)?.as_slice(),
         [RegistrationAction::ForwardAuthCarrier {
@@ -106,6 +121,11 @@ fn only_an_explicit_current_root_profile_can_forward_its_transfer() -> TestResul
             ..
         }]
     ));
+    assert!(
+        account
+            .message(parsed("ACCTROOT DATA AQ")?, 9, &baseline)
+            .is_err()
+    );
     assert!(
         account
             .apply_capability_profile(&baseline)?

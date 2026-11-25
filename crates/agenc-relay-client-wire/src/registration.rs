@@ -673,33 +673,33 @@ impl RegistrationState {
             let actions = one_action(RegistrationAction::NotRegistered)?;
             return Ok(actions);
         }
-        if self.guarded_creation
-            && message.command() == "ACCTCREATE"
-            && (!self.cap.enabled(INITIAL_ROOT_CAPABILITY)
-                || !self.cap.enabled("agenc.ag/account-create"))
-        {
-            return Err(RegistrationError::AuthenticationUnavailable);
-        }
-        let initial_root =
-            if self.cap.enabled(INITIAL_ROOT_CAPABILITY) && self.cap.supports_multiline() {
-                match message.command() {
-                    "ACCTCREATE"
-                        if self.guarded_creation
-                            || message.middle().first().is_some_and(|v| v == "CLAIMSTART") =>
-                    {
-                        Some(InitialRootCarrier::GuardedCreation)
-                    }
-                    "ACCTROOT" => Some(InitialRootCarrier::Claim),
-                    _ => None,
-                }
-            } else {
-                None
-            };
+        let negotiated = self.cap.enabled(INITIAL_ROOT_CAPABILITY);
+        let initial_root = match message.command() {
+            "ACCTCREATE"
+                if self.guarded_creation
+                    || (negotiated
+                        && message.middle().first().is_some_and(|v| v == "CLAIMSTART")) =>
+            {
+                Some(InitialRootCarrier::GuardedCreation)
+            }
+            "ACCTROOT" if negotiated => Some(InitialRootCarrier::Claim),
+            _ => None,
+        };
         let command = match initial_root {
-            Some(carrier) => RegistrationCommand::InitialRoot(
-                carrier,
-                parse_initial_root_command(&message, carrier)?,
-            ),
+            Some(carrier) => {
+                let current = |name| advertised.contains(name) && self.cap.enabled(name);
+                if !self.cap.supports_multiline()
+                    || !current(INITIAL_ROOT_CAPABILITY)
+                    || (carrier == InitialRootCarrier::GuardedCreation
+                        && !current("agenc.ag/account-create"))
+                {
+                    return Err(RegistrationError::AuthenticationUnavailable);
+                }
+                RegistrationCommand::InitialRoot(
+                    carrier,
+                    parse_initial_root_command(&message, carrier)?,
+                )
+            }
             None => parse_registration_command(&message, self.access_policy)?,
         };
         if command == RegistrationCommand::Quit {
