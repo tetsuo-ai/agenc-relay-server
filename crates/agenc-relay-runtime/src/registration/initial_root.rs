@@ -6,8 +6,7 @@ use agenc_relay_types::INITIAL_ROOT_CAPABILITY;
 
 impl ConnectionState {
     pub(super) fn lost_initial_root_link(&self, current: Option<LinkId>) -> bool {
-        self.initial_root_edge
-            .is_some_and(|link| Some(link) != current)
+        self.initial_root_edge.is_some() && self.initial_root_edge != current
     }
 }
 
