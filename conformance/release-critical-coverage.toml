@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1117
-reviewed_source_sha256 = "8ada03e705fc9a750bfa7c5a71410a5d9b0d62a9e0f1ac2623a5c121e5b6e469"
+reviewed_source_sha256 = "c51dd0a3d3a51bb84644419a42480e135880c9fff40b66abfd566a95898c839d"
 deferred = []
 
 [[region]]
@@ -16831,7 +16831,7 @@ id = "genesis-proposal-requires-unsigned-binding"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
 item = "authenticate_initial_proposal"
-source_sha256 = "48ce02adda1288708e25508c30f1303cf2a8449329d1ef0f57573effc66367ec"
+source_sha256 = "2b3271f97f78c038f96cf3f589bb252b42c5817575fea73e3c093ca75b2c11cf"
 start_line = 105
 end_line = 107
 span_sha256 = "8f6d00b3e48fee10dd4d545d31cd88b5ef9418a0d93f6b07822b2def68615df3"
@@ -16843,10 +16843,10 @@ id = "genesis-proposal-directory-context-and-plan"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
 item = "authenticate_initial_proposal"
-source_sha256 = "48ce02adda1288708e25508c30f1303cf2a8449329d1ef0f57573effc66367ec"
+source_sha256 = "2b3271f97f78c038f96cf3f589bb252b42c5817575fea73e3c093ca75b2c11cf"
 start_line = 91
-end_line = 213
-span_sha256 = "7d2b172b6dfa874e967860be6c97160159b3e15a5e61524ceee12ed3cffd8a98"
+end_line = 221
+span_sha256 = "b00e085c0bc3bd6a53af8fa40331672205657a52339e50c0cdbe253d91382c4a"
 metric = "branches"
 reason = "The proposed route and complete current authority must be eligible before local signing is considered."
 
@@ -16855,9 +16855,33 @@ id = "genesis-proposal-both-signed-policies"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
 item = "policy"
-source_sha256 = "48ce02adda1288708e25508c30f1303cf2a8449329d1ef0f57573effc66367ec"
-start_line = 220
-end_line = 266
+source_sha256 = "2b3271f97f78c038f96cf3f589bb252b42c5817575fea73e3c093ca75b2c11cf"
+start_line = 267
+end_line = 313
 span_sha256 = "77ed5248501ce37ecc7c740c92f38062219c475f78619394c6065eb15a1601d5"
 metric = "branches"
 reason = "The two signed policies and their exact lineage, controller sets and validity are inputs to every genesis signing review."
+
+[[region]]
+id = "genesis-proposal-signed-plan-group-ceiling"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
+item = "check_plan"
+source_sha256 = "2b3271f97f78c038f96cf3f589bb252b42c5817575fea73e3c093ca75b2c11cf"
+start_line = 236
+end_line = 238
+span_sha256 = "c14fd98352bc7b9affadf92591be333f1c3d2abc1d4ded1b98aafce728f22f4e"
+metric = "branches"
+reason = "The total device plan must fit the strictest signed policy before a binding can lock its semantic route."
+
+[[region]]
+id = "genesis-proposal-exact-plan-principals"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
+item = "check_plan"
+source_sha256 = "2b3271f97f78c038f96cf3f589bb252b42c5817575fea73e3c093ca75b2c11cf"
+start_line = 223
+end_line = 260
+span_sha256 = "0974bd9f489062d3e2cb333349ed323b89a6a4010c0697c26da7c880b7dd3156"
+metric = "branches"
+reason = "The accountable device set and ceilings in both policies constrain the complete signed proposal plan."

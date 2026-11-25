@@ -171,3 +171,98 @@ fn an_operational_council_member_must_be_in_the_committed_device_plan() -> TestR
     assert!(check(&f, &mut budget()).is_err());
     Ok(())
 }
+
+fn pin_plan(f: &mut Fixture) -> Result<(), E2eeError> {
+    let id = agenc_relay_e2ee::route::verify_initial_member_plan(&f.package.initial_member_plan)?;
+    f.core.initial_member_plan_id = id;
+    f.package.binding.tbs.initial_member_plan_id = id;
+    f.seal()
+}
+
+fn resign_policies(f: &mut Fixture) -> Result<(), E2eeError> {
+    use agenc_relay_crypto::SignatureDomain;
+    use agenc_relay_testkit::e2ee_client::{key, sign};
+    f.operational.tbs.previous_policy_id = policy_id_of(&f.policy)?;
+    for policy in [&mut f.policy, &mut f.operational] {
+        let mut approvals = policy.approvals.as_slice().to_vec();
+        for approval in &mut approvals {
+            approval.device_signature = sign(
+                &key(approval.signer_device_id[0]),
+                SignatureDomain::PolicyApproval,
+                &policy.tbs,
+            )?;
+        }
+        policy.approvals = TlsVec::new(approvals)?;
+    }
+    f.core.initial_policy_id = policy_id_of(&f.policy)?;
+    f.package.binding.tbs.initial_policy_id = f.core.initial_policy_id;
+    f.core.required_operational_policy_id = policy_id_of(&f.operational)?;
+    f.package.binding.tbs.required_operational_policy_id = f.core.required_operational_policy_id;
+    f.seal()
+}
+
+#[test]
+fn both_signed_policies_bound_every_planned_device_before_signing() -> TestResult {
+    for initial in [true, false] {
+        let mut f = unsigned(ArcConversationKind::Channel)?;
+        let original = f.package.initial_member_plan.entries.as_slice();
+        let second = original.get(1).ok_or("second device")?;
+        let mut entries = original.to_vec();
+        for d in [21, 22] {
+            let mut external = second.clone();
+            external.account_id = agenc_relay_e2ee::Opaque::from_slice(&[b'c'; 24])?;
+            external.root_fingerprint = [33; 32];
+            external.device_id = [d; 16];
+            external.capability_id = [d; 32];
+            entries.push(external);
+        }
+        f.package.initial_member_plan.entries = TlsVec::new(entries)?;
+        pin_plan(&mut f)?;
+        check(&f, &mut budget())?;
+        let policy = if initial {
+            &mut f.policy
+        } else {
+            &mut f.operational
+        };
+        policy.tbs.max_group_leaves = 3;
+        resign_policies(&mut f)?;
+        assert!(matches!(
+            check(&f, &mut budget()),
+            Err(E2eeError::LimitExceeded)
+        ));
+        let policy = if initial {
+            &mut f.policy
+        } else {
+            &mut f.operational
+        };
+        policy.tbs.max_group_leaves = 4;
+        policy.tbs.max_devices_per_account = 1;
+        resign_policies(&mut f)?;
+        assert!(matches!(
+            check(&f, &mut budget()),
+            Err(E2eeError::LimitExceeded)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_non_council_direct_invitee_must_name_a_bound_account_and_its_roster_device() -> TestResult {
+    for change in 0..3 {
+        let mut f = unsigned(ArcConversationKind::Direct)?;
+        let mut entries = f.package.initial_member_plan.entries.as_slice().to_vec();
+        let mut extra = entries.last().ok_or("member")?.clone();
+        extra.device_id = [21; 16];
+        extra.capability_id = [21; 32];
+        if change == 0 {
+            extra.account_id = agenc_relay_e2ee::Opaque::from_slice(&[b'c'; 24])?;
+        } else if change == 1 {
+            extra.root_fingerprint = [0xff; 32];
+        }
+        entries.push(extra);
+        f.package.initial_member_plan.entries = TlsVec::new(entries)?;
+        pin_plan(&mut f)?;
+        assert!(check(&f, &mut budget()).is_err());
+    }
+    Ok(())
+}

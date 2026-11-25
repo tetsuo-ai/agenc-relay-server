@@ -171,6 +171,14 @@ pub fn authenticate_initial_proposal(
                     .all(|(root, _)| operational.is_controller(&root.fingerprint))
         }
     };
+    check_plan(
+        &package.initial_member_plan,
+        &route.key,
+        &principals,
+        &initial,
+        &operational,
+        &mut validity,
+    )?;
     let entries = package.initial_member_plan.entries.as_slice();
     let planned_council = operational.council.iter().all(|member| {
         let Some((account, _)) = principals
@@ -210,6 +218,45 @@ pub fn authenticate_initial_proposal(
         sequencer,
         validity,
     })
+}
+
+fn check_plan(
+    plan: &ArcInitialMemberPlan,
+    route: &SemanticRouteKey,
+    principals: &PrincipalRosters,
+    initial: &VerifiedPolicy,
+    operational: &VerifiedPolicy,
+    validity: &mut Interval,
+) -> Result<(), E2eeError> {
+    let entries = plan.entries.as_slice();
+    let leaf_limit = initial.max_group_leaves.min(operational.max_group_leaves);
+    let device_limit = initial
+        .max_devices_per_account
+        .min(operational.max_devices_per_account);
+    if entries.len() > leaf_limit as usize {
+        return Err(E2eeError::LimitExceeded);
+    }
+    for group in entries.chunk_by(|left, right| left.account_id == right.account_id) {
+        if group.len() > usize::from(device_limit) {
+            return Err(E2eeError::LimitExceeded);
+        }
+        let first = group.first().ok_or(E2eeError::InvalidValue)?;
+        let account = crate::objects::account_id_bytes(&first.account_id)?;
+        if let Some((root, roster)) = principals.get(&account) {
+            for member in group {
+                if member.root_fingerprint != root.fingerprint {
+                    return Err(E2eeError::InvalidValue);
+                }
+                let device = roster
+                    .device(&member.device_id)
+                    .ok_or(E2eeError::InvalidValue)?;
+                intersect(validity, device.interval);
+            }
+        } else if matches!(route, SemanticRouteKey::Direct { .. }) {
+            return Err(E2eeError::InvalidValue);
+        }
+    }
+    Ok(())
 }
 
 fn intersect(result: &mut Interval, interval: Interval) {
