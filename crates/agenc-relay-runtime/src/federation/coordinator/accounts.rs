@@ -633,7 +633,10 @@ impl FederationCoordinator {
             self.send_result(context, link, peer, in_flight.fresh.descriptor, &bytes);
             return Some(answered);
         }
-        if in_flight.fresh.extension.is_some() && !matches!(arm, ResultArm::Failed { .. }) {
+        if in_flight.fresh.extension.is_some()
+            && !matches!(arm, ResultArm::Failed { .. })
+            && !context.verified_root_replay(generation, &arm)
+        {
             context.forget_remote_account_result(generation);
             self.fail_link(context, link, peer, Violation::Origin);
             return None;
