@@ -18,6 +18,7 @@
 //! alone (companion 11.8, 11.9).
 #![forbid(unsafe_code)]
 
+use agenc_relay_testkit::{GUEST_REGISTRATION_WINDOW, guest_welcome};
 use std::io::Read;
 
 use super::stage_ten_drills::wait_for_account_authority;
@@ -54,11 +55,43 @@ pub(super) fn link_events(network: &Network) -> (usize, usize) {
 /// A guest registers on `fixture` from `source` and ends its connection.
 fn guest(fixture: &NodeFixture, source: Ipv4Addr, nickname: &str) -> TestResult {
     let mut client = ArcClient::connect_from(fixture, Some(source))?;
+    // Architecture 8.3 measures registration from the completed TLS handshake.
+    // A busy edge can still welcome this guest after the ordinary I/O timeout.
+    let deadline = client.tls_completed + GUEST_REGISTRATION_WINDOW;
     client.send(&format!("NICK {nickname}"))?;
     client.send(&format!("USER {nickname} 0 * :Link Faults"))?;
-    let _welcome = client.read_until(|line| line.contains(&format!(" 001 {nickname} ")))?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(failure(
+            "guest registration expired before reading the welcome",
+        ));
+    }
+    client
+        .reader
+        .get_ref()
+        .sock
+        .set_read_timeout(Some(remaining))?;
+    let _welcome = client.read_until_deadline(TRANSCRIPT_LINES, remaining, |line| {
+        guest_welcome(line, nickname)
+    })?;
+    if Instant::now() >= deadline {
+        return Err(failure("guest welcome exceeded the registration deadline"));
+    }
     drop(client);
     Ok(())
+}
+
+#[test]
+fn only_the_server_welcome_for_this_guest_completes_the_capacity_probe() {
+    assert!(guest_welcome(":edge.test 001 visitor :Welcome", "visitor"));
+    for line in [
+        ":edge.test NOTICE visitor :the text 001 visitor is not a welcome",
+        ":edge.test 001 other :Welcome",
+        "001 visitor :Welcome",
+        ":edge.test 001 visitor extra :Welcome",
+    ] {
+        assert!(!guest_welcome(line, "visitor"));
+    }
 }
 
 /// One account session asks `EKEY WHOAMI` `REQUESTS_PER_READER` times, each
