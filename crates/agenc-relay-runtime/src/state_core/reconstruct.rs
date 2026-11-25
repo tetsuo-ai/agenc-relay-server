@@ -626,6 +626,9 @@ impl Scan {
                 &mut self.directory_totals,
             )?;
         }
+        if table == TableId::RequestResult {
+            self.index.restore_claim_replay(&key, &value)?;
+        }
         match (table, value.record_kind()) {
             (TableId::Account, TOMBSTONE_RECORD_KIND) => self.admit_account_tombstone(&key, &value),
             (TableId::Session, TOMBSTONE_RECORD_KIND) => self.admit_session_tombstone(&key, &value),

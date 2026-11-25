@@ -54,6 +54,9 @@ use crate::state_core::InitialRootCut;
 use agenc_relay_auth::initial_root::{OpenedClaim, PreparedClaim};
 use initial_root::GuardedStartRelease;
 use initial_root::RegisteredClaim;
+pub(crate) use initial_root::claim_replay_metadata;
+#[cfg(test)]
+pub(crate) use initial_root::test_registered_receipt;
 
 use crate::admission::{BucketDemand, BucketKey, BucketKind, LoginHashKey};
 use crate::bridge::crypto::{
@@ -601,7 +604,7 @@ struct AccountConnection {
     sasl: SaslTransport,
     creation: AccountTransfer,
     credentials: AccountTransfer,
-    root_claim: Option<AccountTransfer>,
+    root_claim: Option<(AccountTransfer, crate::budget::MemoryPermit)>,
     claim_scope: Option<RegisteredClaim>,
     /// Whether the client this connection serves negotiated
     /// `standard-replies`, recorded on every routed SASL line so a refusal
@@ -633,9 +636,11 @@ impl AccountConnection {
                     .map_err(|_| RuntimeError::InvalidValue)?;
                 Ok(&mut self.creation)
             }
-            AccountCommand::InitialRoot(InitialRootCarrier::Claim) => Ok(self
+            AccountCommand::InitialRoot(InitialRootCarrier::Claim) => self
                 .root_claim
-                .get_or_insert_with(|| AccountTransfer::initial_root(InitialRootCarrier::Claim))),
+                .as_mut()
+                .map(|(transfer, _charge)| transfer)
+                .ok_or(RuntimeError::InvalidValue),
         }
     }
 }
@@ -2277,6 +2282,21 @@ impl AccountServiceCoordinator {
             };
             let route = connection.route;
             if let Some(scope) = claim_scope {
+                if connection.root_claim.is_none() {
+                    if has_tags || subcommand != "CLAIM" || parameter.as_deref() != Some("4726") {
+                        return CarrierRoute::Close;
+                    }
+                    let Ok(charge) = context
+                        .backing_reservations()
+                        .reserve(agenc_relay_client_wire::ACCOUNT_REQUEST_CHARACTERS)
+                    else {
+                        return CarrierRoute::Close;
+                    };
+                    connection.root_claim = Some((
+                        AccountTransfer::initial_root(InitialRootCarrier::Claim),
+                        charge,
+                    ));
+                }
                 connection.claim_scope = Some(scope);
             }
             let Ok(transfer) = connection.transfer(kind) else {
@@ -4138,6 +4158,10 @@ impl AccountServiceCoordinator {
         let protocol =
             ProtocolRecordBody::decode(TableId::RequestResult, REQUEST_RESULT_KIND, value.body())?;
         if request.carrier == RequestCarrier::InitialRoot(InitialRootCarrier::Claim) {
+            let expires = value.expires_at().ok_or(RuntimeError::InvalidValue)?;
+            if initial_root::trusted_now(context).is_some_and(|now| now >= expires) {
+                return Err(RuntimeError::InvalidValue);
+            }
             return self.replay_registered_claim(context, request, protocol.canonical_object());
         }
         let stored = RequestResultRecord::decode(protocol.canonical_object())?;
@@ -7037,13 +7061,22 @@ fn store_request_result(
     id: RequestId,
     encoded: Vec<u8>,
 ) -> Result<AccountServiceDurableWrite, RuntimeError> {
+    store_timed_request_result(revision, id, encoded, None)
+}
+
+fn store_timed_request_result(
+    revision: u64,
+    id: RequestId,
+    encoded: Vec<u8>,
+    expires: Option<u64>,
+) -> Result<AccountServiceDurableWrite, RuntimeError> {
     let body = ProtocolRecordBody::new(TableId::RequestResult, REQUEST_RESULT_KIND, 1, encoded)?;
     let value = PersistentRecordValue::new(
         TableId::RequestResult,
         REQUEST_RESULT_KIND,
         revision,
         0,
-        None,
+        expires,
         Vec::new(),
         body.encode()?,
     )?;

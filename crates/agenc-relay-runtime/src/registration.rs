@@ -152,6 +152,7 @@ struct PendingRegistration {
 pub struct RegistrationRouter {
     config: RegistrationRuntimeConfig,
     advertised: ClientCapabilityProfiles,
+    initial_root_profiles: ClientCapabilityProfiles,
     accounts: Option<AccountServiceCoordinator>,
     commands: crate::channels::RegisteredCommandExecutor,
     connections: BTreeMap<ConnectionGeneration, ConnectionState>,
@@ -228,23 +229,25 @@ impl ClientCapabilityProfiles {
     fn with_e2ee(&self) -> Result<Self, RuntimeError> {
         self.with_capability(
             crate::e2ee::edge::E2EE_CAPABILITY,
-            agenc_relay_e2ee::limits::CAPABILITY_VALUE,
+            Some(agenc_relay_e2ee::limits::CAPABILITY_VALUE),
         )
     }
 
     fn with_initial_root(&self) -> Result<Self, RuntimeError> {
         self.with_capability(
             agenc_relay_types::INITIAL_ROOT_CAPABILITY,
-            &format!("v1.{}", agenc_relay_types::INITIAL_ROOT_PROFILE_TOKEN),
+            Some(&format!(
+                "v1.{}",
+                agenc_relay_types::INITIAL_ROOT_PROFILE_TOKEN
+            )),
         )
     }
 
-    fn with_capability(&self, name: &str, value: &str) -> Result<Self, RuntimeError> {
+    fn with_capability(&self, name: &str, value: Option<&str>) -> Result<Self, RuntimeError> {
         let extend = |profile: &CapabilityProfile| -> Result<Arc<CapabilityProfile>, RuntimeError> {
             let mut capabilities = profile.capabilities().to_vec();
-            capabilities.push(
-                CapabilitySpec::new(name, Some(value)).map_err(|_| RuntimeError::InvalidValue)?,
-            );
+            capabilities
+                .push(CapabilitySpec::new(name, value).map_err(|_| RuntimeError::InvalidValue)?);
             CapabilityProfile::new(capabilities)
                 .map(Arc::new)
                 .map_err(|_| RuntimeError::InvalidValue)
@@ -298,11 +301,7 @@ impl RegistrationRouter {
             } => (creation_policy, recovery_epoch, None),
         };
         let advertised = ClientCapabilityProfiles::new(creation_policy, recovery_epoch)?;
-        let advertised = if hosted.is_some() {
-            advertised.with_initial_root()?
-        } else {
-            advertised
-        };
+        let initial_root_profiles = advertised.with_initial_root()?;
         Ok(Self {
             config: RegistrationRuntimeConfig {
                 network_id,
@@ -314,6 +313,7 @@ impl RegistrationRouter {
                 recovery_epoch,
             },
             advertised,
+            initial_root_profiles,
             accounts: hosted.map(AccountServiceCoordinator::new).transpose()?,
             commands,
             connections: BTreeMap::new(),
@@ -333,20 +333,8 @@ impl RegistrationRouter {
     /// owned by StateCore and the coordinator.
     #[cfg(feature = "history")]
     pub fn with_history(mut self) -> Result<Self, RuntimeError> {
-        let extend = |profile: &CapabilityProfile| -> Result<Arc<CapabilityProfile>, RuntimeError> {
-            let mut capabilities = profile.capabilities().to_vec();
-            capabilities.push(
-                CapabilitySpec::new("draft/chathistory", None)
-                    .map_err(|_| RuntimeError::InvalidValue)?,
-            );
-            CapabilityProfile::new(capabilities)
-                .map(Arc::new)
-                .map_err(|_| RuntimeError::InvalidValue)
-        };
-        self.advertised = ClientCapabilityProfiles {
-            dns_tls: extend(&self.advertised.dns_tls)?,
-            onion: extend(&self.advertised.onion)?,
-        };
+        self.advertised = self.advertised.with_capability("draft/chathistory", None)?;
+        self.initial_root_profiles = self.advertised.with_initial_root()?;
         Ok(self)
     }
 
@@ -385,6 +373,7 @@ impl RegistrationRouter {
         e2ee: crate::e2ee::edge::E2eeEdge,
     ) -> Result<Self, RuntimeError> {
         self.advertised = self.advertised.with_e2ee()?;
+        self.initial_root_profiles = self.advertised.with_initial_root()?;
         self.e2ee = Some(e2ee);
         Ok(self)
     }
@@ -602,10 +591,7 @@ impl RegistrationRouter {
             self.connections.insert(generation, state);
             return outcome;
         }
-        let actions =
-            state
-                .registration
-                .message(message, context.now().get(), state.advertised.as_ref());
+        let actions = self.registration_message(context, generation, &mut state, message);
         let outcome = match actions {
             Ok(actions) => {
                 self.drive_actions(context, generation, &mut state, actions, &mut observation)
@@ -635,6 +621,70 @@ impl RegistrationRouter {
         // path exactly once.
         self.connections.insert(generation, state);
         outcome
+    }
+
+    /// Only a current hosted authority can answer the protected capability probe.
+    fn initial_root_available(&self, _context: &StateCoreContext) -> bool {
+        self.accounts.is_some()
+    }
+
+    fn registration_message(
+        &self,
+        context: &StateCoreContext,
+        generation: ConnectionGeneration,
+        state: &mut ConnectionState,
+        message: agenc_relay_client_wire::ParsedMessage,
+    ) -> Result<Vec<RegistrationAction>, RegistrationError> {
+        use agenc_relay_types::INITIAL_ROOT_CAPABILITY;
+        let visible = state.advertised.contains(INITIAL_ROOT_CAPABILITY);
+        let available = self.initial_root_available(context);
+        let probe = !visible
+            && available
+            && state.registration.capability_state().supports_multiline()
+            && message.command() == "CAP"
+            && matches!(message.middle(), [verb] if verb == "REQ")
+            && message.trailing() == Some(INITIAL_ROOT_CAPABILITY);
+        if !probe && (!visible || available) {
+            return state
+                .registration
+                .message(message, context.now().get(), &state.advertised);
+        }
+
+        let profiles = if probe {
+            &self.initial_root_profiles
+        } else {
+            &self.advertised
+        };
+        let profile = context
+            .sessions()
+            .connection(generation)
+            .and_then(|entry| profiles.for_purpose(entry.purpose()))
+            .ok_or(RegistrationError::InvalidCommand)?;
+        let mut actions = state.registration.apply_capability_profile(&profile)?;
+        state.advertised = profile;
+        if !probe {
+            // Stop the opted-in origin on withdrawal even when no transfer has started.
+            if !actions
+                .iter()
+                .any(|action| matches!(action, RegistrationAction::CapabilityReconnectRequired(_)))
+            {
+                actions.push(RegistrationAction::CapabilityReconnectRequired(
+                    INITIAL_ROOT_CAPABILITY.to_owned(),
+                ));
+            }
+            return Ok(actions);
+        }
+
+        // CAP NEW carries the pin before the ordinary request handler produces its ACK.
+        let mut request =
+            state
+                .registration
+                .message(message, context.now().get(), &state.advertised)?;
+        actions
+            .try_reserve(request.len())
+            .map_err(|_| RegistrationError::AllocationFailed)?;
+        actions.append(&mut request);
+        Ok(actions)
     }
 
     fn refresh_deadline(
@@ -3248,6 +3298,9 @@ impl CommandRouter for RegistrationRouter {
             coordinator.continue_restore(context);
         }
         if event == crate::state_core::inbox::MaintenanceEvent::RetentionSweep {
+            if let Some(accounts) = &self.accounts {
+                let _retry_next_sweep = accounts.retire_claim_results(context);
+            }
             let pending = self
                 .e2ee
                 .as_ref()

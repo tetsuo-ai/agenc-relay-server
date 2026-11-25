@@ -1,0 +1,11 @@
+# Prospective first-root service on Linux
+
+## Permanent ownership and private response retention
+
+Guarded account creation commits the account's permanent genesis policy and a private reservation alongside its ordinary OPAQUE credential. A private successful choice fixes one root fingerprint. Only the corresponding valid signed generation-zero directory object can advance it to Published. The coordinator retains its standalone object ID across later root rotations and exact-response expiration.
+
+The local account service stores each registered READ or CHOOSE result once, in the protected request-result table. Its sealed response belongs to the original request, session and authenticated account. Every private disposition, including a denial, uses the same retention policy. A claimant can hold up to 128 exact results, and the coordinator can hold up to 16,384. Each compact index entry is charged to the shared process budget before durable admission and on reopening. One active ACCTROOT transfer also reserves its fixed encoded request buffer from that budget. The database and process limits can bind sooner.
+
+The coordinator retains local exact bytes for seven days. Fresh requests can reclaim a mature result in the same atomic batch as their own response. An idle retention sweep retires at most 32 expired local results per batch. Cleanup requires a wall clock consistent with the monotonic clock. An unexpired result retains its slot under pressure. A fresh authenticated request can reconcile the private choice after an earlier result expires. Federation requests also have their own origin sequence, exact reply and retention obligations.
+
+The Linux regression fills both ceilings, exercises the exact expiry second, checks scope isolation and releases all process charges. A separate redb test reopens after a real HPKE choice and its atomic result, refuses premature cleanup under a disagreeing clock, commits expiration and reopens again. The chosen fingerprint and response count survive that second restart. The registered TLS daemon tests independently cover guarded account creation, ordinary-account denied access, signed directory publication and reopened private reads.
