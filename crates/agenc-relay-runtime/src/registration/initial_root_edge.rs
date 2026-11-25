@@ -126,9 +126,11 @@ pub(super) fn forward(
             let Some((carrier, link)) = Carrier::from_phase(family, finish).zip(link) else {
                 return false;
             };
-            return (OwnedCarrier { carrier, link })
-                .send(edge, context, generation, carrier_generation, envelope)
-                .is_ok();
+            return OwnedCarrier::bind(edge, generation, carrier, link).is_some_and(|owner| {
+                owner
+                    .send(edge, context, generation, carrier_generation, envelope)
+                    .is_ok()
+            });
         }
     };
     edge.send_account_carrier(

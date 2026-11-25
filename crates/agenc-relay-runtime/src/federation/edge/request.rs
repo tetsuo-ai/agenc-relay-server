@@ -868,7 +868,8 @@ fn dispatch_deferred_carrier(
             )
             .err()
             .map(|_| {
-                owned.completion(
+                owned.carrier.completion(
+                    owned.link,
                     generation,
                     carrier.carrier_generation,
                     RemoteCarrierOutcome::Failed { chunks: Vec::new() },
@@ -1944,13 +1945,7 @@ fn completed_request(
                 return Vec::new();
             };
             let outcome = carrier.outcome(result, &pending.replies);
-            vec![
-                super::initial_root::OwnedCarrier { carrier, link }.completion(
-                    generation,
-                    carrier_generation,
-                    outcome,
-                ),
-            ]
+            vec![carrier.completion(link, generation, carrier_generation, outcome)]
         }
         (
             PendingKind::AccountCarrier {
