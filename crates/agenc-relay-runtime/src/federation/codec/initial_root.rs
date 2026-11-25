@@ -130,3 +130,20 @@ pub(crate) fn encode_result(
         .as_slice()
         .to_vec())
 }
+
+/// The application service must release the exact protected envelope that was committed.
+pub(crate) fn released_response(
+    operation: InitialRootOperation,
+    committed: &[u8],
+    arm: &ResultArm,
+) -> bool {
+    let ResultArm::InitialRoot(actual, released) = arm else {
+        return false;
+    };
+    if *actual != operation {
+        return false;
+    }
+    let mut budget = DecodeBudget::new(1 << 20, 4_096);
+    InitialRootResult::decode(FederationProfile::InitialRoot, committed, &mut budget)
+        .is_ok_and(|v| v.sealed == Some((operation, released.as_ref())))
+}

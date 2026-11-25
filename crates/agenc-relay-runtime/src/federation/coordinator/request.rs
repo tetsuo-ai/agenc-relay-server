@@ -197,9 +197,10 @@ fn execute(
         .get(&peer)
         .and_then(|p| p.live.as_ref())
         .filter(|live| live.link == link)
-        .ok_or(Violation::Phase)?
-        .handle
-        .profile;
+        .map_or(
+            agenc_relay_federation_wire::FederationProfile::Base,
+            |live| live.handle.profile,
+        );
     let request =
         Request::read(profile, object.as_slice(), &mut budget).map_err(|_| Violation::Codec)?;
     let header = request.header();

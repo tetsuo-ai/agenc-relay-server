@@ -190,11 +190,16 @@ impl StateCoreContext {
         })
     }
 
-    pub(crate) fn take_committed_remote_results(&mut self) -> Vec<CommittedRemoteResult> {
+    pub(crate) fn take_committed_remote_results(
+        &mut self,
+    ) -> Vec<(ConnectionGeneration, CommittedRemoteResult)> {
         let generations: Vec<_> = self.remote_account_results.keys().copied().collect();
         generations
             .into_iter()
-            .filter_map(|generation| self.take_remote_account_result(generation))
+            .filter_map(|generation| {
+                self.take_remote_account_result(generation)
+                    .map(|result| (generation, result))
+            })
             .collect()
     }
 

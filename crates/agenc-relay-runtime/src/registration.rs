@@ -182,6 +182,7 @@ struct EdgeCarrier {
     credentials: agenc_relay_client_wire::AccountTransfer,
     claim: Option<agenc_relay_client_wire::AccountTransfer>,
     root_link: Option<crate::federation::LinkId>,
+    root_buffer: Option<initial_root_edge::Buffer>,
     grant: Option<(agenc_relay_types::AccountId, u64, [u8; 32])>,
 }
 
@@ -198,6 +199,7 @@ impl EdgeCarrier {
             .map_err(|_| RuntimeError::MemoryExhausted)?,
             claim: None,
             root_link: None,
+            root_buffer: None,
             grant: None,
         })
     }
@@ -1500,6 +1502,16 @@ impl RegistrationRouter {
                                 .capability_state()
                                 .enabled("agenc.ag/initial-root")
                     });
+                let principal = self
+                    .edge
+                    .as_ref()
+                    .and_then(|edge| edge.initial_root_principal(generation));
+                let held = self
+                    .edge_carriers
+                    .get(&generation)
+                    .and_then(|carrier| carrier.root_buffer.as_ref());
+                let current =
+                    current && held.is_some_and(|buffer| buffer.current(phase.0, principal));
                 if current {
                     self.edge_carrier_outcome(
                         context,
@@ -1739,14 +1751,25 @@ impl RegistrationRouter {
         use agenc_relay_client_wire::{AccountCarrierAction, AccountCarrierPhase};
         let (prefix, kind) = (prefix.0, prefix.1.into());
         let (subcommand, parameter, has_tags) = line;
+        let principal = self
+            .edge
+            .as_ref()
+            .and_then(|edge| edge.initial_root_principal(generation));
         let Some(carrier) = self.edge_carriers.get_mut(&generation) else {
             return CarrierRoute::Close;
         };
+        if let AccountCommand::InitialRoot(family) = kind
+            && !carrier.admit_buffer(context, family, principal, line)
+        {
+            return CarrierRoute::Close;
+        }
         let link = carrier.root_link;
         let Some(transfer) = carrier.transfer(kind) else {
             return CarrierRoute::Close;
         };
         let Ok(actions) = transfer.client(subcommand, parameter, has_tags, now) else {
+            transfer.reject();
+            carrier.release_initial_buffer(kind, true);
             return account_unavailable(prefix, kind);
         };
         let mut rendered = Vec::new();
@@ -1772,6 +1795,7 @@ impl RegistrationRouter {
                         crate::observe::events::AccountRefusalReason::ForwardUnavailable,
                     );
                     transfer.reject();
+                    carrier.release_initial_buffer(kind, true);
                     return account_unavailable(prefix, kind);
                 }
                 action => rendered.push(action),
@@ -4090,6 +4114,7 @@ fn edge_account_answer(
     let transfer = carrier.transfer(kind)?;
     let Some(answer) = edge_account_payload(outcome, kind, finish) else {
         transfer.reject();
+        carrier.release_initial_buffer(kind, true);
         let frame = crate::account_service::account_failure(prefix, kind).ok()?;
         return Some((vec![frame], ResultClass::Rejected));
     };
@@ -4099,6 +4124,7 @@ fn edge_account_answer(
         AccountCarrierPhase::Start
     };
     let actions = transfer.server_response(phase, &answer.bytes, now).ok()?;
+    carrier.release_initial_buffer(kind, finish);
     let mut frames = crate::account_service::render_account_actions(prefix, kind, actions).ok()?;
     if let Some(account_id) = answer.created {
         frames.push(crate::account_service::account_created_note(prefix, account_id).ok()?);

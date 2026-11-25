@@ -67,6 +67,30 @@ fn same_sealed_read_twice(
     Ok(())
 }
 
+fn wait_for_public_account(client: &mut ArcClient, account: AccountId) -> TestResult {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for attempt in 0_u32.. {
+        let label = format!("guardedpublisher{attempt}");
+        client.send(&format!("@label={label} EKEY WHOAMI"))?;
+        let reply = labeled_reply(client, &label)?;
+        let words = result_words(completion_line(&reply)?)
+            .ok_or_else(|| failure("missing scalar WHOAMI"))?;
+        if matches!(words.as_slice(), [kind,verb,id,..] if kind == "EKEY" && verb == "ACCOUNT" && id == &account.to_text())
+        {
+            return Ok(());
+        }
+        if !matches!(words.as_slice(), [kind,command,code,..] if kind == "FAIL" && command == "EKEY" && matches!(code.as_str(), "E2EE_SYNCING" | "E2EE_ACCOUNT_REQUIRED"))
+            || Instant::now() >= deadline
+        {
+            return Err(failure(
+                "the ordinary edge did not resolve the signed-in publication account",
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Err(failure("WHOAMI label range exhausted"))
+}
+
 fn assert_withdrawn(owner: &mut ArcClient) -> TestResult {
     fn closed(e: &io::Error) -> bool {
         matches!(
@@ -178,6 +202,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
         .is_none()
     );
     let mut publisher = authenticated_session(&network.edge_b, "Publisher", login, 181, account)?;
+    wait_for_public_account(&mut publisher, account)?;
     let object_id = publish(&mut publisher, &mut selected, true)?;
     drop(publisher);
     assert!(baseline.stop()?.success());
