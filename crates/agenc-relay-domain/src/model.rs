@@ -497,6 +497,15 @@ pub enum DirectMessagePolicy {
     Deny,
 }
 
+/// An immutable account's genesis publication policy, selected only at creation.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AccountGenesisPolicy {
+    /// Ordinary signed genesis; includes all pre-extension accounts.
+    Legacy,
+    /// The original private claim must authorize first publication.
+    Guarded,
+}
+
 /// One account's public and authorization-relevant domain state.
 #[derive(Clone)]
 pub struct AccountState {
@@ -510,6 +519,7 @@ pub struct AccountState {
     pub(crate) session_generation: Generation,
     pub(crate) revision: Revision,
     pub(crate) admin_suspension_expires_at: Option<UtcSecond>,
+    pub(crate) genesis_policy: AccountGenesisPolicy,
 }
 
 impl AccountState {
@@ -527,6 +537,7 @@ impl AccountState {
             session_generation,
             revision,
             admin_suspension_expires_at: None,
+            genesis_policy: AccountGenesisPolicy::Legacy,
         }
     }
 
@@ -551,7 +562,21 @@ impl AccountState {
             session_generation,
             revision,
             admin_suspension_expires_at: None,
+            genesis_policy: AccountGenesisPolicy::Legacy,
         }
+    }
+
+    /// Selects guarded genesis on an account being constructed for its first insertion.
+    #[must_use]
+    pub fn with_initial_root_claim(mut self) -> Self {
+        self.genesis_policy = AccountGenesisPolicy::Guarded;
+        self
+    }
+
+    /// The independently persisted genesis policy.
+    #[must_use]
+    pub const fn genesis_policy(&self) -> AccountGenesisPolicy {
+        self.genesis_policy
     }
 
     /// Returns the immutable account authority.

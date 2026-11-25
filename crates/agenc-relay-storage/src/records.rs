@@ -766,9 +766,21 @@ pub fn validate_record_plaintext(
 
 fn validate_companion_plaintext(key: &StoredKey, plaintext: &[u8]) -> Result<(), StorageError> {
     let value = PersistentRecordValue::decode(TableId::E2eeState, plaintext)?;
+    let root_owner = value.record_kind() == crate::e2ee_records::initial_root::KIND;
+    if root_owner != crate::e2ee_records::initial_root::is_reserved_key(key)
+        || (root_owner
+            && (value.expires_at().is_some()
+                || value.generation() != 0
+                || !value.references().is_empty()))
+    {
+        return Err(StorageError::InvalidEncoding);
+    }
     match value.record_kind() {
         crate::companion_disk::accounting::KIND => {
             crate::CompanionDiskAccounting::check_record(key, &value)?;
+        }
+        crate::e2ee_records::initial_root::KIND => {
+            crate::e2ee_records::initial_root::InitialRootRow::decode_keyed(key, value.body())?;
         }
         crate::e2ee_records::direct_renewal::KIND => {
             crate::e2ee_records::direct_renewal::DirectRenewal::decode_keyed(key, value.body())?;
@@ -937,7 +949,7 @@ const fn record_kind_is_valid(table: TableId, kind: u16) -> bool {
         TableId::Audit => 2,
         TableId::AuditCheckpoint => 1,
         TableId::E2eeObject => 1,
-        TableId::E2eeState => crate::e2ee_records::direct_renewal::KIND,
+        TableId::E2eeState => crate::e2ee_records::initial_root::KIND,
         _ => 0,
     };
     kind != 0 && kind <= maximum

@@ -7,6 +7,8 @@
 //! blocking reads and belongs on a blocking thread, never a Tokio worker
 //! (spec line 4242).
 
+mod initial_root;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_relay_auth::{
@@ -446,6 +448,7 @@ pub fn reconstruct(
             scan.admit(keys, table, key, &sealed)
         })?;
     }
+    scan.check_initial_roots(keys, port)?;
     scan.bind_nicknames(keys)?;
     scan.bind_channel_names(keys)?;
     let account_service = scan.account_service.finish(role)?;
@@ -575,6 +578,9 @@ impl Scan {
         }
         let value = PersistentRecordValue::decode(table, opened.expose_for_storage_codec())?;
         self.index.record_known(table, key.clone(), existing);
+        if table == TableId::E2eeState {
+            self.admit_initial_root_row(keys, &key, &value)?;
+        }
         match (table, value.record_kind()) {
             (TableId::Account, TOMBSTONE_RECORD_KIND) => self.admit_account_tombstone(&key, &value),
             (TableId::Session, TOMBSTONE_RECORD_KIND) => self.admit_session_tombstone(&key, &value),
@@ -616,6 +622,44 @@ impl Scan {
             ) => Ok(()),
             _ => Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
         }
+    }
+
+    fn admit_initial_root_row(
+        &mut self,
+        keys: &KeyDeriver,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        use agenc_relay_storage::e2ee_records::initial_root::{
+            FORMAT_KEY, InitialRootRow, KIND, PREFIX,
+        };
+        let reserved = key.as_bytes().starts_with(PREFIX) || key.as_bytes().starts_with(FORMAT_KEY);
+        if !reserved && value.record_kind() != KIND {
+            return Ok(());
+        }
+        if !reserved
+            || value.record_kind() != KIND
+            || value.expires_at().is_some()
+            || value.generation() != 0
+            || !value.references().is_empty()
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        if let InitialRootRow::Owner(owner) = InitialRootRow::decode_keyed(key, value.body())? {
+            if owner.network != keys.binding().network_id()
+                || !self.accounts.get(&owner.account).is_some_and(|a| {
+                    a.genesis_policy == agenc_relay_domain::AccountGenesisPolicy::Guarded
+                })
+                || self
+                    .index
+                    .initial_root_owners
+                    .insert(owner.account, std::sync::Arc::new(owner))
+                    .is_some()
+            {
+                return Err(RuntimeError::Storage(StorageError::StaleState));
+            }
+        }
+        Ok(())
     }
 
     fn admit_channel_tombstone(
@@ -1563,6 +1607,7 @@ mod tests {
             session_generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
             revision: Revision::new(1).map_err(|_| RuntimeError::InvalidValue)?,
             admin_suspension_expires_at: None,
+            genesis_policy: agenc_relay_domain::AccountGenesisPolicy::Legacy,
         })
     }
 

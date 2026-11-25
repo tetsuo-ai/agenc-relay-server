@@ -404,6 +404,7 @@ impl Harness {
                     .map(|(_, facts)| *facts)
             },
             plan_binding: &plan_binding,
+            plan_root: &|_, _| Ok(None),
             state_generation: STATE_GENERATION,
             source_view: Vec::new(),
         };

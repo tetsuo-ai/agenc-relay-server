@@ -541,6 +541,24 @@ fn execute(
         channel_member: &channel_member,
         binding_channel: &binding_channel,
         plan_binding: &plan_binding,
+        plan_root: &|root, object| {
+            let account = agenc_relay_types::AccountId::parse_wire_bytes(&root.account_id)
+                .map_err(|_| E2eeReplyCode::AccountRequired)?;
+            let session = user_id
+                .and_then(|user| domain.session(user))
+                .filter(|session| {
+                    session.account_id() == Some(account) && session.home_server_id() == home
+                })
+                .ok_or(E2eeReplyCode::AccountRequired)?;
+            let generation = session.account_session_generation();
+            context.plan_signed_root(
+                account,
+                generation,
+                root.generation,
+                root.fingerprint,
+                object,
+            )
+        },
         state_generation,
         source_view,
     };

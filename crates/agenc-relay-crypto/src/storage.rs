@@ -55,6 +55,12 @@ impl DatabaseBinding {
         }
     }
 
+    /// Returns the network authenticated by every stored record.
+    #[must_use]
+    pub const fn network_id(self) -> NetworkId {
+        self.network_id
+    }
+
     /// Returns the server incarnation authenticated by every stored record.
     #[must_use]
     pub const fn server_incarnation(self) -> ServerIncarnation {

@@ -75,6 +75,13 @@ pub type PlanBinding<'a> = dyn Fn(
     ) -> Result<Option<agenc_relay_domain::MutationPlan>, E2eeReplyCode>
     + 'a;
 
+/// Current base account admission of a fully verified signed root under the registered origin.
+pub(super) type PlanRoot<'a> = dyn Fn(
+        &agenc_relay_e2ee::identity::VerifiedRoot,
+        [u8; 32],
+    ) -> Result<Option<crate::state_core::durable::AccountServiceDurableWrite>, E2eeReplyCode>
+    + 'a;
+
 /// Current base directory facts used to authorize a channel binding change.
 #[derive(Clone, Copy)]
 pub(super) struct BindingChannel {
@@ -120,6 +127,8 @@ pub struct Exec<'a> {
     /// The base binding plan for a channel whose members are exactly the
     /// named principal accounts; `None` on a node without base state.
     pub plan_binding: &'a PlanBinding<'a>,
+    /// The account's ordinary or guarded publication gate from the base state owner.
+    pub(super) plan_root: &'a PlanRoot<'a>,
     /// The coordinator state generation the batch will commit.
     pub state_generation: u64,
     /// The encoded base source view of the requesting origin.

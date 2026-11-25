@@ -128,6 +128,7 @@ fn minimal_account(seed: u8) -> Result<DurableAccount, StorageError> {
         session_generation: quantity(Generation::new(1))?,
         revision: quantity(Revision::new(1))?,
         admin_suspension_expires_at: None,
+        genesis_policy: agenc_relay_domain::AccountGenesisPolicy::Legacy,
     })
 }
 
@@ -334,6 +335,7 @@ fn full_account() -> Result<DurableAccount, Box<dyn Error>> {
         session_generation: Generation::new(7)?,
         revision: Revision::new(42)?,
         admin_suspension_expires_at: Some(UtcSecond::from_unix_seconds(1_700_000_100)),
+        genesis_policy: agenc_relay_domain::AccountGenesisPolicy::Legacy,
     })
 }
 
