@@ -440,7 +440,7 @@ pub(crate) fn check_binding_shape(
 
 type ConcreteRoute = ([u8; 32], SemanticId, Option<[u8; 16]>, Option<[u8; 32]>);
 
-fn concrete_route(
+pub(crate) fn concrete_route(
     network_id: &[u8; 32],
     tbs: &ArcConversationBindingTbs,
     route: &SemanticRoute,

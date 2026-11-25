@@ -182,17 +182,77 @@ pub fn verify_context_core(
     core: &ArcContextCoreTbs,
     binding: &VerifiedBinding,
 ) -> Result<SemanticId, E2eeError> {
+    verify_core_fields(
+        network_id,
+        core,
+        CoreFields {
+            kind: binding.route.kind,
+            group_id: binding.group_id,
+            conversation_id: binding.conversation_id,
+            route_lock: binding.route.lock_id,
+            route_binding: binding.route_binding,
+            suite: binding.cipher_suite,
+            plan: binding.initial_member_plan_id,
+            sequencer: binding.sequencer_credential_id,
+            generation: binding.generation,
+            core_id: binding.context_core_id,
+        },
+    )
+}
+
+struct CoreFields {
+    kind: ArcConversationKind,
+    group_id: [u8; 32],
+    conversation_id: SemanticId,
+    route_lock: SemanticId,
+    route_binding: SemanticId,
+    suite: u16,
+    plan: SemanticId,
+    sequencer: SemanticId,
+    generation: u64,
+    core_id: SemanticId,
+}
+
+// The proposal's unsigned TBS has already been checked against its independent pin.
+pub(crate) fn verify_proposed_core(
+    network_id: &[u8; 32],
+    core: &ArcContextCoreTbs,
+    tbs: &crate::objects::conversation::ArcConversationBindingTbs,
+) -> Result<SemanticId, E2eeError> {
+    verify_core_fields(
+        network_id,
+        core,
+        CoreFields {
+            kind: tbs.kind,
+            group_id: crate::objects::group_id_bytes(&tbs.group_id)?,
+            conversation_id: tbs.conversation_id,
+            route_lock: tbs.semantic_route_lock_id,
+            route_binding: tbs.route_binding,
+            suite: tbs.cipher_suite,
+            plan: tbs.initial_member_plan_id,
+            sequencer: tbs.sequencer_credential_id,
+            generation: tbs.binding_generation,
+            core_id: tbs.context_core_id,
+        },
+    )
+}
+
+fn verify_core_fields(
+    network_id: &[u8; 32],
+    core: &ArcContextCoreTbs,
+    fields: CoreFields,
+) -> Result<SemanticId, E2eeError> {
     let group_id = crate::objects::group_id_bytes(&core.group_id)?;
     let agrees = core.profile_version == PROFILE_VERSION
         && core.network_id == *network_id
-        && core.kind == binding.route.kind
-        && group_id == binding.group_id
-        && core.conversation_id == binding.conversation_id
-        && core.semantic_route_lock_id == binding.route.lock_id
-        && core.route_binding == binding.route_binding
-        && core.cipher_suite == binding.cipher_suite
-        && core.initial_member_plan_id == binding.initial_member_plan_id
-        && core.sequencer_credential_id == binding.sequencer_credential_id
+        && core.kind == fields.kind
+        && group_id == fields.group_id
+        && core.conversation_id == fields.conversation_id
+        && core.semantic_route_lock_id == fields.route_lock
+        && core.route_binding == fields.route_binding
+        && core.cipher_suite == fields.suite
+        && core.initial_member_plan_id == fields.plan
+        && core.sequencer_credential_id == fields.sequencer
         && !core.encoded_required_capabilities.is_empty();
     if !agrees {
         return Err(E2eeError::InvalidValue);
@@ -201,11 +261,11 @@ pub fn verify_context_core(
     // binding of generation one or later, a ReInit successor, does not
     // (companion 9.4 and 9.5).
     let pending = boolean(core.initial_bootstrap_pending)?;
-    if pending != (binding.generation == 0) {
+    if pending != (fields.generation == 0) {
         return Err(E2eeError::InvalidValue);
     }
     let id = context_core_id(core)?;
-    if id != binding.context_core_id {
+    if id != fields.core_id {
         return Err(E2eeError::InvalidValue);
     }
     Ok(id)

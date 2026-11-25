@@ -2,6 +2,8 @@
 
 //! Initial public authority and substitutions under a frozen source binding.
 
+#[path = "initial_authority/proposal.rs"]
+mod proposal;
 #[path = "initial_authority/support.rs"]
 mod support;
 use support::*;

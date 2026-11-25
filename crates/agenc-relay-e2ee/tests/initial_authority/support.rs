@@ -32,6 +32,7 @@ pub(super) struct Fixture {
     pub(super) package: ArcConversationBindingPackage,
     pub(super) core: ArcContextCoreTbs,
     pub(super) policy: ArcPolicy,
+    pub(super) operational: ArcPolicy,
     pub(super) credential: ArcSequencerCredential,
     pub(super) expected: ExpectedInitialAuthority,
 }
@@ -42,13 +43,16 @@ impl Fixture {
     }
 
     pub(super) fn with_seed(seed: u8) -> Result<Self, E2eeError> {
+        Self::with_kind(seed, ArcConversationKind::Channel)
+    }
+
+    pub(super) fn with_kind(seed: u8, kind: ArcConversationKind) -> Result<Self, E2eeError> {
         let principals = vec![
             principal(seed, &ACCOUNT, &[7])?,
             principal(41, &OTHER, &[9])?,
         ];
         let refs = principals.iter().collect::<Vec<_>>();
         let conversation = conversation_id(&NETWORK, &[25; 32])?;
-        let kind = ArcConversationKind::Channel;
         let policy = policy(&PolicySpec::bootstrap(&refs, conversation, kind)?)?;
         let operational = agenc_relay_testkit::e2ee_client::policy(&PolicySpec::operational(
             &refs,
@@ -58,11 +62,23 @@ impl Fixture {
         )?)?;
         let authority = root_fingerprint(&principals.first().ok_or(E2eeError::InvalidValue)?.root)?;
         let credential = sequencer_credential(&key(60), 0, (0, 1_000_000), None)?;
+        let mut route = channel_route(b"#room", authority)?;
+        let (instance, nonce) = match kind {
+            ArcConversationKind::Channel => (Some([1; 16]), None),
+            ArcConversationKind::Direct => {
+                route.kind = kind;
+                route.canonical_channel_name = Opaque::new(Vec::new())?;
+                route.channel_authority_root_fingerprint = [0; 32];
+                route.direct_account_a = Opaque::from_slice(&ACCOUNT)?;
+                route.direct_account_b = Opaque::from_slice(&OTHER)?;
+                (None, Some([2; 32]))
+            }
+        };
         let package = binding_package(&BindingSpec {
             principals: &refs,
-            route: channel_route(b"#room", authority)?,
-            channel_instance_id: Some([1; 16]),
-            conversation_nonce: None,
+            route,
+            channel_instance_id: instance,
+            conversation_nonce: nonce,
             group_id: [25; 32],
             generation: 0,
             previous_binding_id: [0; 32],
@@ -107,6 +123,7 @@ impl Fixture {
             package,
             core,
             policy,
+            operational,
             credential,
             expected,
         };
