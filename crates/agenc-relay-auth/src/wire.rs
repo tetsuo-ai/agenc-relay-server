@@ -1,5 +1,6 @@
 //! Fixed account-service request and response codecs.
 
+pub mod claimed_creation;
 pub mod initial_root;
 mod padding;
 
@@ -389,7 +390,7 @@ fn parse_inner_request(
     }
     let payload = match message_kind {
         AccountServiceMessageKind::AccountCreateStart => {
-            parse_creation_start(network_id, &mut cursor)?
+            AccountRequestPayload::CreationStart(parse_creation_start(network_id, &mut cursor)?)
         }
         AccountServiceMessageKind::AccountCreateFinish => {
             parse_creation_finish(network_id, &mut cursor)?
@@ -416,7 +417,7 @@ fn parse_inner_request(
 fn parse_creation_start(
     network_id: NetworkId,
     cursor: &mut Cursor<'_>,
-) -> Result<AccountRequestPayload, AuthError> {
+) -> Result<CreationStart, AuthError> {
     let login = parse_login(cursor.read_vector_u8(MIN_LOGIN_BYTES, MAX_LOGIN_BYTES)?)?;
     let registration_request = read_registration_request(cursor)?;
     let invitation = match cursor.read_vector_u8(0, ACCOUNT_CREATION_INVITE_BYTES)? {
@@ -428,12 +429,12 @@ fn parse_creation_start(
         }
         _ => return Err(AuthError::InvalidEncoding),
     };
-    Ok(AccountRequestPayload::CreationStart(CreationStart {
+    Ok(CreationStart {
         network_id,
         login,
         registration_request,
         invitation,
-    }))
+    })
 }
 
 fn parse_creation_finish(
@@ -591,13 +592,7 @@ fn encode_inner_request(payload: &AccountRequestPayload) -> Result<Zeroizing<Vec
     encoded.extend_from_slice(&PROFILE_VERSION.to_be_bytes());
     match payload {
         AccountRequestPayload::CreationStart(request) => {
-            encoded.extend_from_slice(request.network_id.as_bytes());
-            encode_vector_u8(&mut encoded, request.login.as_str().as_bytes())?;
-            encode_vector_u8(
-                &mut encoded,
-                request.registration_request.expose_for_account_request(),
-            )?;
-            encode_optional_invitation(&mut encoded, request.invitation.as_ref())?;
+            encode_creation_start(&mut encoded, request)?
         }
         AccountRequestPayload::CreationFinish(request) => {
             encoded.extend_from_slice(request.network_id.as_bytes());
@@ -642,6 +637,16 @@ fn encode_vector_u8(encoded: &mut Vec<u8>, value: &[u8]) -> Result<(), AuthError
     encoded.push(length);
     encoded.extend_from_slice(value);
     Ok(())
+}
+
+fn encode_creation_start(encoded: &mut Vec<u8>, request: &CreationStart) -> Result<(), AuthError> {
+    encoded.extend_from_slice(request.network_id.as_bytes());
+    encode_vector_u8(encoded, request.login.as_str().as_bytes())?;
+    encode_vector_u8(
+        encoded,
+        request.registration_request.expose_for_account_request(),
+    )?;
+    encode_optional_invitation(encoded, request.invitation.as_ref())
 }
 
 fn encode_optional_invitation(
