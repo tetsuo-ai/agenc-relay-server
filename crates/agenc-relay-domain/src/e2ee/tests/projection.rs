@@ -268,11 +268,11 @@ fn descriptor_rules_follow_the_registry() -> Result<(), PlanError> {
     );
     assert_eq!(
         descriptor_rule(Opcode::FETCH_OBJECT, ResultKind::ObjectPage)?,
-        DescriptorRule::Page(&CLIENT_KINDS)
+        DescriptorRule::FetchedObject(&FETCHABLE_KINDS)
     );
     assert!(matches!(
         descriptor_rule(Opcode::FETCH_OBJECT, ResultKind::ObjectPage)?,
-        DescriptorRule::Page(kinds) if !kinds.contains(&29)
+        DescriptorRule::FetchedObject(kinds) if kinds.contains(&34) && (29..=33).chain([36]).all(|k| !kinds.contains(&k))
     ));
     assert_eq!(
         descriptor_rule(Opcode::WHOAMI, ResultKind::Bound),

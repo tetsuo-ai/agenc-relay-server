@@ -92,6 +92,20 @@ fn conversation<'a>(
         .ok_or_else(|| Fail::with(E2eeReplyCode::RouteInvalid, conversation_id))
 }
 
+/// An attached route participant may read only the exact envelope retained for this conversation.
+pub(super) fn readable(exec: &Exec<'_>, requested: &[u8; 32], object_id: &[u8; 32]) -> bool {
+    if super::route::member_route(exec, requested).is_err() {
+        return false;
+    }
+    // The owning chain is hard-bounded by MAX_POLICY_CHAIN_BYTES. It contains only
+    // the signed variants actually retained by SUBMIT POLICY, including after restart.
+    exec.coordinator
+        .state
+        .conversations
+        .get(requested)
+        .is_some_and(|bound| bound.policies.values().any(|p| &p.object_id == object_id))
+}
+
 /// Verifies `policy` under the binding's chain rule: generation zero must
 /// be the binding's initial policy, every later generation names a
 /// retained predecessor, and approvals resolve through the retained

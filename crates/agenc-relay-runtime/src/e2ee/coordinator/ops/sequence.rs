@@ -1853,6 +1853,8 @@ pub fn fetch_object(exec: &mut Exec<'_>) -> Result<super::Prepared, Fail> {
         .filter(|bytes| {
             super::recovery_read::permitted(exec, &conversation_id, bytes)
                 && super::membership::readable(exec, &conversation_id, bytes)
+                && (CompanionCoordinator::kind_of(bytes) != Some(ArcWireObjectKind::Policy)
+                    || super::policy::readable(exec, &conversation_id, &object_id))
         })
         .map(<[u8]>::to_vec);
     page(exec, bytes.into_iter().collect(), EmptyKind::Objects)

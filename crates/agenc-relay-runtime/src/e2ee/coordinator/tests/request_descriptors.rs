@@ -2,6 +2,7 @@
 //! the wire kinds, and whether mailbox delivery tokens may appear.
 #![forbid(unsafe_code)]
 
+use agenc_relay_domain::e2ee::projection::{Opcode, PlanError, ResultKind, descriptor_rule};
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
 use agenc_relay_e2ee::tls::TlsEncode;
 
@@ -22,7 +23,7 @@ fn response(kind: ArcWireObjectKind, tokened: bool) -> ResponseObject {
 }
 
 #[test]
-fn each_descriptor_rule_bounds_count_kind_and_delivery_tokens() {
+fn each_descriptor_rule_bounds_count_kind_and_delivery_tokens() -> Result<(), PlanError> {
     let mls = || response(ArcWireObjectKind::ApplicationMls, false);
     let event = || response(ArcWireObjectKind::FederationEvent, false);
     let mailbox = || response(ArcWireObjectKind::ApplicationMls, true);
@@ -38,6 +39,13 @@ fn each_descriptor_rule_bounds_count_kind_and_delivery_tokens() {
         check_descriptors(&exactly, &[mailbox()]).is_err(),
         "delivery tokens belong to mailbox pages only"
     );
+
+    let fetch = descriptor_rule(Opcode::FETCH_OBJECT, ResultKind::ObjectPage)?;
+    let policy = || response(ArcWireObjectKind::Policy, false);
+    assert!(check_descriptors(&fetch, &[policy()]).is_ok());
+    assert!(check_descriptors(&fetch, &[policy(), policy()]).is_err());
+    assert!(check_descriptors(&fetch, &[event()]).is_err());
+    assert!(check_descriptors(&fetch, &[mailbox()]).is_err());
 
     let page = DescriptorRule::Page(MLS);
     assert!(check_descriptors(&page, &[]).is_err());
@@ -57,4 +65,5 @@ fn each_descriptor_rule_bounds_count_kind_and_delivery_tokens() {
         target_device_id: None,
     };
     assert!(check_descriptors(&page, &[garbage]).is_err());
+    Ok(())
 }
