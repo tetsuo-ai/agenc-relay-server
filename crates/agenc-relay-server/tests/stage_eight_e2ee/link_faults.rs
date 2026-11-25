@@ -57,7 +57,7 @@ fn guest(fixture: &NodeFixture, source: Ipv4Addr, nickname: &str) -> TestResult 
     // Architecture 8.3 measures registration from the completed TLS handshake.
     // A busy edge can still welcome this guest after the ordinary I/O timeout.
     let window = Duration::from_millis(agenc_relay_client_wire::REGISTRATION_TIMEOUT_MILLIS);
-    let deadline = Instant::now() + window;
+    let deadline = client.tls_completed + window;
     client.send(&format!("NICK {nickname}"))?;
     client.send(&format!("USER {nickname} 0 * :Link Faults"))?;
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -72,13 +72,41 @@ fn guest(fixture: &NodeFixture, source: Ipv4Addr, nickname: &str) -> TestResult 
         .sock
         .set_read_timeout(Some(remaining))?;
     let _welcome = client.read_until_deadline(TRANSCRIPT_LINES, remaining, |line| {
-        line.contains(&format!(" 001 {nickname} "))
+        guest_welcome(line, nickname)
     })?;
-    if Instant::now() > deadline {
+    if Instant::now() >= deadline {
         return Err(failure("guest welcome exceeded the registration deadline"));
     }
     drop(client);
     Ok(())
+}
+
+fn guest_welcome(line: &str, nickname: &str) -> bool {
+    use agenc_relay_client_wire::{
+        ServerCommand, ServerFramedLine, ServerPrefix, parse_server_message,
+    };
+    let Ok(frame) = ServerFramedLine::new(line) else {
+        return false;
+    };
+    parse_server_message(frame).is_ok_and(|message| {
+        matches!(message.prefix(), Some(ServerPrefix::Server(_)))
+            && message.command() == ServerCommand::Numeric(1)
+            && message.params().middle() == [nickname]
+            && message.params().trailing().is_some()
+    })
+}
+
+#[test]
+fn only_the_server_welcome_for_this_guest_completes_the_capacity_probe() {
+    assert!(guest_welcome(":edge.test 001 visitor :Welcome", "visitor"));
+    for line in [
+        ":edge.test NOTICE visitor :the text 001 visitor is not a welcome",
+        ":edge.test 001 other :Welcome",
+        "001 visitor :Welcome",
+        ":edge.test 001 visitor extra :Welcome",
+    ] {
+        assert!(!guest_welcome(line, "visitor"));
+    }
 }
 
 /// One account session asks `EKEY WHOAMI` `REQUESTS_PER_READER` times, each

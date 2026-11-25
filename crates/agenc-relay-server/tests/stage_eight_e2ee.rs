@@ -934,6 +934,8 @@ impl Drop for DaemonProcess {
 
 struct ArcClient {
     reader: BufReader<TlsClient>,
+    /// The client observation of the completed authenticated handshake.
+    tls_completed: Instant,
     /// The session's client-side copy of the Section 16 E2EE command bucket.
     e2ee_tokens: f64,
     /// When the bucket was last refilled.
@@ -1058,10 +1060,12 @@ impl ArcClient {
         while stream.conn.is_handshaking() {
             stream.conn.complete_io(&mut stream.sock)?;
         }
+        let tls_completed = Instant::now();
         Ok(Self {
             reader: BufReader::new(stream),
+            tls_completed,
             e2ee_tokens: E2EE_LINE_BURST,
-            e2ee_refilled: Instant::now(),
+            e2ee_refilled: tls_completed,
             e2ee_bytes: E2EE_INGRESS_BURST,
             logged_in: false,
             registered: None,
