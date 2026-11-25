@@ -1,11 +1,11 @@
 //! Opt-in creation binds the claimant before a newly allocated account can become visible.
 
 use agenc_relay_crypto::{
-    AccountHpkeExchange, AccountRequestBinding, Digest32, InitialRootClaimOwner,
-    InitialRootExchange, InitialRootPrecommit, LoginIndexDigest, LoginIndexKey, OsEntropy,
-    Sha256Stream,
+    AccountHpkeExchange, AccountRequestBinding, AccountResponseSealToken, Digest32,
+    InitialRootClaimOwner, InitialRootExchange, InitialRootPrecommit, LoginIndexDigest,
+    LoginIndexKey, OsEntropy, Sha256Stream,
 };
-use agenc_relay_types::{AccountId, AccountServiceMessageKind, TransactionId};
+use agenc_relay_types::{AccountId, AccountServiceMessageKind, OpaqueCredentialId, TransactionId};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -19,7 +19,7 @@ use super::{
     read_transaction_record_header, read_validated_invitation, validate_finish_lineage,
 };
 use crate::claimed_creation::{OpenedGuardedStart, seal_challenge};
-use crate::{InitialRootServiceEnvelope, InitialRootServiceResponse};
+use crate::{InitialRootServiceEnvelope, InitialRootServiceResponse, OpaqueRegistrationResponse};
 
 pub(super) enum CreationOrigin {
     Legacy(AccountRequestBinding),
@@ -265,6 +265,46 @@ pub fn begin_guarded_account_creation(
     parameters: AccountCreationStartParameters<OpenedGuardedStart>,
     response_count: u64,
 ) -> Result<GuardedAccountStart, AuthError> {
+    prepare_guarded_account_creation(profile, login_index_key, parameters)?.seal(response_count)
+}
+
+/// An authenticated OPAQUE challenge waiting for the coordinator's ordered response count.
+#[must_use = "seal this challenge only after the service reserves its response-count successor"]
+pub struct GuardedCreationChallenge {
+    transaction: AccountTransaction<AccountCreationState>,
+    record: GuardedCreationTransactionRecord,
+    credential: OpaqueCredentialId,
+    challenge: OpaqueRegistrationResponse,
+    token: AccountResponseSealToken<InitialRootExchange>,
+    request_digest: Digest32,
+}
+
+impl GuardedCreationChallenge {
+    /// Consumes the original response authority and binds this challenge to the durable successor.
+    pub fn seal(self, response_count: u64) -> Result<GuardedAccountStart, AuthError> {
+        let (response, next_response_count) = seal_challenge(
+            self.token,
+            self.transaction.binding().transaction_id(),
+            &self.credential,
+            &self.challenge,
+            response_count,
+        )?;
+        Ok(GuardedAccountStart {
+            transaction: self.transaction,
+            record: self.record,
+            response,
+            request_digest: self.request_digest,
+            next_response_count,
+        })
+    }
+}
+
+/// Completes the OPAQUE computation without taking a shared response-count slot.
+pub fn prepare_guarded_account_creation(
+    profile: &OpaqueProfile,
+    login_index_key: &LoginIndexKey,
+    parameters: AccountCreationStartParameters<OpenedGuardedStart>,
+) -> Result<GuardedCreationChallenge, AuthError> {
     let AccountCreationStartParameters {
         context,
         request,
@@ -286,7 +326,7 @@ pub fn begin_guarded_account_creation(
         login_is_available,
         invitation_is_available,
     };
-    let (transaction, credential, response) = prepare_creation(
+    let (transaction, credential, challenge) = prepare_creation(
         profile,
         login_index_key,
         inputs,
@@ -295,18 +335,12 @@ pub fn begin_guarded_account_creation(
     )?;
     let record =
         GuardedCreationTransactionRecord::capture(&transaction, context.now, context.now_utc)?;
-    let (response, next_response_count) = seal_challenge(
-        token,
-        transaction.binding().transaction_id(),
-        &credential,
-        &response,
-        response_count,
-    )?;
-    Ok(GuardedAccountStart {
+    Ok(GuardedCreationChallenge {
         transaction,
         record,
-        response,
+        credential,
+        challenge,
+        token,
         request_digest,
-        next_response_count,
     })
 }

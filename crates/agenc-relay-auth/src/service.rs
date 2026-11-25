@@ -3,8 +3,9 @@
 mod guarded_creation;
 use guarded_creation::CreationOrigin;
 pub use guarded_creation::{
-    CreatedRootClaim, GuardedAccountStart, GuardedCreationTransactionRecord,
-    begin_guarded_account_creation,
+    CreatedRootClaim, GuardedAccountStart, GuardedCreationChallenge,
+    GuardedCreationTransactionRecord, begin_guarded_account_creation,
+    prepare_guarded_account_creation,
 };
 
 use agenc_relay_crypto::{

@@ -161,7 +161,7 @@ fn guarded_start_releases_only_its_complete_durable_admission() -> Result {
     let (original, _) = claimed_creation::seal_start(public, binding, &request, &secret)?;
     let (other_wire, _) = claimed_creation::seal_start(public, binding, &request, &secret)?;
     let prepare = || -> Result<agenc_relay_auth::GuardedAccountStart> {
-        Ok(begin_guarded_account_creation(
+        Ok(agenc_relay_auth::prepare_guarded_account_creation(
             &profile,
             &lookup,
             AccountCreationStartParameters {
@@ -176,8 +176,8 @@ fn guarded_start_releases_only_its_complete_durable_admission() -> Result {
                 login_is_available: true,
                 invitation_is_available: true,
             },
-            3,
-        )?)
+        )?
+        .seal(3)?)
     };
     let other = prepare()?;
     enum Mismatch {

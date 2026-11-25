@@ -49,10 +49,11 @@ pub use service::{
     CreationTransactionRestartMetadata, CredentialChangeStartParameters, CredentialChangeState,
     CredentialChangeTransactionRecord, CredentialChangeTransactionRestartMetadata,
     CredentialReplacementIntent, DestructiveAccountSnapshot, FreshAuthenticationProof,
-    GuardedAccountStart, GuardedCreationTransactionRecord, SealedAccountFinishOutcome,
-    SealedAccountStart, authentication_completion, begin_account_creation, begin_account_deletion,
-    begin_authentication, begin_credential_change, begin_guarded_account_creation,
-    finish_account_authentication, finish_account_creation, finish_credential_change,
+    GuardedAccountStart, GuardedCreationChallenge, GuardedCreationTransactionRecord,
+    SealedAccountFinishOutcome, SealedAccountStart, authentication_completion,
+    begin_account_creation, begin_account_deletion, begin_authentication, begin_credential_change,
+    begin_guarded_account_creation, finish_account_authentication, finish_account_creation,
+    finish_credential_change, prepare_guarded_account_creation,
 };
 pub use transaction::{
     ACCOUNT_CREATION_TIMEOUT_TICKS, AUTHENTICATION_GRANT_TIMEOUT_SECONDS,
