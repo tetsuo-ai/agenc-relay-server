@@ -2196,6 +2196,43 @@ fn assert_same_terminal(lines: &[String], completion: &[String]) -> TestResult {
     Ok(())
 }
 
+/// Read a terminal notice's standalone certificate through the originating
+/// conversation. Check the exact object hash and the signed record's scope.
+fn fetch_terminal_certificate(
+    client: &mut ArcClient,
+    owner: &mut Principal,
+    conversation: [u8; 32],
+    notice: &str,
+    kind: ArcWireObjectKind,
+) -> TestResult {
+    use agenc_relay_testkit::e2ee::object::{ArcWireObjectRef, ObjectId};
+    use agenc_relay_testkit::e2ee::record_authentication::declared_certificate_position;
+    let mut fields = notice.split_ascii_whitespace().rev();
+    let id = fields
+        .next()
+        .ok_or_else(|| failure("missing certificate ID"))?;
+    let semantic = fields
+        .next()
+        .ok_or_else(|| failure("missing terminal ID"))?;
+    let label = owner.label();
+    client.send(&format!(
+        "@label={label} EGROUP FETCH OBJECT {} {id}",
+        base64url_encode(&conversation)
+    ))?;
+    let page = recovery_submission::page_objects(&labeled_reply(client, &label)?)?;
+    let [bytes] = page.as_slice() else {
+        return Err(failure("expected one standalone terminal certificate"));
+    };
+    assert_eq!(base64url_encode(ObjectId::compute(bytes).as_bytes()), id);
+    let certificate = ArcWireObjectRef::parse(bytes)?;
+    assert_eq!(certificate.kind(), kind);
+    let (position, semantic_id) = declared_certificate_position(certificate)?;
+    assert_eq!(position.network_id, *NETWORK_ID.as_bytes());
+    assert_eq!(position.conversation_id, conversation);
+    assert_eq!(base64url_encode(&semantic_id), semantic);
+    Ok(())
+}
+
 /// Reassembles the object a reply carried in its fragment tags: the server
 /// tag on batch lines, the preserved client-only tag on live echoes.
 fn batch_object(lines: &[String]) -> TestResult<Vec<u8>> {

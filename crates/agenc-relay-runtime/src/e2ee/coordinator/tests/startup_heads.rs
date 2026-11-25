@@ -389,6 +389,110 @@ fn authorized_finalization() -> TestResult<(ArcCommitFinalizationCertificate, [u
     Ok((certificate, finalization_id))
 }
 
+#[test]
+fn an_unservable_retained_terminal_is_a_recovery_error() -> TestResult {
+    use agenc_relay_e2ee::objects::sequencing::terminal_certificate_view;
+    let (certificate, semantic) = authorized_finalization()?;
+    let tbs = &certificate.tbs;
+    let (network, conversation, sequence, predecessor) = (
+        tbs.network_id,
+        tbs.conversation_id,
+        tbs.route_sequence,
+        tbs.predecessor_record_id,
+    );
+    let record = ArcSequencerRecord::Finalization(certificate);
+    let wrapper =
+        ArcWireObject::new(ArcWireObjectKind::SequencerRecord, record.encode()?)?.encode()?;
+    let id = *ObjectId::compute(&wrapper).as_bytes();
+    let typed = *terminal_certificate_view(&wrapper)?
+        .ok_or("certificate")?
+        .object_id()?
+        .as_bytes();
+    let mut state = CompanionState::default();
+    state.objects.insert(id, wrapper);
+    let row = RecordRow {
+        record_object_id: id,
+        record_id: semantic,
+        record_kind: FINALIZATION_RECORD,
+        terminal: true,
+        predecessor_record_id: predecessor,
+    };
+    let mut rows = SequencerRows {
+        records: BTreeMap::from([((conversation, sequence), row)]),
+        candidates: BTreeMap::new(),
+        proofs: Vec::new(),
+        policies: BTreeMap::new(),
+        memberships: Default::default(),
+    };
+    state.logs.insert(
+        conversation,
+        SequencerLog::from_activation(conversation, predecessor),
+    );
+    discard_route(&mut state, conversation);
+    rows.restore_terminal_certificates(&mut state, &network)?;
+    assert!(state.terminal_certificates.is_empty());
+    state.logs.insert(
+        conversation,
+        SequencerLog::from_activation(conversation, predecessor),
+    );
+    rows.restore_terminal_certificates(&mut state, &network)?;
+    assert_eq!(
+        state.terminal_certificates.get(&(conversation, typed)),
+        Some(&id)
+    );
+    let row = rows
+        .records
+        .get_mut(&(conversation, sequence))
+        .ok_or("retained row")?;
+    let mut wrong_network = network;
+    wrong_network[0] ^= 1;
+    let mut wrong_conversation = conversation;
+    wrong_conversation[0] ^= 1;
+    assert_eq!(
+        row.certificate_id(&state, &wrong_network, &conversation, sequence),
+        None
+    );
+    assert_eq!(
+        row.certificate_id(&state, &network, &wrong_conversation, sequence),
+        None
+    );
+    assert_eq!(
+        row.certificate_id(&state, &network, &conversation, sequence ^ 1),
+        None
+    );
+    row.record_kind = REINIT_ACTIVATION_RECORD;
+    assert_eq!(
+        row.certificate_id(&state, &network, &conversation, sequence),
+        None
+    );
+    row.record_kind = FINALIZATION_RECORD;
+    row.record_id[0] ^= 1;
+    assert_eq!(
+        row.certificate_id(&state, &network, &conversation, sequence),
+        None
+    );
+    row.record_id = semantic;
+    rows.records
+        .get_mut(&(conversation, sequence))
+        .ok_or("retained row")?
+        .predecessor_record_id[0] ^= 1;
+    assert!(matches!(
+        rows.restore_terminal_certificates(&mut state, &network),
+        Err(super::super::CompanionFault::Storage)
+    ));
+    let row = rows
+        .records
+        .get_mut(&(conversation, sequence))
+        .ok_or("retained row")?;
+    row.predecessor_record_id = predecessor;
+    row.terminal = false;
+    assert!(matches!(
+        rows.restore_terminal_certificates(&mut state, &network),
+        Err(super::super::CompanionFault::Storage)
+    ));
+    Ok(())
+}
+
 /// One retained record row for [`authority`]: the record, the row's kind and identifier,
 /// and whether its object is retained.
 type Retained<'a> = (&'a ArcSequencerRecord, u16, [u8; 32], bool);

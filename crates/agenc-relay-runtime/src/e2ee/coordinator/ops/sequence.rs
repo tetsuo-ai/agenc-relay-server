@@ -70,6 +70,19 @@ pub(super) fn record_bytes(record: &ArcSequencerRecord) -> Result<Vec<u8>, Fail>
     wire(ArcWireObjectKind::SequencerRecord, body)
 }
 
+/// Store the history wrapper and name its exact standalone certificate on
+/// the wire. Both views derive from the same signed record.
+fn terminal_objects(record: &ArcSequencerRecord) -> Result<(Vec<u8>, [u8; 32]), Fail> {
+    let wrapper = record_bytes(record)?;
+    let certificate = agenc_relay_e2ee::objects::sequencing::terminal_certificate_view(&wrapper)
+        .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))?
+        .ok_or_else(|| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    let id = certificate
+        .object_id()
+        .map_err(|_| Fail::from(E2eeReplyCode::ObjectTooLarge))?;
+    Ok((wrapper, *id.as_bytes()))
+}
+
 fn decode<T: TlsDecode>(bytes: &[u8], limit: usize) -> Result<T, Fail> {
     let mut budget = DecodeBudget::new(limit, 1 << 18);
     T::decode_exact(bytes, &mut budget).map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))
@@ -961,7 +974,8 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .tbs
         .authorization_rule
         == agenc_relay_e2ee::objects::conversation::ArcCommitAuthorizationRule::BootstrapActivation;
-    let record = record_bytes(&ArcSequencerRecord::Finalization(certificate))?;
+    let (record, certificate_id) =
+        terminal_objects(&ArcSequencerRecord::Finalization(certificate))?;
     let record_id = *agenc_relay_e2ee::ObjectId::compute(&record).as_bytes();
     let mut next_log = log.clone();
     if reinit.is_some() {
@@ -982,7 +996,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         conversation_id,
         resulting_epoch,
         finalization_id,
-        record_id,
+        certificate_id,
     ));
     outcome.security_mutation = true;
     outcome.writes.extend(refresh.writes);
@@ -1013,7 +1027,7 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     )?);
     let mut encoded = resulting_epoch.to_be_bytes().to_vec();
     encoded.extend_from_slice(&finalization_id);
-    encoded.extend_from_slice(&record_id);
+    encoded.extend_from_slice(&certificate_id);
     for target in audience(exec, &conversation_id)? {
         outcome.events.push(exec.event(
             EventKind::Finalized,
@@ -1030,6 +1044,9 @@ pub fn submit_finalization(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         companion.logs.insert(conversation_id, next_log);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
+            companion
+                .terminal_certificates
+                .insert((conversation_id, certificate_id), record_id);
             state.proofs.insert(finalization_id, request_object_id);
             state.acks.remove(&candidate_id);
             state.ack_signers.remove(&candidate_id);
@@ -1154,7 +1171,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             .map_err(|_| Fail::from(E2eeReplyCode::Syncing))?,
         tbs,
     };
-    let record = record_bytes(&ArcSequencerRecord::Abort(certificate))?;
+    let (record, certificate_id) = terminal_objects(&ArcSequencerRecord::Abort(certificate))?;
     let record_id = *agenc_relay_e2ee::ObjectId::compute(&record).as_bytes();
     let mut next_log = log.clone();
     next_log
@@ -1170,7 +1187,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         conversation_id,
         candidate_id,
         abort_id,
-        record_id,
+        certificate_id,
     ));
     outcome.security_mutation = true;
     outcome.writes.extend(refresh.writes);
@@ -1205,7 +1222,7 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             Some(conversation_id),
             target,
             position.route_sequence,
-            ids(&[&candidate_id, &abort_id, &record_id]),
+            ids(&[&candidate_id, &abort_id, &certificate_id]),
             None,
         ));
     }
@@ -1214,6 +1231,9 @@ pub fn submit_abort(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         companion.logs.insert(conversation_id, next_log);
         if let Some(state) = companion.conversations.get_mut(&conversation_id) {
             state.records.insert(position.route_sequence, record_id);
+            companion
+                .terminal_certificates
+                .insert((conversation_id, certificate_id), record_id);
             state.proofs.insert(abort_id, request_object_id);
             state.acks.remove(&candidate_id);
             state.ack_signers.remove(&candidate_id);
@@ -1639,7 +1659,7 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
     let position = log
         .attempt_terminal_position(&attempt_id)
         .map_err(|_| Fail::with(E2eeReplyCode::FinalityRequired, &old_conversation_id))?;
-    let record = record_bytes(&record)?;
+    let (record, certificate_id) = terminal_objects(&record)?;
     let record_id = *agenc_relay_e2ee::ObjectId::compute(&record).as_bytes();
     let mut next_log = log.clone();
     let (result, event_kind, encoded) = match new_conversation {
@@ -1652,10 +1672,10 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
                     old_conversation_id,
                     new_conversation_id,
                     terminal_id,
-                    record_id,
+                    certificate_id,
                 ),
                 EventKind::ReinitActivated,
-                ids(&[&new_conversation_id, &terminal_id, &record_id]),
+                ids(&[&new_conversation_id, &terminal_id, &certificate_id]),
             )
         }
         None => {
@@ -1663,9 +1683,14 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
                 .abort_attempt(&attempt_id, terminal_id)
                 .map_err(|_| Fail::with(E2eeReplyCode::EpochStale, &old_conversation_id))?;
             (
-                ResultBody::ReinitAborted(old_conversation_id, attempt_id, terminal_id, record_id),
+                ResultBody::ReinitAborted(
+                    old_conversation_id,
+                    attempt_id,
+                    terminal_id,
+                    certificate_id,
+                ),
                 EventKind::ReinitAborted,
-                ids(&[&attempt_id, &terminal_id, &record_id]),
+                ids(&[&attempt_id, &terminal_id, &certificate_id]),
             )
         }
     };
@@ -1721,6 +1746,9 @@ pub fn submit_reinit_terminal(exec: &mut Exec<'_>, activate: bool) -> Result<Out
         companion.logs.insert(old_conversation_id, next_log);
         if let Some(state) = companion.conversations.get_mut(&old_conversation_id) {
             state.records.insert(position.route_sequence, record_id);
+            companion
+                .terminal_certificates
+                .insert((old_conversation_id, certificate_id), record_id);
             state.proofs.insert(terminal_id, request_object_id);
             state.vote_ledgers.remove(&attempt_id);
             state.pending_requests.remove(&attempt_id);
@@ -1827,16 +1855,28 @@ pub fn fetch_object(exec: &mut Exec<'_>) -> Result<super::Prepared, Fail> {
         .read(|reader| Ok((reader.fixed::<32>()?, reader.fixed::<32>()?)))?;
     exec.attached_device()?;
     log(exec, &conversation_id)?;
+    let wrapper_id = exec
+        .coordinator
+        .state
+        .terminal_certificates
+        .get(&(conversation_id, object_id))
+        .copied();
+    let storage_id = wrapper_id.unwrap_or(object_id);
     let request = super::super::object_read::Request {
         conversation_id,
-        object_id,
+        object_id: storage_id,
     };
     let bytes = match exec.object_source {
         super::super::object_read::Source::Resolved(resolved) => resolved
             .lookup(request)
             .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        // The normal exact disk read holds a size-dependent backing permit
+        // through response publication, including the derived envelope.
+        super::super::object_read::Source::Unread if wrapper_id.is_some() => {
+            return Ok(super::Prepared::Read(request));
+        }
         super::super::object_read::Source::Unread => {
-            let Some(bytes) = exec.coordinator.state.objects.get(&object_id) else {
+            let Some(bytes) = exec.coordinator.state.objects.get(&storage_id) else {
                 return Ok(super::Prepared::Read(request));
             };
             Some(bytes.as_slice())
@@ -1846,19 +1886,48 @@ pub fn fetch_object(exec: &mut Exec<'_>) -> Result<super::Prepared, Fail> {
             .coordinator
             .state
             .objects
-            .get(&object_id)
+            .get(&storage_id)
             .map(Vec::as_slice),
     };
+    if wrapper_id.is_some() {
+        // The retained record already carries this certificate. Its normal
+        // indexed receipt is the durable owner across both daemon versions.
+        let stored = bytes.ok_or_else(|| Fail::from(E2eeReplyCode::InvalidFragment))?;
+        let invalid = || Fail::from(E2eeReplyCode::InvalidFragment);
+        let certificate = agenc_relay_e2ee::objects::sequencing::terminal_certificate_view(stored)
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+        if certificate.object_id().map_err(|_| invalid())?.as_bytes() != &object_id {
+            return Err(invalid());
+        }
+        let certificate = certificate
+            .encode()
+            .map_err(|_| Fail::from(E2eeReplyCode::RateLimited))?;
+        return page(exec, vec![certificate], EmptyKind::Objects)
+            .map(|outcome| super::Prepared::Complete(Box::new(outcome)));
+    }
     let bytes = bytes
-        .filter(|bytes| {
-            super::recovery_read::permitted(exec, &conversation_id, bytes)
-                && super::membership::readable(exec, &conversation_id, bytes)
-                && (CompanionCoordinator::kind_of(bytes) != Some(ArcWireObjectKind::Policy)
-                    || super::policy::readable(exec, &conversation_id, &object_id))
-        })
+        .filter(|bytes| readable_object(exec, &conversation_id, &object_id, bytes))
         .map(<[u8]>::to_vec);
     page(exec, bytes.into_iter().collect(), EmptyKind::Objects)
         .map(|outcome| super::Prepared::Complete(Box::new(outcome)))
+}
+
+/// A separately cached certificate must go through its retained wrapper on
+/// the originating route. Other durable objects keep their object-specific
+/// recovery, membership and policy checks.
+fn readable_object(
+    exec: &Exec<'_>,
+    conversation: &[u8; 32],
+    object: &[u8; 32],
+    bytes: &[u8],
+) -> bool {
+    let kind = CompanionCoordinator::kind_of(bytes);
+    !kind.is_some_and(ArcWireObjectKind::is_terminal_certificate)
+        && super::recovery_read::permitted(exec, conversation, bytes)
+        && super::membership::readable(exec, conversation, bytes)
+        && (kind != Some(ArcWireObjectKind::Policy)
+            || super::policy::readable(exec, conversation, object))
 }
 
 /// `fetch_authorizations`: the candidate's retained approvals in their

@@ -116,6 +116,18 @@ tls_enum! {
 }
 
 impl ArcWireObjectKind {
+    /// Standalone Commit and ReInit terminal certificates named in §12.
+    #[must_use]
+    pub const fn is_terminal_certificate(self) -> bool {
+        matches!(
+            self,
+            Self::FinalizationCertificate
+                | Self::AbortCertificate
+                | Self::ReinitActivationCertificate
+                | Self::ReinitAbortCertificate
+        )
+    }
+
     /// The hard complete-object maximum for this kind, including the
     /// six-byte envelope (Sections 11.4 and 16).
     #[must_use]
@@ -251,6 +263,52 @@ impl<'a> ArcWireObjectRef<'a> {
         Ok(Self { kind, body })
     }
 
+    /// Reframe an existing encoded body under its registered type. The body
+    /// is borrowed. Callers verify its contents separately.
+    pub(crate) fn from_body(kind: ArcWireObjectKind, body: &'a [u8]) -> Result<Self, E2eeError> {
+        if body.is_empty() {
+            return Err(E2eeError::LengthOutOfRange);
+        }
+        let total = body
+            .len()
+            .checked_add(WIRE_OBJECT_ENVELOPE_BYTES)
+            .ok_or(E2eeError::Overflow)?;
+        if total > kind.maximum_object_bytes() {
+            return Err(E2eeError::LimitExceeded);
+        }
+        Ok(Self { kind, body })
+    }
+
+    fn header(self) -> Result<[u8; WIRE_OBJECT_ENVELOPE_BYTES], E2eeError> {
+        let [v0, v1] = PROFILE_VERSION.to_be_bytes();
+        let [_, a, b, c] = u32::try_from(self.body.len())
+            .map_err(|_| E2eeError::Overflow)?
+            .to_be_bytes();
+        Ok([v0, v1, self.kind.value(), a, b, c])
+    }
+
+    /// Hash the canonical envelope header and the borrowed body without
+    /// allocating another complete object.
+    pub fn object_id(self) -> Result<ObjectId, E2eeError> {
+        let digest = Sha256::new()
+            .chain_update(self.header()?)
+            .chain_update(self.body)
+            .finalize();
+        Ok(ObjectId(digest.into()))
+    }
+
+    /// Materialize the full wire envelope with one bounded allocation.
+    pub fn encode(self) -> Result<Vec<u8>, E2eeError> {
+        let header = self.header()?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(header.len() + self.body.len())
+            .map_err(|_| E2eeError::BudgetExceeded)?;
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(self.body);
+        Ok(bytes)
+    }
+
     /// The verified outer kind.
     #[must_use]
     pub const fn kind(self) -> ArcWireObjectKind {
@@ -310,7 +368,7 @@ impl ArcWireObject {
 
     /// Computes the transport object identifier.
     pub fn object_id(&self) -> Result<ObjectId, E2eeError> {
-        Ok(ObjectId::compute(&self.encode()?))
+        ArcWireObjectRef::from(self).object_id()
     }
 
     /// Reads the kind and declared body length of a complete encoding

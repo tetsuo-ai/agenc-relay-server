@@ -13,7 +13,7 @@ use crate::e2ee::coordinator::tests::support::private_message_bytes;
 use agenc_relay_crypto::{Ed25519Signature, verify_canonical};
 use agenc_relay_e2ee::objects::aad::ArcApplicationAad;
 use agenc_relay_e2ee::objects::conversation::ArcSequencerCredential;
-use agenc_relay_e2ee::objects::sequencing::{ArcCandidateReceipt, ArcSequencerRecord};
+use agenc_relay_e2ee::objects::sequencing::ArcCandidateReceipt;
 use agenc_relay_storage::e2ee_records::RouteRow;
 use agenc_relay_storage::{PersistentRecordValue, TableId};
 
@@ -148,34 +148,8 @@ pub(super) fn stored_pin(harness: &Harness, conversation: [u8; 32]) -> TestResul
 
 /// The credential the terminal record of `result` names.
 pub(super) fn record_signer(harness: &Harness, result: &ResultBody) -> TestResult<[u8; 32]> {
-    let (ResultBody::Finalized(_, _, _, id)
-    | ResultBody::Aborted(_, _, _, id)
-    | ResultBody::ReinitActivated(_, _, _, id)
-    | ResultBody::ReinitAborted(_, _, _, id)) = result
-    else {
-        return Err("terminal result".into());
-    };
-    let bytes = harness
-        .coordinator
-        .state
-        .objects
-        .get(id)
-        .ok_or("record object")?;
-    let mut budget = DecodeBudget::new(1 << 22, 1 << 16);
-    let object = agenc_relay_e2ee::object::ArcWireObject::decode_kind(
-        bytes,
-        Some(ArcWireObjectKind::SequencerRecord),
-        &mut budget,
-    )?;
-    Ok(
-        match ArcSequencerRecord::decode_exact(object.body(), &mut budget)? {
-            ArcSequencerRecord::Finalization(value) => value.tbs.sequencer_key_id,
-            ArcSequencerRecord::Abort(value) => value.tbs.sequencer_key_id,
-            ArcSequencerRecord::ReinitActivation(value) => value.tbs.sequencer_key_id,
-            ArcSequencerRecord::ReinitAbort(value) => value.tbs.sequencer_key_id,
-            _ => return Err("terminal record".into()),
-        },
-    )
+    let record = super::terminal_record(harness, result)?;
+    Ok(agenc_relay_e2ee::record_authentication::declared_position(&record).sequencer_credential_id)
 }
 
 /// The conversation's pin and blocked marker in memory.

@@ -311,6 +311,28 @@ fn reinit_with_real_clients(
     )?;
     assert_same_terminal(&lines, completion)?;
 
+    fetch_terminal_certificate(
+        &mut clients.bob,
+        &mut clients.bob_keys,
+        clients.bound.conversation,
+        completion.first().ok_or("missing terminal completion")?,
+        ArcWireObjectKind::ReinitActivationCertificate,
+    )?;
+
+    // The preceding successful fetch has persisted a replay response. The
+    // successor is a live, distinct route and does not own the old proof.
+    let label = clients.bob_keys.label();
+    let certificate = hash_at(completion, "REINIT-ACTIVATED", 6)?;
+    clients.bob.send(&format!(
+        "@label={label} EGROUP FETCH OBJECT {} {}",
+        base64url_encode(&target.conversation),
+        base64url_encode(&certificate)
+    ))?;
+    assert_contains(
+        &labeled_reply(&mut clients.bob, &label)?,
+        " EGROUP EMPTY OBJECTS",
+    )?;
+
     // The activation installed the successor on the bound route, so it
     // takes traffic through the daemons with no further reservation or
     // binding (companion 13.8): alice's application message on the route
@@ -524,6 +546,13 @@ fn reinit_abort_with_real_clients(network: &Network) -> TestResult {
         submit_abort(&mut clients, &staged, &core, Voter::Bob),
     )?;
     let completion = std::slice::from_ref(only_completion(&second, "REINIT-ABORTED")?);
+    fetch_terminal_certificate(
+        &mut clients.bob,
+        &mut clients.bob_keys,
+        conversation,
+        completion.first().ok_or("missing terminal completion")?,
+        ArcWireObjectKind::ReinitAbortCertificate,
+    )?;
     assert_eq!(hash_at(completion, "REINIT-ABORTED", 3)?, conversation);
     assert_eq!(hash_at(completion, "REINIT-ABORTED", 4)?, staged.attempt_id);
     assert_eq!(hash_at(completion, "REINIT-ABORTED", 5)?, abort_id);

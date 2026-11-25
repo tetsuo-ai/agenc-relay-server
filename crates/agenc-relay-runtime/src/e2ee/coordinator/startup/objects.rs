@@ -42,6 +42,7 @@ impl Restore {
             return Err(CompanionFault::Storage);
         }
         let row = ObjectRow::decode(value.body()).map_err(|_| CompanionFault::Storage)?;
+        let kind = row.kind().map_err(|_| CompanionFault::Storage)?;
         if row.key().map_err(|_| CompanionFault::Storage)? != *key {
             return Err(CompanionFault::Storage);
         }
@@ -50,7 +51,7 @@ impl Restore {
             .try_into()
             .map_err(|_| CompanionFault::Storage)?;
         if let Some(selection) = &self.selection
-            && !selection.retain(&id, row.kind().map_err(|_| CompanionFault::Storage)?)?
+            && !selection.retain(&id, kind)?
         {
             return Ok(());
         }
@@ -69,7 +70,7 @@ impl Restore {
             return Err(CompanionFault::Ceiling);
         }
         if let Some(selection) = &self.selection {
-            let memory = selection.reserve(row.bytes.capacity())?;
+            let memory = selection.reserve(kind, row.bytes.capacity(), &row.bytes)?;
             self.memory.insert(id, memory);
         }
         self.values.insert(id, row.bytes);

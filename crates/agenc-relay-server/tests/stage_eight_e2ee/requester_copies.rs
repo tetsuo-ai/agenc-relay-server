@@ -83,7 +83,14 @@ fn copies_on_the_requesters_edge(network: &Network) -> TestResult {
         base64url_encode(&activation)
     );
     read_copy(&mut carol, "carol", &finalized)?;
-    read_copy(&mut bob, "bob", &finalized)?;
+    let notification = read_copy(&mut bob, "bob", &finalized)?;
+    fetch_terminal_certificate(
+        &mut bob,
+        &mut bob_keys,
+        bound.conversation,
+        &notification,
+        ArcWireObjectKind::FinalizationCertificate,
+    )?;
 
     // alice sequences a candidate and withdraws it with both council votes.
     let prior = (1, activation);
@@ -112,6 +119,14 @@ fn copies_on_the_requesters_edge(network: &Network) -> TestResult {
         let copy = read_copy(sink, who, &format!(" EGROUP ABORTED {conversation} "))?;
         assert_same_terminal(std::slice::from_ref(&copy), std::slice::from_ref(&aborted))?;
     }
+
+    fetch_terminal_certificate(
+        &mut alice,
+        &mut alice_keys,
+        bound.conversation,
+        &aborted,
+        ArcWireObjectKind::AbortCertificate,
+    )?;
 
     // alice acknowledges and finalizes a close-intent Commit at the same
     // position, then closes the conversation under it.

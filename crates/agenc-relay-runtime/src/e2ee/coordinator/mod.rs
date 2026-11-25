@@ -206,6 +206,9 @@ pub struct CompanionState {
     reservations: reservations::Leases,
     /// Sequencer logs by conversation.
     pub logs: BTreeMap<[u8; 32], SequencerLog>,
+    /// (Originating conversation, standalone terminal ID) to its retained
+    /// history wrapper. Index ownership follows the wrapper's lifetime.
+    terminal_certificates: BTreeMap<([u8; 32], [u8; 32]), [u8; 32]>,
     /// Lifecycles by conversation.
     pub lifecycles: BTreeMap<[u8; 32], Lifecycle>,
     /// The directory.

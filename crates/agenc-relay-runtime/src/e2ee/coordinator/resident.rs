@@ -72,11 +72,8 @@ impl Prepared {
         if total > MAX_RETAINED_OBJECT_BYTES {
             return Err(Code::RateLimited);
         }
-        let capacity = row
-            .bytes
-            .capacity()
-            .checked_add(128)
-            .ok_or(Code::RateLimited)?;
+        let capacity =
+            object_capacity(kind, row.bytes.capacity(), &row.bytes).ok_or(Code::RateLimited)?;
         let memory = backing.reserve(capacity).map_err(|_| Code::RateLimited)?;
         self.objects.insert(id, row.bytes);
         self.memory.insert(id, memory);
@@ -118,17 +115,32 @@ pub(super) fn prepare(
     Ok(prepared)
 }
 
-/// These objects can be read from durable storage on demand. Mailbox owners
-/// explicitly select the bytes they need, and a grant keeps typed metadata.
+/// Budget the resident maps and a complete sparse index node for each retained
+/// terminal wrapper. The node stores up to eleven 96-byte entries and its
+/// child pointers. This upper bound also covers its allocation and alignment.
+pub(super) fn object_capacity(kind: Kind, capacity: usize, bytes: &[u8]) -> Option<usize> {
+    let base = capacity.checked_add(128)?;
+    if kind == Kind::SequencerRecord
+        && agenc_relay_e2ee::objects::sequencing::terminal_certificate_view(bytes)
+            .is_ok_and(|view| view.is_some())
+    {
+        base.checked_add(2048)
+    } else {
+        Some(base)
+    }
+}
+
+/// On-demand bodies stay on disk unless an owner explicitly requests the bytes.
 pub(super) fn is_cold(kind: Kind) -> bool {
-    matches!(
-        kind,
-        Kind::ApplicationMls
-            | Kind::WelcomeMls
-            | Kind::StagedReinit
-            | Kind::FederationEvent
-            | Kind::Reservation
-    )
+    kind.is_terminal_certificate()
+        || matches!(
+            kind,
+            Kind::ApplicationMls
+                | Kind::WelcomeMls
+                | Kind::StagedReinit
+                | Kind::FederationEvent
+                | Kind::Reservation
+        )
 }
 
 /// Mailbox retirement releases only the memory copy; stored bodies have independent owners.

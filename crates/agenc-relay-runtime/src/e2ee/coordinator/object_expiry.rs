@@ -319,11 +319,27 @@ fn release(state: &mut CompanionState, change: &Change) {
     let Some(bytes) = state.objects.remove(&change.id) else {
         return;
     };
-    state.object_memory.remove(&change.id);
     state.object_bytes = state.object_bytes.saturating_sub(bytes.len());
     if change.kind == ArcWireObjectKind::DeviceRoster.value() {
         super::roster_snapshots::forget(state, &change.id, &bytes);
     }
+    if change.kind == ArcWireObjectKind::SequencerRecord.value()
+        && let Ok(Some(certificate)) =
+            agenc_relay_e2ee::objects::sequencing::terminal_certificate_view(&bytes)
+        && let Ok((position, _)) =
+            agenc_relay_e2ee::record_authentication::declared_certificate_position(certificate)
+        && let Ok(id) = certificate.object_id()
+    {
+        let key = (position.conversation_id, *id.as_bytes());
+        if state.terminal_certificates.get(&key) == Some(&change.id) {
+            state.terminal_certificates.remove(&key);
+            if state.terminal_certificates.is_empty() {
+                // Release the empty root allocation before the last wrapper's permit.
+                state.terminal_certificates.clear();
+            }
+        }
+    }
+    state.object_memory.remove(&change.id);
 }
 
 /// The `object-expiry/v1` row this pass stages at the batch revision.

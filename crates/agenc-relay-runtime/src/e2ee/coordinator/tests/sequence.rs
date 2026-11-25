@@ -248,31 +248,93 @@ fn reload_preserves_counted_votes_after_the_signer_retires() -> TestResult {
 
 /// Reads the signed certificate clients fetch and checks its complete vote vector.
 fn assert_certificate_votes(
-    harness: &Harness,
+    harness: &mut Harness,
     result: &ResultBody,
     mut expected: Vec<ArcFinalityVote>,
 ) -> TestResult {
     use agenc_relay_e2ee::objects::sequencing::ArcSequencerRecord;
 
-    let (ResultBody::Finalized(_, _, _, record_id)
-    | ResultBody::Aborted(_, _, _, record_id)
-    | ResultBody::ReinitActivated(_, _, _, record_id)
-    | ResultBody::ReinitAborted(_, _, _, record_id)) = result
-    else {
-        return Err("expected a terminal result".into());
+    let (conversation, certificate_id, kind) = match result {
+        ResultBody::Finalized(c, _, _, id) => (c, id, ArcWireObjectKind::FinalizationCertificate),
+        ResultBody::Aborted(c, _, _, id) => (c, id, ArcWireObjectKind::AbortCertificate),
+        ResultBody::ReinitActivated(c, _, _, id) => {
+            (c, id, ArcWireObjectKind::ReinitActivationCertificate)
+        }
+        ResultBody::ReinitAborted(c, _, _, id) => {
+            (c, id, ArcWireObjectKind::ReinitAbortCertificate)
+        }
+        _ => return Err("expected a terminal result".into()),
     };
-    let bytes = harness
+    let wrapper_id = *harness
+        .coordinator
+        .state
+        .conversations
+        .get(conversation)
+        .and_then(|known| known.records.last_key_value())
+        .ok_or("terminal history row")?
+        .1;
+    assert_ne!(&wrapper_id, certificate_id);
+    let wrapper = harness
         .coordinator
         .state
         .objects
-        .get(record_id)
-        .ok_or("the certificate object")?;
+        .get(&wrapper_id)
+        .ok_or("retained history wrapper")?
+        .clone();
     let mut budget = DecodeBudget::new(1 << 20, 1 << 12);
     let object = agenc_relay_e2ee::object::ArcWireObject::decode_kind(
-        bytes,
+        &wrapper,
         Some(ArcWireObjectKind::SequencerRecord),
         &mut budget,
     )?;
+    assert_eq!(
+        super::super::resident::object_capacity(
+            ArcWireObjectKind::SequencerRecord,
+            wrapper.len(),
+            &wrapper
+        ),
+        wrapper.len().checked_add(128 + 2048)
+    );
+    let earlier = harness
+        .coordinator
+        .state
+        .conversations
+        .get(conversation)
+        .ok_or("conversation log")?
+        .records
+        .first_key_value()
+        .ok_or("history entry")?
+        .1;
+    let nonterminal = harness
+        .coordinator
+        .state
+        .objects
+        .get(earlier)
+        .ok_or("nonterminal history wrapper")?;
+    assert_eq!(
+        super::super::resident::object_capacity(
+            ArcWireObjectKind::SequencerRecord,
+            nonterminal.len(),
+            nonterminal
+        ),
+        nonterminal.len().checked_add(128)
+    );
+    let mut reopened = harness.reloaded()?;
+    let mut params = conversation.to_vec();
+    params.extend_from_slice(certificate_id);
+    for relay in [harness, &mut reopened] {
+        let page = ok(relay.run(Op::FetchObject, &params, None)?)?;
+        assert_eq!(page.result, ResultBody::ObjectPage);
+        let [response] = page.responses.as_slice() else {
+            return Err("one standalone certificate".into());
+        };
+        assert_eq!(&object_id(&response.bytes), certificate_id);
+        let fetched = agenc_relay_e2ee::object::ArcWireObjectRef::parse(&response.bytes)?;
+        assert_eq!(fetched.kind(), kind);
+        // The union has a one-byte discriminant, followed by the exact signed body.
+        assert_eq!(Some(fetched.body()), object.body().get(1..));
+    }
+    object_expiry::assert_terminal_retirement(&wrapper, *conversation, *certificate_id)?;
     let votes = match ArcSequencerRecord::decode_exact(object.body(), &mut budget)? {
         ArcSequencerRecord::Finalization(certificate) => certificate.tbs.request.votes,
         ArcSequencerRecord::Abort(certificate) => certificate.tbs.request.votes,
@@ -648,7 +710,16 @@ fn a_candidate_is_sequenced_authorized_acknowledged_and_finalized() -> TestResul
         .conversations
         .get(&conversation)
         .ok_or("state")?;
-    assert_eq!(state.records.get(&1), Some(&record_id));
+    let wrapper_id = state.records.get(&1).ok_or("finalized receipt record")?;
+    assert_ne!(wrapper_id, &record_id);
+    assert_eq!(
+        harness
+            .coordinator
+            .state
+            .terminal_certificates
+            .get(&(conversation, record_id)),
+        Some(wrapper_id)
+    );
     assert!(state.proofs.contains_key(&finalization_id));
 
     // The retained records page back in route order; the commit object is
@@ -1121,7 +1192,7 @@ mod reinit {
             Some(&abort(vec![second_abort_vote.clone()])?),
         )?)?;
         assert_certificate_votes(
-            &harness,
+            &mut harness,
             &outcome.result,
             vec![abort_vote, second_abort_vote],
         )?;
@@ -1214,7 +1285,7 @@ mod reinit {
             Some(&activate(vec![second_activate_vote.clone()])?),
         )?)?;
         assert_certificate_votes(
-            &harness,
+            &mut harness,
             &outcome.result,
             vec![activate_vote, second_activate_vote],
         )?;
@@ -1448,7 +1519,7 @@ fn a_finalization_waits_for_the_quorum_of_the_published_council() -> TestResult 
             )
         })
         .collect::<TestResult<Vec<_>>>()?;
-    assert_certificate_votes(&harness, &outcome.result, expected)?;
+    assert_certificate_votes(&mut harness, &outcome.result, expected)?;
     Ok(())
 }
 
@@ -1565,7 +1636,7 @@ fn an_abort_certificate_keeps_votes_from_separate_requests_and_a_reload() -> Tes
             assert!(matches!(outcome.result, ResultBody::Pending(..)));
             harness = harness.reloaded()?;
         } else {
-            assert_certificate_votes(&harness, &outcome.result, votes.clone())?;
+            assert_certificate_votes(&mut harness, &outcome.result, votes.clone())?;
         }
     }
     Ok(())
@@ -1880,7 +1951,7 @@ fn a_reloaded_coordinator_completes_a_quorum_it_had_begun() -> TestResult {
             )
         })
         .collect::<TestResult<Vec<_>>>()?;
-    assert_certificate_votes(&reloaded, &outcome.result, expected)?;
+    assert_certificate_votes(&mut reloaded, &outcome.result, expected)?;
     Ok(())
 }
 
