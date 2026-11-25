@@ -16,9 +16,19 @@ value is unpadded base64url of SHA-256 over the ASCII string
 `agenc-chat initial root profile v1`, the 32-byte base federation v1 profile
 hash, the 32-byte ARC-MLS v1 profile hash, and SHA-256 of the exact committed
 UTF-8 bytes of this document, concatenated in that order. Clients pin the
-supported value and explicitly request the capability. An edge offers it only
-while its authenticated coordinator link supports this profile. A listening
-coordinator may offer it directly. New account creation additionally requires
+supported value and explicitly request the capability. A fresh connection's
+ordinary `CAP LS 302` and unsolicited notifications use the base listener
+listing. This preserves clients that validate the entire base capability
+registry. After its base 302 listing, a protected client sends exactly
+`CAP REQ :agenc.ag/initial-root` on that connection. On first successful
+discovery the listener sends `CAP NEW :agenc.ag/initial-root=v1.<profile>`
+followed by `CAP ACK :agenc.ag/initial-root`, using the ordinary CAP target
+and server prefix. Only that connection sees the new offer. The client
+requires the exact NEW value and ACK before sending any protected transfer.
+If the profile is unavailable the same request receives the ordinary NAK.
+An edge may offer it only while its current authenticated coordinator link
+supports this profile. A listening coordinator may offer it directly.
+New account creation additionally requires
 `agenc.ag/account-create=v1`. A client requesting protected creation stops on
 an absent capability, NAK, CAP DEL, descriptor change or uncertain transfer.
 It must never retry with unguarded creation.
