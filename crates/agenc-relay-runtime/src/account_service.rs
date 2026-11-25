@@ -44,6 +44,9 @@ use agenc_relay_types::{
 };
 
 use crate::RuntimeError;
+mod command;
+pub(crate) use command::AccountCommand;
+
 use crate::admission::{BucketDemand, BucketKey, BucketKind, LoginHashKey};
 use crate::bridge::crypto::{
     AccountOpenJob, CreationFinishJob, CreationFinishSealJob, CreationPreflightJob,
@@ -6887,9 +6890,10 @@ pub(crate) fn render_sasl_actions(
 
 pub(crate) fn render_account_actions(
     prefix: &str,
-    kind: AccountCarrierKind,
+    kind: impl Into<AccountCommand>,
     actions: Vec<AccountCarrierAction>,
 ) -> Result<Vec<WireMessage>, RuntimeError> {
+    let kind = kind.into();
     let mut frames = Vec::new();
     frames
         .try_reserve_exact(actions.len())
@@ -6902,9 +6906,14 @@ pub(crate) fn render_account_actions(
 
 fn render_account_action(
     prefix: &str,
-    kind: AccountCarrierKind,
+    kind: impl Into<AccountCommand>,
     action: AccountCarrierAction,
 ) -> Result<WireMessage, RuntimeError> {
+    let kind = kind.into();
+    if let AccountCommand::InitialRoot(family) = kind {
+        return WireMessage::initial_root_transfer(prefix, family, action)
+            .map_err(|_| RuntimeError::InvalidValue);
+    }
     let frame = match action {
         AccountCarrierAction::Ready(phase) => WireMessage::new(
             prefix,
@@ -6940,17 +6949,14 @@ const fn account_phase_name(phase: AccountCarrierPhase) -> &'static str {
 
 pub(crate) fn account_failure(
     prefix: &str,
-    kind: AccountCarrierKind,
+    kind: impl Into<AccountCommand>,
 ) -> Result<WireMessage, RuntimeError> {
-    let description = match kind {
-        AccountCarrierKind::Create => "Account creation unavailable",
-        AccountCarrierKind::Credentials => "Credential change unavailable",
-    };
+    let kind = kind.into();
     WireMessage::new(
         prefix,
         "FAIL",
         &[kind.command(), "UNAVAILABLE"],
-        Some(description),
+        Some(kind.unavailable()),
     )
     .map_err(|_| RuntimeError::InvalidValue)
 }

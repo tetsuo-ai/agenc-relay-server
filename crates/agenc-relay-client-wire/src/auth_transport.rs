@@ -670,6 +670,19 @@ impl AccountTransfer {
         }
     }
 
+    /// Selects a negotiated guarded creation only before a legacy START has taken this connection.
+    pub fn select_guarded_creation(&mut self) -> Result<(), AuthTransportError> {
+        if self.initial_root == Some(InitialRootCarrier::GuardedCreation) {
+            return Ok(());
+        }
+        if self.command != AccountCarrierKind::Create.command() || self.state != AccountState::Idle
+        {
+            return Err(AuthTransportError::BadState);
+        }
+        *self = Self::initial_root(InitialRootCarrier::GuardedCreation);
+        Ok(())
+    }
+
     /// Returns the exact command owned by this carrier.
     #[must_use]
     pub const fn command(&self) -> &'static str {
@@ -1206,7 +1219,17 @@ mod tests {
     #[test]
     fn initial_root_transfers_admit_only_the_requested_family_before_allocating()
     -> Result<(), Box<dyn std::error::Error>> {
-        use super::{AccountCarrierAction as Action, InitialRootCarrier as Carrier};
+        use super::{
+            AccountCarrierAction as Action, AccountCarrierKind, InitialRootCarrier as Carrier,
+        };
+        let mut unused = AccountTransfer::new(AccountCarrierKind::Create)?;
+        unused.select_guarded_creation()?;
+        assert!(unused.client("START", Some("4726"), false, 0).is_err());
+        let mut legacy = AccountTransfer::new(AccountCarrierKind::Create)?;
+        legacy.client("START", Some("4726"), false, 0)?;
+        assert!(legacy.select_guarded_creation().is_err());
+        let mut credential = AccountTransfer::new(AccountCarrierKind::Credentials)?;
+        assert!(credential.select_guarded_creation().is_err());
         for (carrier, refused) in [
             (Carrier::GuardedCreation, "START"),
             (Carrier::Claim, "FINISH"),

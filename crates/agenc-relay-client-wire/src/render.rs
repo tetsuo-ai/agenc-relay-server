@@ -204,12 +204,59 @@ impl WireMessage {
         middle: &[&str],
         trailing: Option<&str>,
     ) -> Result<Self, RenderError> {
+        validate_command(command)?;
+        Self::from_command_fields(prefix, command, middle, trailing)
+    }
+
+    /// Renders an explicitly negotiated prospective account operation's validated transfer action.
+    pub fn initial_root_transfer(
+        prefix: &str,
+        family: crate::InitialRootCarrier,
+        action: crate::AccountCarrierAction,
+    ) -> Result<Self, RenderError> {
+        use crate::{
+            AccountCarrierAction as Action, AccountCarrierPhase as Phase, InitialRootCarrier,
+        };
+        let frame =
+            |middle: &[&str]| Self::from_command_fields(prefix, family.command(), middle, None);
+        match action {
+            Action::Ready(Phase::Start) | Action::ResponseStart(Phase::Start)
+                if family == InitialRootCarrier::Claim =>
+            {
+                Err(RenderError::InvalidSyntax)
+            }
+            Action::Ready(phase) => frame(&["READY", family.ready(phase), "4726"]),
+            Action::ResponseStart(Phase::Start) => frame(&["CHALLENGE", "4342"]),
+            Action::ResponseStart(Phase::Finish) => frame(&["COMPLETE", "4342"]),
+            Action::Data(chunk) => {
+                let bytes = chunk.expose();
+                if bytes.is_empty()
+                    || bytes.len() > crate::auth_transport::AUTH_CHUNK_CHARACTERS
+                    || !bytes
+                        .iter()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                {
+                    return Err(RenderError::InvalidSyntax);
+                }
+                let data = std::str::from_utf8(bytes).map_err(|_| RenderError::InvalidSyntax)?;
+                frame(&["DATA", data])
+            }
+            Action::End => frame(&["END"]),
+            Action::RequestEnvelope { .. } => Err(RenderError::InvalidSyntax),
+        }
+    }
+
+    fn from_command_fields(
+        prefix: &str,
+        command: &str,
+        middle: &[&str],
+        trailing: Option<&str>,
+    ) -> Result<Self, RenderError> {
         validate_parameter_count(middle, trailing)?;
         if command_bytes(prefix, command, middle, trailing)? > MAX_COMMAND_BYTES {
             return Err(RenderError::LineBudget);
         }
         validate_prefix(prefix)?;
-        validate_command(command)?;
         validate_parameters(middle, trailing)?;
         let prefix = copy_string(prefix)?;
         let command = copy_string(command)?;
