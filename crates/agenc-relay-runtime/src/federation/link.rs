@@ -218,7 +218,7 @@ pub fn parse_line(line: &str, expected_prefix: &str) -> Result<ParsedLine, ReadF
     parse_line_for_profile(line, expected_prefix, FederationProfile::Base)
 }
 
-fn parse_line_for_profile(
+pub(super) fn parse_line_for_profile(
     line: &str,
     expected_prefix: &str,
     profile: FederationProfile,

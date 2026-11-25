@@ -12,6 +12,8 @@ use agenc_relay_domain::federation::{OriginKey, OriginStatus};
 
 use super::*;
 
+mod quota;
+
 const SEED: u8 = 56;
 
 /// One coordinator over real storage, rebuilt from it on demand, and the
@@ -35,7 +37,11 @@ impl Restartable {
 
     /// Rebuilds the coordinator from what storage holds.
     async fn restart(&mut self) -> TestResult {
-        let mut coordinator = standalone_coordinator(self.edge.server_id);
+        self.restart_with(standalone_coordinator(self.edge.server_id))
+            .await
+    }
+
+    async fn restart_with(&mut self, mut coordinator: FederationCoordinator) -> TestResult {
         coordinator.startup(self.core.context_mut()?);
         for _ in 0..64 {
             if coordinator.loaded() {
@@ -57,7 +63,16 @@ impl Restartable {
 
     /// Establishes link `number` and resets the edge's origins on it.
     fn link(&mut self, number: u64) -> TestResult {
-        let (handle, queue) = link_queue(1 << 20);
+        self.link_with_profile(number, agenc_relay_federation_wire::FederationProfile::Base)
+    }
+
+    fn link_with_profile(
+        &mut self,
+        number: u64,
+        profile: agenc_relay_federation_wire::FederationProfile,
+    ) -> TestResult {
+        let (mut handle, queue) = link_queue(1 << 20);
+        handle.profile = profile;
         self.edge.handle = handle.clone();
         self.edge.queue = queue;
         self.edge.link = LinkId::new(number);
@@ -155,9 +170,17 @@ impl Restartable {
         let mut frames = Vec::new();
         while self.edge.handle.queued_bytes() != 0 {
             let line = self.edge.queue.recv().await.ok_or("the link closed")?;
-            let text = line.as_str().trim_end_matches("\r\n").to_owned();
-            frames
-                .push(parse_frame(&text, COORDINATOR_NAME).map_err(|e| format!("{e:?}: {text}"))?);
+            let text = line.as_str().trim_end_matches("\r\n");
+            let line = crate::federation::link::parse_line_for_profile(
+                text,
+                COORDINATOR_NAME,
+                self.edge.handle.profile,
+            )
+            .map_err(|error| format!("queued federation frame: {error:?}"))?;
+            let ParsedLine::Base(frame) = line else {
+                return Err("unexpected companion frame".into());
+            };
+            frames.push(frame);
         }
         if !self
             .coordinator

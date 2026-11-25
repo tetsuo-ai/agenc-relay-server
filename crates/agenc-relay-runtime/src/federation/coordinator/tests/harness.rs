@@ -1763,14 +1763,27 @@ async fn resync_expired_request_fences_without_rewinding_the_origin() -> TestRes
     let entry = coordinator.origins.origin(&key).ok_or("origin")?;
     assert_eq!(
         entry.status,
-        agenc_relay_domain::federation::OriginStatus::Fenced
+        agenc_relay_domain::federation::OriginStatus::Live
     );
     assert_eq!(entry.next_sequence, 3);
     assert_eq!(
         context.pending_len(),
         1,
-        "the fence must be durable before its answer"
+        "the fence waits for its own commit"
     );
+    coordinator.batch_applied(context);
+    assert_eq!(
+        coordinator.origins.origin(&key).ok_or("origin")?.status,
+        agenc_relay_domain::federation::OriginStatus::Live
+    );
+    fixture.commit_staged_batch().await?;
+    coordinator.batch_applied(fixture.context_mut()?);
+    let entry = coordinator.origins.origin(&key).ok_or("origin")?;
+    assert_eq!(
+        entry.status,
+        agenc_relay_domain::federation::OriginStatus::Fenced
+    );
+    assert_eq!(entry.next_sequence, 3);
     Ok(())
 }
 
@@ -2743,6 +2756,7 @@ async fn an_origin_acknowledgement_whose_batch_storage_refused_retires_the_link(
             object_id: None,
         }),
         closed_carrier: None,
+        terminal: None,
         _charge: None,
     });
     coordinator.batch_rejected(context);
