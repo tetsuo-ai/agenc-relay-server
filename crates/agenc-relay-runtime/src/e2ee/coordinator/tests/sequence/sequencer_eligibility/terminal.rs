@@ -88,26 +88,7 @@ fn ordinary(abort: bool) -> TestResult<Prepared> {
 }
 
 fn verify_terminal(harness: &Harness, result: &ResultBody) -> TestResult {
-    let (ResultBody::Finalized(_, _, _, id)
-    | ResultBody::Aborted(_, _, _, id)
-    | ResultBody::ReinitActivated(_, _, _, id)
-    | ResultBody::ReinitAborted(_, _, _, id)) = result
-    else {
-        return Err("terminal result".into());
-    };
-    let bytes = harness
-        .coordinator
-        .state
-        .objects
-        .get(id)
-        .ok_or("record object")?;
-    let mut budget = DecodeBudget::new(1 << 22, 1 << 16);
-    let object = agenc_relay_e2ee::object::ArcWireObject::decode_kind(
-        bytes,
-        Some(ArcWireObjectKind::SequencerRecord),
-        &mut budget,
-    )?;
-    let record = ArcSequencerRecord::decode_exact(object.body(), &mut budget)?;
+    let record = super::terminal_record(harness, result)?;
     let (domain, credential_id, tbs, signature) = match record {
         ArcSequencerRecord::Finalization(value) => (
             SignatureDomain::CommitFinalization,

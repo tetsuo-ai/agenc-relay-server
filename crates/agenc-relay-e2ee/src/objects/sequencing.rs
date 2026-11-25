@@ -2,6 +2,7 @@
 //! Welcome delivery objects (companion Sections 12.2 to 12.4).
 
 use crate::error::E2eeError;
+use crate::object::{ArcWireObjectKind, ArcWireObjectRef};
 use crate::tls::{Opaque, Reader, TlsDecode, TlsEncode, TlsVec, Writer, tls_enum, tls_struct};
 
 use super::conversation::{ArcCommitAuthorization, ArcJoinTransitionProofBundle};
@@ -99,6 +100,29 @@ pub enum ArcSequencerRecord {
     ReinitActivation(ArcReInitActivationCertificate),
     /// A ReInit abort certificate.
     ReinitAbort(ArcReInitAbortCertificate),
+}
+
+/// Borrow the canonical standalone envelope from a retained kind-25 history
+/// wrapper. The union discriminator precedes the exact signed certificate
+/// body. This checks framing and bounds. Use the record verifier for authority.
+pub fn terminal_certificate_view(bytes: &[u8]) -> Result<Option<ArcWireObjectRef<'_>>, E2eeError> {
+    let wrapper = ArcWireObjectRef::parse(bytes)?;
+    if wrapper.kind() != ArcWireObjectKind::SequencerRecord {
+        return Err(E2eeError::WrongKind);
+    }
+    let (tag, body) = wrapper.body().split_first().ok_or(E2eeError::Truncated)?;
+    let kind = match ArcSequencerRecordKind::from_value(*tag)? {
+        ArcSequencerRecordKind::FinalizationRecord => ArcWireObjectKind::FinalizationCertificate,
+        ArcSequencerRecordKind::AbortRecord => ArcWireObjectKind::AbortCertificate,
+        ArcSequencerRecordKind::ReinitActivationRecord => {
+            ArcWireObjectKind::ReinitActivationCertificate
+        }
+        ArcSequencerRecordKind::ReinitAbortRecord => ArcWireObjectKind::ReinitAbortCertificate,
+        ArcSequencerRecordKind::CandidateRecord | ArcSequencerRecordKind::ReinitAttemptRecord => {
+            return Ok(None);
+        }
+    };
+    ArcWireObjectRef::from_body(kind, body).map(Some)
 }
 
 impl ArcSequencerRecord {

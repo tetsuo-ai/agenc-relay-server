@@ -27,6 +27,79 @@ fn every_record_arm_authenticates_its_registered_signature_and_semantic_id() -> 
     Ok(())
 }
 
+#[test]
+fn standalone_terminals_preserve_signed_bytes_and_verify_under_their_own_transport_id() -> TestResult
+{
+    use agenc_relay_e2ee::objects::sequencing::terminal_certificate_view;
+    use agenc_relay_e2ee::record_authentication::{
+        authenticate_terminal_certificate, declared_certificate_position,
+    };
+
+    for kind in KINDS {
+        let case = Case::new(kind)?;
+        let wrapper = case.bytes()?;
+        let view = terminal_certificate_view(&wrapper)?;
+        let (kind, expected) = match &case.record {
+            ArcSequencerRecord::Finalization(c) => {
+                (ArcWireObjectKind::FinalizationCertificate, c.encode()?)
+            }
+            ArcSequencerRecord::Abort(c) => (ArcWireObjectKind::AbortCertificate, c.encode()?),
+            ArcSequencerRecord::ReinitActivation(c) => {
+                (ArcWireObjectKind::ReinitActivationCertificate, c.encode()?)
+            }
+            ArcSequencerRecord::ReinitAbort(c) => {
+                (ArcWireObjectKind::ReinitAbortCertificate, c.encode()?)
+            }
+            _ => {
+                assert!(view.is_none());
+                continue;
+            }
+        };
+        let certificate = view.ok_or("missing certificate")?;
+        let bytes = ArcWireObject::new(kind, expected)?.encode()?;
+        assert_eq!(certificate.encode()?, bytes);
+        assert_eq!(certificate.object_id()?, ObjectId::compute(&bytes));
+        assert_ne!(certificate.object_id()?, ObjectId::compute(&wrapper));
+        assert_eq!(
+            declared_certificate_position(certificate)?,
+            (case.expected, case.semantic_id()?)
+        );
+        let (record, proof) = authenticate_terminal_certificate(
+            &bytes,
+            kind,
+            &case.expected,
+            &case.credential,
+            &mut support::budget(),
+        )?;
+        assert_eq!(record, case.record);
+        assert_eq!(proof.object_id(), &certificate.object_id()?);
+        assert_eq!(proof.semantic_id(), &case.semantic_id()?);
+        assert!(
+            authenticate_terminal_certificate(
+                &wrapper,
+                kind,
+                &case.expected,
+                &case.credential,
+                &mut support::budget()
+            )
+            .is_err()
+        );
+        let mut foreign = case.expected;
+        foreign.conversation_id[0] ^= 1;
+        assert!(
+            authenticate_terminal_certificate(
+                &bytes,
+                kind,
+                &foreign,
+                &case.credential,
+                &mut support::budget()
+            )
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
 /// A receipt states its own sequencing second; a terminal certificate
 /// states the second of the receipt it embeds, the only signed time it
 /// carries (companion 12.5.1 reads it for the successor overlap window).

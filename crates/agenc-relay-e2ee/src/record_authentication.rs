@@ -12,10 +12,10 @@ mod fields;
 mod identity;
 
 use crate::error::E2eeError;
-use crate::object::{ArcWireObject, ArcWireObjectKind, ObjectId};
+use crate::object::{ArcWireObject, ArcWireObjectKind, ArcWireObjectRef, ObjectId};
 use crate::objects::sequencing::ArcSequencerRecord;
 use crate::sequencer::VerifiedSequencerCredential;
-use crate::tls::{DecodeBudget, TlsDecode};
+use crate::tls::{DecodeBudget, Reader, TlsDecode};
 
 /// The exact position and credential established by trusted prior history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,6 +105,83 @@ pub fn authenticate_decoded(
         semantic_id,
         object_id: ObjectId::compute(bytes),
     })
+}
+
+/// Read the fixed TBS position and asserted semantic ID shared by registered
+/// terminal certificates. Callers compare these unverified fields with their
+/// own durable history. This inspection allocates no record or vote vectors.
+pub fn declared_certificate_position(
+    certificate: ArcWireObjectRef<'_>,
+) -> Result<(ExpectedRecord, [u8; 32]), E2eeError> {
+    if !certificate.kind().is_terminal_certificate() {
+        return Err(E2eeError::WrongKind);
+    }
+    let mut budget = DecodeBudget::new(0, 0);
+    let mut reader = Reader::new(certificate.body(), &mut budget);
+    if reader.u16()? != crate::limits::PROFILE_VERSION {
+        return Err(E2eeError::ProfileMismatch);
+    }
+    let network_id = reader.fixed()?;
+    let conversation_id = reader.fixed()?;
+    let route_sequence = reader.u64()?;
+    let predecessor_record_id = reader.fixed()?;
+    let semantic_id = reader.fixed()?;
+    let sequencer_credential_id = reader.fixed()?;
+    Ok((
+        ExpectedRecord {
+            network_id,
+            conversation_id,
+            route_sequence,
+            predecessor_record_id,
+            sequencer_credential_id,
+        },
+        semantic_id,
+    ))
+}
+
+/// Authenticate the exact standalone certificate envelope named by a terminal
+/// result or a Welcome proof reference. Both the expected kind and trusted
+/// position come from the caller. The returned transport ID hashes these
+/// complete standalone bytes. The semantic ID and signature are checked by
+/// the same verifier as the retained sequencer history.
+pub fn authenticate_terminal_certificate(
+    bytes: &[u8],
+    expected_kind: ArcWireObjectKind,
+    expected: &ExpectedRecord,
+    credential: &VerifiedSequencerCredential,
+    budget: &mut DecodeBudget,
+) -> Result<(ArcSequencerRecord, AuthenticatedRecord), E2eeError> {
+    use crate::objects::reinit::{ArcReInitAbortCertificate, ArcReInitActivationCertificate};
+    use crate::objects::sequencing::{ArcCommitAbortCertificate, ArcCommitFinalizationCertificate};
+
+    let object = ArcWireObjectRef::parse(bytes)?;
+    if object.kind() != expected_kind {
+        return Err(E2eeError::WrongKind);
+    }
+    let body = object.body();
+    let record = match expected_kind {
+        ArcWireObjectKind::FinalizationCertificate => ArcSequencerRecord::Finalization(
+            ArcCommitFinalizationCertificate::decode_exact(body, budget)?,
+        ),
+        ArcWireObjectKind::AbortCertificate => {
+            ArcSequencerRecord::Abort(ArcCommitAbortCertificate::decode_exact(body, budget)?)
+        }
+        ArcWireObjectKind::ReinitActivationCertificate => ArcSequencerRecord::ReinitActivation(
+            ArcReInitActivationCertificate::decode_exact(body, budget)?,
+        ),
+        ArcWireObjectKind::ReinitAbortCertificate => {
+            ArcSequencerRecord::ReinitAbort(ArcReInitAbortCertificate::decode_exact(body, budget)?)
+        }
+        _ => return Err(E2eeError::WrongKind),
+    };
+    let semantic_id = authenticate_decoded_record(&record, None, expected, credential, budget)?;
+    Ok((
+        record,
+        AuthenticatedRecord {
+            semantic_id,
+            object_id: ObjectId::compute(bytes),
+        },
+    ))
 }
 
 /// Authenticates a complete `sequencer_record` without changing caller state.

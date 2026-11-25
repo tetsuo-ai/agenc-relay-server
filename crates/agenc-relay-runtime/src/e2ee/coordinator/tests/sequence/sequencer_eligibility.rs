@@ -16,6 +16,40 @@ mod rotation;
 mod terminal;
 use super::*;
 
+fn terminal_record(
+    harness: &Harness,
+    result: &ResultBody,
+) -> TestResult<agenc_relay_e2ee::objects::sequencing::ArcSequencerRecord> {
+    use agenc_relay_e2ee::objects::sequencing::ArcSequencerRecord;
+    let (ResultBody::Finalized(conversation, _, _, id)
+    | ResultBody::Aborted(conversation, _, _, id)
+    | ResultBody::ReinitActivated(conversation, _, _, id)
+    | ResultBody::ReinitAborted(conversation, _, _, id)) = result
+    else {
+        return Err("terminal result".into());
+    };
+    let state = &harness.coordinator.state;
+    let wrapper = state
+        .terminal_certificates
+        .get(&(*conversation, *id))
+        .ok_or("registered terminal certificate")?;
+    let bytes = state
+        .objects
+        .get(wrapper)
+        .ok_or("terminal history wrapper")?;
+    let mut budget = DecodeBudget::new(1 << 22, 1 << 16);
+    let object = agenc_relay_e2ee::object::ArcWireObject::decode_kind(
+        bytes,
+        Some(ArcWireObjectKind::SequencerRecord),
+        &mut budget,
+    )?;
+    let record = ArcSequencerRecord::decode_exact(object.body(), &mut budget)?;
+    let certificate = agenc_relay_e2ee::objects::sequencing::terminal_certificate_view(bytes)?
+        .ok_or("certificate")?;
+    assert_eq!(certificate.object_id()?.as_bytes(), id);
+    Ok(record)
+}
+
 /// A key set holding `credentials` exactly as given, assembled without the
 /// shared key-set verifier: each credential is checked only structurally, so
 /// installation's own checks can be exercised on a set that verifier refuses.

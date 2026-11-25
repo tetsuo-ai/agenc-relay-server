@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1103
-reviewed_source_sha256 = "9fcaff19756f4e11b9d62af61a39e8ec8ecae413644dc407139818671474b6bb"
+reviewed_source_sha256 = "90f5598b5f4c5fd081a82f62f250754e41302029eb8e353eeb82955a7dd277f6"
 deferred = []
 
 [[region]]
@@ -306,3 +306,51 @@ end_line = 382
 span_sha256 = "f8e24b30769ae4b16c84664cf259869355ef1bd8077c2bbb77253b390435bd60"
 metric = "branches"
 reason = "An archived claim on a previously bound route retires immediately after recovery."
+
+[[region]]
+id = "standalone-certificate-exact-kind"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/record_authentication.rs"
+item = "authenticate_terminal_certificate"
+source_sha256 = "be2011473799d1f7cb569a2968a6197f7a5a32d47a8e8857aa7e7ee51ebba3a3"
+start_line = 158
+end_line = 160
+span_sha256 = "7c92f9a9f6d3cb01e0a3c69a339ae8e9ac6eef607c9fe353e2df86ba77d1967e"
+metric = "branches"
+reason = "Only the exact standalone certificate kind from the proof reference reaches the sequencer verifier."
+
+[[region]]
+id = "terminal-certificate-retained-scope"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
+item = "certificate_id"
+source_sha256 = "3be22837f1cbbeff7afa0661bee165624a72905a10c2722e731084368945d1f0"
+start_line = 138
+end_line = 146
+span_sha256 = "683a74ebefa61c1505c7f95a126898649783f6655b0e59a3e5d7bf84cb821ee4"
+metric = "branches"
+reason = "Recovered terminal certificates must identify this exact network, log and durable signed position."
+
+[[region]]
+id = "terminal-certificate-row-shape"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
+item = "restore_terminal_certificates"
+source_sha256 = "3be22837f1cbbeff7afa0661bee165624a72905a10c2722e731084368945d1f0"
+start_line = 1556
+end_line = 1558
+span_sha256 = "09e2e8ffc6485855125dafbfbc41c01ab1738260351e92efc34dd099b60ae3da"
+metric = "branches"
+reason = "A committed terminal row with the wrong role raises a recovery error instead of losing its standalone proof."
+
+[[region]]
+id = "terminal-certificate-cached-route-filter"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/ops/sequence.rs"
+item = "readable_object"
+source_sha256 = "d2bf57ea4e6cfab3b31dded8f6a983a39317ccffa6feef5dd07c934c1374d953"
+start_line = 1919
+end_line = 1931
+span_sha256 = "ed15bc2168755eabfc10bf4ce3d58c530dd10b325d35303931818a3c2773347b"
+metric = "regions"
+reason = "A cached standalone certificate cannot bypass its originating log, and other objects retain the existing recovery, membership and policy constraints."

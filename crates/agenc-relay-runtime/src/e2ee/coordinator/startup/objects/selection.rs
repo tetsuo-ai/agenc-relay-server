@@ -71,8 +71,14 @@ impl Selection {
         }
         Ok(!super::super::super::resident::is_cold(kind))
     }
-    pub(super) fn reserve(&self, capacity: usize) -> Result<MemoryPermit, CompanionFault> {
-        let bytes = capacity.checked_add(128).ok_or(CompanionFault::Ceiling)?;
+    pub(super) fn reserve(
+        &self,
+        kind: Kind,
+        capacity: usize,
+        body: &[u8],
+    ) -> Result<MemoryPermit, CompanionFault> {
+        let bytes = super::super::super::resident::object_capacity(kind, capacity, body)
+            .ok_or(CompanionFault::Ceiling)?;
         self.backing
             .reserve(bytes)
             .map_err(|_| CompanionFault::Ceiling)

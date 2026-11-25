@@ -96,6 +96,7 @@ use super::{
 
 const CANDIDATE_RECORD: u16 = 1;
 const FINALIZATION_RECORD: u16 = 2;
+const ABORT_RECORD: u16 = 3;
 const REINIT_ATTEMPT_RECORD: u16 = 4;
 const REINIT_ACTIVATION_RECORD: u16 = 5;
 const REINIT_ABORT_RECORD: u16 = 6;
@@ -109,6 +110,42 @@ struct RecordRow {
     /// Whether the record certifies a terminal.
     terminal: bool,
     predecessor_record_id: [u8; 32],
+}
+
+impl RecordRow {
+    /// Previous stores retained the signed certificate inside a kind-25
+    /// wrapper. Derive its standalone identity only for this exact log row.
+    fn certificate_id(
+        &self,
+        state: &CompanionState,
+        network: &[u8; 32],
+        conversation: &[u8; 32],
+        sequence: u64,
+    ) -> Option<[u8; 32]> {
+        let bytes = state.objects.get(&self.record_object_id)?;
+        let certificate =
+            agenc_relay_e2ee::objects::sequencing::terminal_certificate_view(bytes).ok()??;
+        let (position, semantic_id) =
+            agenc_relay_e2ee::record_authentication::declared_certificate_position(certificate)
+                .ok()?;
+        let kind = match certificate.kind() {
+            ArcWireObjectKind::FinalizationCertificate => FINALIZATION_RECORD,
+            ArcWireObjectKind::AbortCertificate => ABORT_RECORD,
+            ArcWireObjectKind::ReinitActivationCertificate => REINIT_ACTIVATION_RECORD,
+            ArcWireObjectKind::ReinitAbortCertificate => REINIT_ABORT_RECORD,
+            _ => return None,
+        };
+        if position.network_id != *network
+            || position.conversation_id != *conversation
+            || position.route_sequence != sequence
+            || position.predecessor_record_id != self.predecessor_record_id
+            || kind != self.record_kind
+            || semantic_id != self.record_id
+        {
+            return None;
+        }
+        Some(*certificate.object_id().ok()?.as_bytes())
+    }
 }
 
 /// The candidate slot row of one epoch.
@@ -650,6 +687,7 @@ pub(super) fn rebuild(
     }
     restore_successors(state, &network_id, &index)?;
     state.reservations = restore.reservations.finish(state, network_id)?;
+    rows.restore_terminal_certificates(state, &network_id)?;
     restore.gates.install(state)?;
     coordinator.owner_reconstruction = restore.owners.for_network(network_id).finish(state);
     state.object_expiry = restore.object_expiry.unwrap_or_default();
@@ -1500,6 +1538,36 @@ struct SequencerRows {
 }
 
 impl SequencerRows {
+    fn restore_terminal_certificates(
+        &self,
+        state: &mut CompanionState,
+        network: &[u8; 32],
+    ) -> Result<(), super::CompanionFault> {
+        for ((conversation, sequence), row) in &self.records {
+            // Successor reconciliation can discard a provisional route.
+            // Its old certificates must never become visible on a later bind.
+            if !state.logs.contains_key(conversation) {
+                continue;
+            }
+            let terminal = matches!(
+                row.record_kind,
+                FINALIZATION_RECORD | ABORT_RECORD | REINIT_ACTIVATION_RECORD | REINIT_ABORT_RECORD
+            );
+            if terminal != row.terminal {
+                return Err(super::CompanionFault::Storage);
+            }
+            if terminal {
+                let id = row
+                    .certificate_id(state, network, conversation, *sequence)
+                    .ok_or(super::CompanionFault::Storage)?;
+                state
+                    .terminal_certificates
+                    .insert((*conversation, id), row.record_object_id);
+            }
+        }
+        Ok(())
+    }
+
     fn records_of(&self, conversation_id: [u8; 32]) -> BTreeMap<u64, &RecordRow> {
         self.records
             .range((conversation_id, 0)..=(conversation_id, u64::MAX))

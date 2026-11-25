@@ -271,3 +271,46 @@ echo, is unchanged.
   `triple_line`, `quad_line`, `metadata_child` and `echoes_to_requester` is
   the owner's decision; the release region `edge-route-projection-writes` in
   `events.rs` was only re-anchored, its span unchanged.
+
+
+## Standalone terminal certificates (SDK SC-010)
+
+Under companion §§9.5 and 12, a newly issued FINALIZED, ABORTED,
+REINIT-ACTIVATED or REINIT-ABORTED names the complete standalone certificate.
+The corresponding wire kinds are 6, 8, 22 and 24. The sequencer timeline
+continues to name the kind-25 history wrapper. These two encodings carry the
+same signed certificate and have distinct object hashes. The semantic
+finalization, abort or activation ID still comes from its registered TBS.
+
+The relay stores the signed bytes once in the timeline with the existing
+atomic terminal transaction. A single index maps the originating conversation
+and standalone hash to the retained wrapper. Each retained terminal wrapper
+reserves 2 KiB for the index in addition to its ordinary resident charge.
+Retiring the wrapper releases its entry. On restart the relay reconstructs
+the index from committed record rows after reconciling predecessor and successor
+routes. Only a surviving route contributes entries. It checks stored
+object hashes, envelope bounds, kind, network, conversation, sequence,
+predecessor and the declared semantic ID against the durable position. A terminal row for a reconstructed route that cannot produce the
+registered certificate returns a storage recovery error. Existing replay
+results and already issued events retain their exact bytes and identifiers.
+
+A registered device can fetch the standalone proof from the originating
+conversation, including a migrated ReInit predecessor. This uses the same
+attached-device admission as the retained receipt history so a Welcome
+recipient can obtain the old proof. A different route cannot expose the
+certificate through a cached reply. Its fixed header and borrowed signed
+body can be hashed without allocating a second record. A fresh fetch reads
+the exact retained wrapper under the normal response memory budget.
+Persisted response copies used by replay stay on disk.
+
+`agenc-relay-e2ee::record_authentication::authenticate_terminal_certificate`
+checks the caller's expected certificate kind and history position, pinned
+sequencer credential, signature and semantic ID. The endpoint still checks
+the carried participant approvals and the resulting MLS transition before
+adopting a binding or policy.
+
+The Stage 08 requester-copies and ReInit activation/abort scenarios fetch
+all four announced hashes through real Linux relays. The runtime vote
+tests compare the complete standalone bytes with the stored union arm
+before and after reload. Shared tests compare both encoders and verify all
+four signatures against their trusted positions.

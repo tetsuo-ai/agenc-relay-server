@@ -205,6 +205,25 @@ pub(super) fn sweep(coordinator: &mut CompanionCoordinator, now: u64) -> TestRes
     Ok(deleted)
 }
 
+/// Exercise the physical-deletion receipt with a terminal wrapper whose last
+/// history owner has already been retired.
+pub(super) fn assert_terminal_retirement(
+    bytes: &[u8],
+    conversation: [u8; 32],
+    certificate: [u8; 32],
+) -> TestResult {
+    let mut relay = coordinator();
+    let wrapper = retired_object(&mut relay, bytes, 1)?;
+    let key = (conversation, certificate);
+    relay.state.terminal_certificates.insert(key, wrapper);
+    assert_eq!(sweep(&mut relay, ORDINARY_DUE - 1)?, 0);
+    assert_eq!(relay.state.terminal_certificates.get(&key), Some(&wrapper));
+    assert_eq!(sweep(&mut relay, ORDINARY_DUE)?, 1);
+    assert!(!relay.state.objects.contains_key(&wrapper));
+    assert!(!relay.state.terminal_certificates.contains_key(&key));
+    Ok(())
+}
+
 #[test]
 fn an_expired_unowned_object_is_deleted_only_at_its_trusted_retention_boundary() -> TestResult {
     let bytes = object(11, 64)?;
