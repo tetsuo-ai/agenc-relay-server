@@ -593,6 +593,7 @@ impl FederationCoordinator {
     /// Finishes the request a virtual connection was answering with the
     /// result the router built from the captured frames; returns the
     /// opcode and carrier generation it answered.
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=a guarded challenge can retain its original link only when the committed private response and matching in-flight operation agree
     pub(crate) fn finish_remote_carrier(
         &mut self,
         context: &mut StateCoreContext,

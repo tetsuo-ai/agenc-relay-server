@@ -2241,6 +2241,7 @@ impl AccountServiceCoordinator {
     }
 
     /// Routes one grammar-validated account-creation or credential carrier line.
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the admitted physical scope, tagged-line check and fixed input-buffer reservation must precede processing any carrier bytes on that same connection
     pub(crate) fn route_account(
         &mut self,
         context: &mut StateCoreContext,

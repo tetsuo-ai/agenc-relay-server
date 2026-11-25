@@ -94,6 +94,7 @@ impl OwnedCarrier {
         }
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the exact active link and origin phase guard both the deferred and immediate append of this same fixed account envelope
     pub(crate) fn send(
         self,
         edge: &mut EdgeFederation,

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use agenc_relay_auth::client::{registration_finish, registration_start};
 use agenc_relay_auth::{
     ACCOUNT_CREATION_TIMEOUT_TICKS, AccountCreationStartParameters, CreationAdmission,

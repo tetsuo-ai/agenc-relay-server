@@ -399,6 +399,7 @@ fn bind_registered_carrier(
 /// envelope: the SASL mechanism selection once per virtual connection, or
 /// the account carrier START or FINISH header, then the payload chunks and
 /// the terminator.
+// agenc-review: focus owner=runtime reviewed=2026-11-25 reason=only the selected sealed carrier selects its grammar and fixed transfer boundaries for delivery into the virtual account actor
 fn carrier_lines(
     federation: &mut FederationCoordinator,
     generation: ConnectionGeneration,

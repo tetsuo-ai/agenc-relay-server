@@ -484,6 +484,7 @@ pub(super) fn register_request(
 
 /// Transmits one pending request when the link is active; otherwise it waits
 /// for the next resume and is resent byte-identically.
+// agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the pinned request family selects the single transfer descriptor and its exact chunks on the same live link
 pub(super) fn transmit(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
@@ -1600,6 +1601,7 @@ fn message_target_arg(
 }
 
 /// Receives one result object.
+// agenc-review: focus owner=runtime reviewed=2026-11-25 reason=decoding and duplicate resolution must agree with the same pending descriptor and authenticated profile before producing a client completion
 pub(super) fn receive_result(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,

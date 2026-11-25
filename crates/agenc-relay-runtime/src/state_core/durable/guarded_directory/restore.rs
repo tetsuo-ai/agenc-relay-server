@@ -46,6 +46,7 @@ impl DurableIndex {
         Ok(())
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the authenticated kind selects exactly one restored receipt, subtotal, ownership or stock accounting action
     pub(in crate::state_core) fn restore_directory_row(
         &mut self,
         key: &StoredKey,

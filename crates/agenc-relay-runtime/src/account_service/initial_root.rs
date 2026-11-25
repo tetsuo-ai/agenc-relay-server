@@ -359,6 +359,7 @@ impl AccountServiceCoordinator {
         ))
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the refreshed registration cut, shared counter, claim decision, timed local replay and remote response form one atomic storage batch
     pub(super) fn stage_claim(
         &mut self,
         context: &mut StateCoreContext,

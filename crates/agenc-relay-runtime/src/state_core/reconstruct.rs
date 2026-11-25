@@ -581,6 +581,7 @@ fn validate_creation_transaction_reference(
 
 impl Scan {
     /// Records one row's identity and decodes its live body.
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=role and table-specific startup checks must complete before exposing one authenticated row to the reconstructed index
     fn admit(
         &mut self,
         keys: &KeyDeriver,

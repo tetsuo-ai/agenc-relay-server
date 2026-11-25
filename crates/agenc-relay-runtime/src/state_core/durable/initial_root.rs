@@ -13,6 +13,7 @@ use crate::budget::{BackingReservationPort, MemoryBudget, MemoryPermit};
 /// held by the serialized writer until its commit publishes or is discarded.
 /// The process budget adds allocator bookkeeping and rounds up to its quantum.
 pub(super) const ROOT_SLOT_CAPACITY: usize = 2_048;
+// agenc-review: internal-assert owner=runtime reviewed=2026-11-25 reason=the compile-time type-size bound covers both the committed and in-flight owner inside the fixed shared reservation
 const _: () = assert!(2 * size_of::<BackedRootClaim>() < ROOT_SLOT_CAPACITY);
 
 /// An immutable private result and the lifetime reservation for this account.

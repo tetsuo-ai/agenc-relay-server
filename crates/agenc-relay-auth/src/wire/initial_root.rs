@@ -170,20 +170,12 @@ impl ClaimOpenToken {
                 {
                     return Err(AuthError::ContextMismatch);
                 }
-                Some(match (tag, self.action) {
-                    (2, ClaimAction::Read) if fingerprint == [0; 32] && object_id == [0; 32] => {
-                        ClaimState::Reserved
-                    }
-                    (3 | 4, ClaimAction::Choose(expected)) if fingerprint != expected => {
-                        return Err(AuthError::ContextMismatch);
-                    }
-                    (3, _) if object_id == [0; 32] => ClaimState::Chosen(fingerprint),
-                    (4, _) => ClaimState::Published {
-                        fingerprint,
-                        object_id,
-                    },
-                    _ => return Err(AuthError::InvalidEncoding),
-                })
+                Some(positive_claim_state(
+                    tag,
+                    self.action,
+                    fingerprint,
+                    object_id,
+                )?)
             }
             _ => return Err(AuthError::InvalidEncoding),
         };
@@ -194,6 +186,28 @@ impl ClaimOpenToken {
             action: self.action,
             state,
         })
+    }
+}
+
+fn positive_claim_state(
+    tag: u8,
+    action: ClaimAction,
+    fingerprint: [u8; 32],
+    object_id: [u8; 32],
+) -> Result<ClaimState, AuthError> {
+    match (tag, action) {
+        (2, ClaimAction::Read) if fingerprint == [0; 32] && object_id == [0; 32] => {
+            Ok(ClaimState::Reserved)
+        }
+        (3 | 4, ClaimAction::Choose(expected)) if fingerprint != expected => {
+            Err(AuthError::ContextMismatch)
+        }
+        (3, _) if object_id == [0; 32] => Ok(ClaimState::Chosen(fingerprint)),
+        (4, _) => Ok(ClaimState::Published {
+            fingerprint,
+            object_id,
+        }),
+        _ => Err(AuthError::InvalidEncoding),
     }
 }
 

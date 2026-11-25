@@ -83,10 +83,10 @@ impl Receipts {
         let mut owned = self.for_account(row.account).count();
         for update in staged {
             match update {
+                IndexUpdate::RetainClaimReplay(held) if held.row.id == row.id => {
+                    return Err(RuntimeError::InvalidValue);
+                }
                 IndexUpdate::RetainClaimReplay(held) => {
-                    if held.row.id == row.id {
-                        return Err(RuntimeError::InvalidValue);
-                    }
                     total += 1;
                     owned += usize::from(held.row.account == row.account);
                 }

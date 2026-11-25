@@ -1169,6 +1169,7 @@ impl Projection<'_> {
         Ok(())
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the projected index edits must correspond to the same accepted record mutation or tombstone before durable admission
     fn project_account_service_write(
         &mut self,
         write: &AccountServiceDurableWrite,
@@ -1209,6 +1210,7 @@ impl Projection<'_> {
         }
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the immutable owner, authorized state transition and installation budget are checked against the same record before projecting it
     fn project_initial_root_record(
         &mut self,
         key: &StoredKey,

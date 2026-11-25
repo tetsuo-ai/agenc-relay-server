@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::*;
 use crate::budget::MemoryBudget;
 use crate::test_support::TestResult;
