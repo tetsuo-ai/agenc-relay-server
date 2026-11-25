@@ -2,8 +2,8 @@
 
 use agenc_relay_crypto::{
     AccountHpkeExchange, AccountHpkePrivateKey, AccountHpkePublicKey, AccountRequestBinding,
-    AccountResponseOpenToken, AccountResponseSealToken, InitialRootClaimOwner, InitialRootExchange,
-    InitialRootSecret, seal_account_request,
+    AccountResponseOpenToken, AccountResponseSealToken, Digest32, InitialRootClaimOwner,
+    InitialRootExchange, InitialRootSecret, Sha256Stream, seal_account_request,
 };
 use agenc_relay_types::{AccountId, NetworkId, RecoveryEpoch, RequestId};
 use zeroize::Zeroizing;
@@ -200,6 +200,7 @@ impl ClaimOpenToken {
 /// The request and its response authority stay together through coordinator admission.
 pub struct OpenedClaim {
     binding: AccountRequestBinding<InitialRootExchange>,
+    request_digest: Digest32,
     token: AccountResponseSealToken<InitialRootExchange>,
     account: AccountId,
     start: RequestId,
@@ -242,6 +243,7 @@ pub fn open_claim(
     };
     Ok(OpenedClaim {
         binding: envelope.binding(epoch),
+        request_digest: request_digest(envelope),
         token,
         account,
         start,
@@ -251,6 +253,7 @@ pub fn open_claim(
 }
 
 /// Immutable private row supplied by the authenticated coordinator account store.
+#[derive(Clone, Copy)]
 pub struct ClaimRecord<'a> {
     /// The account whose independently classified Guarded row was loaded.
     pub account: AccountId,
@@ -271,6 +274,57 @@ pub struct PreparedClaim {
     response: InitialRootServiceResponse,
     next_response_count: u64,
     new_choice: Option<[u8; 32]>,
+    request_digest: Digest32,
+    accepted: Option<AcceptedClaim>,
+}
+
+/// The authenticated replay row and current guarded authority returned by durable admission.
+pub struct DurableClaimReplay<'a> {
+    /// The original complete sealed request, matched under the origin's durable operation.
+    pub request: &'a InitialRootServiceEnvelope,
+    /// The committed byte-identical reply for that request.
+    pub response: &'a InitialRootServiceResponse,
+    /// The durable epoch-scoped response counter.
+    pub response_count: u64,
+    /// The independently classified Guarded account's current retained row for a positive result.
+    pub record: Option<&'a ClaimRecord<'a>>,
+}
+
+struct AcceptedClaim {
+    network: NetworkId,
+    account: AccountId,
+    epoch: RecoveryEpoch,
+    start: RequestId,
+    owner: InitialRootClaimOwner,
+    state: ClaimState,
+}
+
+impl AcceptedClaim {
+    fn matches(&self, row: &ClaimRecord<'_>) -> bool {
+        self.network == row.network
+            && self.account == row.account
+            && self.epoch == row.creation_epoch
+            && self.start == row.creation_request
+            && self.owner.matches(row.owner)
+            && match (self.state, row.state) {
+                (ClaimState::Reserved, _) => true,
+                (
+                    ClaimState::Chosen(original),
+                    ClaimState::Chosen(current)
+                    | ClaimState::Published {
+                        fingerprint: current,
+                        ..
+                    },
+                ) => original == current,
+                (original, current) => original == current,
+            }
+    }
+}
+
+fn request_digest(request: &InitialRootServiceEnvelope) -> Digest32 {
+    let mut digest = Sha256Stream::new();
+    digest.update(request.as_bytes());
+    digest.finish()
 }
 
 impl PreparedClaim {
@@ -292,12 +346,19 @@ impl PreparedClaim {
         self.new_choice
     }
 
-    /// Delivers the protected reply after the ordered sealing counter is known durable.
+    /// Delivers the protected reply only from the same durable request, ciphertext and authority.
     pub fn into_committed(
         self,
-        response_count: u64,
+        replay: DurableClaimReplay<'_>,
     ) -> Result<InitialRootServiceResponse, AuthError> {
-        if response_count < self.next_response_count {
+        if replay.response_count < self.next_response_count
+            || self.request_digest != request_digest(replay.request)
+            || self.response.as_bytes() != replay.response.as_bytes()
+            || self
+                .accepted
+                .as_ref()
+                .is_some_and(|expected| !replay.record.is_some_and(|row| expected.matches(row)))
+        {
             return Err(AuthError::ContextMismatch);
         }
         Ok(self.response)
@@ -340,6 +401,15 @@ impl OpenedClaim {
             response: InitialRootServiceResponse::from_sealed(sealed)?,
             next_response_count,
             new_choice,
+            request_digest: self.request_digest,
+            accepted: state.zip(record).map(|(state, row)| AcceptedClaim {
+                network: row.network,
+                account: row.account,
+                epoch: row.creation_epoch,
+                start: row.creation_request,
+                owner: InitialRootClaimOwner::from_protected_bytes(*row.owner.expose_for_storage()),
+                state,
+            }),
         })
     }
 
