@@ -198,6 +198,7 @@ enum PendingCommit {
         /// the origin and nothing is acknowledged.
         frame: Option<FederationFrame>,
         closed_carrier: Option<crate::connection::ConnectionGeneration>,
+        terminal: Option<origin::TerminalReceipt>,
         _charge: Option<IngressCharge>,
     },
     OriginExpired {
@@ -205,6 +206,7 @@ enum PendingCommit {
         link: LinkId,
         descriptor: OperationDescriptor,
         result: Vec<u8>,
+        terminal: origin::TerminalReceipt,
         _charge: Option<IngressCharge>,
     },
     Cleanup {
@@ -1543,24 +1545,15 @@ impl FederationCoordinator {
                     return false;
                 }
             }
-            Some(PendingCommit::OriginAck {
-                peer,
-                link,
-                frame,
-                closed_carrier,
-                ..
-            }) => self.publish_origin_ack(context, peer, link, frame, closed_carrier),
+            Some(
+                pending @ (PendingCommit::OriginAck { .. } | PendingCommit::OriginExpired { .. }),
+            ) => {
+                if !self.publish_committed_origin(context, pending) {
+                    return false;
+                }
+            }
             Some(PendingCommit::OriginReady { peer, link }) => {
                 self.publish_origin_ready(context, peer, link)
-            }
-            Some(PendingCommit::OriginExpired {
-                peer,
-                link,
-                descriptor,
-                result,
-                ..
-            }) => {
-                self.send_result(context, link, peer, descriptor, &result);
             }
             Some(PendingCommit::AuthorityFence {
                 peer,
@@ -1601,6 +1594,43 @@ impl FederationCoordinator {
                 }
             }
             Some(PendingCommit::Acknowledged) | None => {}
+        }
+        true
+    }
+
+    fn publish_committed_origin(
+        &mut self,
+        context: &mut StateCoreContext,
+        pending: PendingCommit,
+    ) -> bool {
+        match pending {
+            PendingCommit::OriginAck {
+                peer,
+                link,
+                frame,
+                closed_carrier,
+                terminal,
+                ..
+            } => {
+                if terminal.is_some_and(|receipt| !receipt.published(self, context)) {
+                    return false;
+                }
+                self.publish_origin_ack(context, peer, link, frame, closed_carrier);
+            }
+            PendingCommit::OriginExpired {
+                peer,
+                link,
+                descriptor,
+                result,
+                terminal,
+                ..
+            } => {
+                if !terminal.published(self, context) {
+                    return false;
+                }
+                self.send_result(context, link, peer, descriptor, &result);
+            }
+            _ => return false,
         }
         true
     }

@@ -1,5 +1,8 @@
 //! FORIGIN RESET, ADD, UPDATE, DEL, and READY on the coordinator (spec 20.5).
 
+mod terminal;
+pub(super) use terminal::{TerminalOrigin, TerminalReceipt};
+
 use agenc_relay_domain::federation::{
     OriginBinding, OriginDeclaration, OriginEntry, OriginError, OriginKey, OriginPrincipal,
     OriginStatus,
@@ -129,14 +132,15 @@ pub(super) fn declare(
     coordinator
         .origin_objects
         .insert(key, object.as_slice().to_vec());
-    let frame = FederationFrame::OriginAck {
+    let frame = Some(FederationFrame::OriginAck {
         edge_server_id: peer,
         server_incarnation: record.server_incarnation,
         origin_id: record.origin_id,
         generation: record.generation,
         object_id: Some(object.object_id()),
-    };
-    stage_origin(coordinator, context, link, peer, key, Some(frame), charge)
+    });
+    let change = OriginWrite::Declared(key);
+    stage_origin(coordinator, context, link, peer, change, frame, charge)
 }
 
 /// Refuses a declaration naming a session or account this coordinator
@@ -156,16 +160,27 @@ fn refuse(
     charge: Option<IngressCharge>,
 ) -> Result<(), Violation> {
     let entry = coordinator.origins.origin(&key).ok_or(Violation::Origin)?;
-    coordinator.refused_declarations.insert(key, generation);
     if matches!(entry.status, OriginStatus::Deleted | OriginStatus::Fenced) {
+        coordinator.refused_declarations.insert(key, generation);
         return Ok(());
     }
-    coordinator
-        .origins
-        .delete(key, entry.generation, entry.next_sequence)
-        .map_err(|_| Violation::Origin)?;
-    close_sessions(coordinator, context, peer, key);
-    stage_origin(coordinator, context, link, peer, key, None, charge)
+    let deletion = TerminalOrigin::deletion(
+        coordinator,
+        key,
+        entry.generation,
+        entry.next_sequence,
+        Some(generation),
+    )
+    .map_err(|_| Violation::Origin)?;
+    stage_origin(
+        coordinator,
+        context,
+        link,
+        peer,
+        OriginWrite::Deleted(Box::new(deletion)),
+        None,
+        charge,
+    )
 }
 
 /// Already committed closure before this sequence: a repeated refusal does not reopen the origin.
@@ -181,25 +196,6 @@ pub(super) fn after_deleted_cut(
                 && entry.status == OriginStatus::Deleted
                 && entry.deleted_after.is_some_and(|cut| key.sequence >= cut)
         })
-}
-
-/// Retain the ordinary origin tombstone at the first unaccepted request. The edge may then
-/// confirm DEL for this origin alone, just as after an independently refused declaration.
-pub(super) fn close_full_request(
-    coordinator: &mut FederationCoordinator,
-    context: &StateCoreContext,
-    peer: ServerId,
-    key: &agenc_relay_domain::federation::OperationKey,
-) -> Result<(), Violation> {
-    coordinator
-        .origins
-        .delete(key.origin, key.generation, key.sequence)
-        .map_err(|_| Violation::Origin)?;
-    coordinator
-        .refused_declarations
-        .insert(key.origin, key.generation);
-    close_sessions(coordinator, context, peer, key.origin);
-    Ok(())
 }
 
 /// Queues for cleanup the live sessions a closed origin owned: its
@@ -391,37 +387,45 @@ pub(super) fn delete(
         let _sent = coordinator.send_frame(context, link, peer, &frame);
         return Ok(());
     }
-    match coordinator.origins.delete(key, generation, next_sequence) {
-        Ok(()) => {
-            // The connection behind the origin is gone, so nobody can close
-            // its session any more. The edge's session close normally
-            // precedes the DEL; when it never arrived, or storage refused
-            // it, the session would keep its nickname until the next reset.
-            close_sessions(coordinator, context, peer, key);
-        }
-        Err(OriginError::Fenced) => {
-            // A fenced origin already rejects every later request for good
-            // (spec 20.7): its deletion is acknowledged for that origin
-            // alone and changes nothing, whatever generation and sequence
-            // it names. Its connection is gone, so its sessions close.
-            close_sessions(coordinator, context, peer, key);
-            let _sent = coordinator.send_frame(context, link, peer, &frame);
-            return Ok(());
-        }
-        Err(OriginError::UnknownOrigin)
-            if coordinator.peers.get(&peer).is_some_and(|state| {
-                state.incarnation == Some(key.server_incarnation) && state.live.is_some()
-            }) =>
-        {
-            // A DEL replayed after a reset for an origin whose declaration
-            // this coordinator never committed: there is nothing to delete
-            // or record, and the acknowledgement lets the edge drop it.
-            let _sent = coordinator.send_frame(context, link, peer, &frame);
-            return Ok(());
-        }
-        Err(_) => return Err(Violation::Origin),
-    }
-    stage_origin(coordinator, context, link, peer, key, Some(frame), None)
+    let projected =
+        match TerminalOrigin::deletion(coordinator, key, generation, next_sequence, None) {
+            Ok(projected) => projected,
+            Err(OriginError::Fenced) => {
+                // A fenced origin already rejects every later request for good
+                // (spec 20.7): its deletion is acknowledged for that origin
+                // alone and changes nothing, whatever generation and sequence
+                // it names. Its connection is gone, so its sessions close.
+                close_sessions(coordinator, context, peer, key);
+                let _sent = coordinator.send_frame(context, link, peer, &frame);
+                return Ok(());
+            }
+            Err(OriginError::UnknownOrigin)
+                if coordinator.peers.get(&peer).is_some_and(|state| {
+                    state.incarnation == Some(key.server_incarnation) && state.live.is_some()
+                }) =>
+            {
+                // A DEL replayed after a reset for an origin whose declaration
+                // this coordinator never committed: there is nothing to delete
+                // or record, and the acknowledgement lets the edge drop it.
+                let _sent = coordinator.send_frame(context, link, peer, &frame);
+                return Ok(());
+            }
+            Err(_) => return Err(Violation::Origin),
+        };
+    stage_origin(
+        coordinator,
+        context,
+        link,
+        peer,
+        OriginWrite::Deleted(Box::new(projected)),
+        Some(frame),
+        None,
+    )
+}
+
+enum OriginWrite {
+    Declared(OriginKey),
+    Deleted(Box<TerminalOrigin>),
 }
 
 fn stage_origin(
@@ -429,7 +433,7 @@ fn stage_origin(
     context: &mut StateCoreContext,
     link: LinkId,
     peer: ServerId,
-    key: OriginKey,
+    change: OriginWrite,
     frame: Option<FederationFrame>,
     charge: Option<IngressCharge>,
 ) -> Result<(), Violation> {
@@ -438,12 +442,26 @@ fn stage_origin(
         .plan_account_service_checkpoint()
         .map_err(|_| Violation::Ceiling)?;
     let revision = plan.resulting_revision().get();
-    let entry = coordinator.origins.origin(&key).ok_or(Violation::Origin)?;
-    let closed_carrier = (entry.status == OriginStatus::Deleted)
-        .then(|| coordinator.remote_carrier_for_origin(peer, *key.origin_id.as_bytes()))
-        .flatten();
+    let (write, terminal, closed_carrier) = match change {
+        OriginWrite::Declared(key) => {
+            let entry = coordinator.origins.origin(&key).ok_or(Violation::Origin)?;
+            let closed = (entry.status == OriginStatus::Deleted)
+                .then(|| coordinator.remote_carrier_for_origin(peer, *key.origin_id.as_bytes()))
+                .flatten();
+            (
+                origin_entry_row(coordinator, key, entry, entry.next_sequence, revision)?,
+                None,
+                closed,
+            )
+        }
+        OriginWrite::Deleted(deletion) => (
+            deletion.row(coordinator, revision)?,
+            Some(deletion.receipt(context, revision)),
+            None,
+        ),
+    };
     let writes = vec![
-        origin_row(coordinator, key, entry.next_sequence, revision)?,
+        write,
         coordinator
             .peer_row(peer, revision)
             .map_err(|_| Violation::Codec)?,
@@ -458,6 +476,7 @@ fn stage_origin(
         link,
         frame,
         closed_carrier,
+        terminal,
         _charge: charge,
     });
     Ok(())
@@ -529,6 +548,16 @@ pub(super) fn origin_row(
     revision: u64,
 ) -> Result<AccountServiceDurableWrite, Violation> {
     let entry = coordinator.origins.origin(&key).ok_or(Violation::Origin)?;
+    origin_entry_row(coordinator, key, entry, next_sequence, revision)
+}
+
+fn origin_entry_row(
+    coordinator: &FederationCoordinator,
+    key: OriginKey,
+    entry: OriginEntry,
+    next_sequence: u64,
+    revision: u64,
+) -> Result<AccountServiceDurableWrite, Violation> {
     let object = coordinator
         .origin_objects
         .get(&key)

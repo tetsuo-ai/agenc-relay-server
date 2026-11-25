@@ -274,8 +274,8 @@ fn run_enhanced(
     let Some(slot) = coordinator.admit_initial_root(context, &header)? else {
         // A full optional result budget closes just the caller's virtual origin.
         // No account job or response count has been admitted at this cut.
-        super::origin::close_full_request(coordinator, context, peer, &fresh.key)?;
-        return persist_expired(coordinator, context, link, peer, fresh);
+        let closure = super::origin::TerminalOrigin::at_capacity(coordinator, &fresh.key)?;
+        return persist_expired(coordinator, context, link, peer, fresh, closure);
     };
     fresh.root_intake = Some(slot);
     let bound = request
@@ -326,11 +326,8 @@ fn expire_request(
     peer: ServerId,
     fresh: FreshRequest,
 ) -> Result<(), Violation> {
-    coordinator
-        .origins
-        .fence(&fresh.key.origin)
-        .map_err(|_| Violation::Origin)?;
-    persist_expired(coordinator, context, link, peer, fresh)
+    let fence = super::origin::TerminalOrigin::fence(coordinator, fresh.key.origin)?;
+    persist_expired(coordinator, context, link, peer, fresh, fence)
 }
 
 fn persist_expired(
@@ -339,22 +336,16 @@ fn persist_expired(
     link: LinkId,
     peer: ServerId,
     fresh: FreshRequest,
+    closure: super::origin::TerminalOrigin,
 ) -> Result<(), Violation> {
-    let entry = coordinator
-        .origins
-        .origin(&fresh.key.origin)
-        .ok_or(Violation::Origin)?;
     let result = expired_result(coordinator, &fresh)?;
     let plan = context
         .domain()
         .plan_account_service_checkpoint()
         .map_err(|_| Violation::Ceiling)?;
-    let write = super::origin::origin_row(
-        coordinator,
-        fresh.key.origin,
-        entry.next_sequence,
-        plan.resulting_revision().get(),
-    )?;
+    let revision = plan.resulting_revision().get();
+    let write = closure.row(coordinator, revision)?;
+    let terminal = closure.receipt(context, revision);
     let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
         .map_err(|_| Violation::Ceiling)?;
     context
@@ -365,6 +356,7 @@ fn persist_expired(
         link,
         descriptor: fresh.descriptor,
         result,
+        terminal,
         _charge: fresh.charge,
     });
     Ok(())
