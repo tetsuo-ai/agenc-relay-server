@@ -298,11 +298,10 @@ a client the coordinator's exact suite, key-stretching function, context and
 identities and the client half of registration and login (X-08, SDK program,
 outside master #35), are recorded in
 [the OPAQUE client profile record](stage-10-opaque-client-profile.md).
-The fuzz workspace's own selection of the reviewed local OPAQUE source,
-which it resolved from the unpatched release before, and the explicit root
-path edge that was measured but not applied because it fails the Section
-28.8 formatting gate (X-09, SDK program, outside master #35), are recorded in
-[the OPAQUE fuzz source record](stage-10-opaque-fuzz-source.md).
+X-09 makes the reviewed OPAQUE source an explicit dependency for the server,
+fuzz targets and separately rooted Git consumers. The current formatter uses
+the workspace scope specified by Architecture §28.8.
+[OPAQUE source and independent consumer](stage-10-opaque-fuzz-source.md)
 The program's normative revision, which removes the finalization ID from the
 ReInit target, carries the target in every ReInit attempt with the
 sequencer's checks and the coordinator's atomic successor installation, and

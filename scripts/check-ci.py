@@ -73,7 +73,7 @@ REQUIRED_STAGE_ZERO = (
     ("python3", "scripts/check-ci.py", "check"),
     ("python3", "scripts/check-ci.py", "self-test"),
     ("python3", "scripts/check-rust-components.py", "self-test"),
-    ("cargo", "fmt", "--all", "--check"),
+    ("cargo", "fmt", "--check"),
     ("cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked"),
     (
         "cargo", "check", "--workspace", "--all-targets", "--all-features", "--locked",
@@ -145,6 +145,7 @@ REQUIRED_STAGE_FOUR = (
     ("python3", "scripts/requirements.py", "check-stage-four"),
     ("python3", "scripts/check-stage-four.py", "check"),
     ("python3", "scripts/check-stage-four.py", "self-test"),
+    ("python3", "scripts/check-opaque-consumer.py"),
     ("cargo", "nextest", "run", "-p", "agenc-relay-auth", "--test", "stage_four", "--locked"),
     ("cargo", "nextest", "run", "-p", "agenc-relay-crypto", "--test", "stage_four", "--locked"),
     (

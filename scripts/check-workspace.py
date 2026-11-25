@@ -277,11 +277,12 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # Every reviewed local source patch, in manifest order. Each entry is the
 # closed form the manifest must repeat exactly, and each tree digest binds
 # every path and byte under the vendored directory.
+OPAQUE_SOURCE_PATH = "vendor/opaque-ke-4.0.1"
 VENDORED_PATCHES = (
     {
         "package": "opaque-ke",
         "version": "4.0.1",
-        "path": "vendor/opaque-ke-4.0.1",
+        "path": OPAQUE_SOURCE_PATH,
         "upstream_registry": "https://github.com/rust-lang/crates.io-index",
         "upstream_checksum": DIRECT_CHECKSUMS["opaque-ke"],
         "tree_sha256": "3365ac7382b2ed771d71c933c7bd1cf772e024042ed8db0899045ea1497a9678",
@@ -402,11 +403,7 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
     manifest = load_toml(root / "Cargo.toml")
     if "package" in manifest or "replace" in manifest:
         raise WorkspaceError("root must be virtual and may not replace sources")
-    expected_patch = {
-        "crates-io": {patch["package"]: {"path": patch["path"]} for patch in VENDORED_PATCHES}
-    }
-    if manifest.get("patch") != expected_patch:
-        raise WorkspaceError("root source patches differ from the reviewed vendored patches")
+    validate_workspace_sources(manifest)
     workspace = manifest.get("workspace")
     if not isinstance(workspace, dict):
         raise WorkspaceError("root Cargo.toml has no workspace table")
@@ -435,6 +432,22 @@ def validate_workspace_manifest(root: Path) -> dict[str, object]:
         raise WorkspaceError("workspace.dependencies is missing")
     validate_dependency_profiles(dependencies)
     return manifest
+
+
+def validate_workspace_sources(manifest: dict[str, object]) -> None:
+    """Keep OPAQUE an explicit path dependency outside the workspace."""
+    expected_patch = {
+        "crates-io": {
+            patch["package"]: {"path": patch["path"]}
+            for patch in VENDORED_PATCHES
+            if patch["package"] != "opaque-ke"
+        }
+    }
+    if manifest.get("patch") != expected_patch:
+        raise WorkspaceError("root source patches differ from the reviewed registry overrides")
+    workspace = manifest.get("workspace")
+    if not isinstance(workspace, dict) or workspace.get("exclude") != [OPAQUE_SOURCE_PATH]:
+        raise WorkspaceError("workspace must exclude the reviewed vendored OPAQUE package")
 
 
 def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
@@ -468,6 +481,10 @@ def validate_dependency_profiles(dependencies: dict[str, object]) -> None:
         expected_keys = {"version", "default-features"} | (
             {"features"} if features else set()
         ) | ({"package"} if package is not None else set())
+        if name == "opaque-ke":
+            expected_keys.add("path")
+            if declaration.get("path") != OPAQUE_SOURCE_PATH:
+                raise WorkspaceError("OPAQUE dependency must use the reviewed local path")
         if set(declaration) != expected_keys:
             raise WorkspaceError(f"external dependency {name} has forbidden source/profile keys")
 
@@ -1083,6 +1100,36 @@ def self_test(root: Path) -> int:
     validate_lockfile(root)
     validate_dependency_exception(root)
     cases = 0
+
+    excluded = copy.deepcopy(manifest)
+    excluded["workspace"]["exclude"] = []  # type: ignore[index]
+    expect_rejection(
+        "vendored OPAQUE implicit member",
+        lambda: validate_workspace_sources(excluded),
+        "must exclude the reviewed vendored OPAQUE package",
+    )
+    overridden = copy.deepcopy(manifest)
+    overridden["patch"]["crates-io"]["opaque-ke"] = {"path": OPAQUE_SOURCE_PATH}  # type: ignore[index]
+    expect_rejection(
+        "root-only OPAQUE override",
+        lambda: validate_workspace_sources(overridden),
+        "reviewed registry overrides",
+    )
+    opaque_registry = copy.deepcopy(manifest["workspace"]["dependencies"])  # type: ignore[index]
+    del opaque_registry["opaque-ke"]["path"]
+    expect_rejection(
+        "registry OPAQUE edge",
+        lambda: validate_dependency_profiles(opaque_registry),
+        "must use the reviewed local path",
+    )
+    opaque_redirected = copy.deepcopy(opaque_registry)
+    opaque_redirected["opaque-ke"]["path"] = "vendor/opaque-ke-4.0.2"
+    expect_rejection(
+        "redirected OPAQUE path",
+        lambda: validate_dependency_profiles(opaque_redirected),
+        "must use the reviewed local path",
+    )
+    cases += 4
 
     e2ee_manifest_path = root / "crates/agenc-relay-e2ee/Cargo.toml"
     engine_manifest = copy.deepcopy(load_toml(e2ee_manifest_path))

@@ -1,18 +1,28 @@
-# Reviewed OPAQUE source in the fuzz workspace
+# Reviewed OPAQUE source for the server, fuzz targets and SDK consumers
 
-This record covers X-09 of the SDK program (2026-10-01, outside master #35).
-X-09 asked for the reviewed local `opaque-ke` 4.0.1 source in
-`vendor/opaque-ke-4.0.1` to be selected by an explicit path on the root
-workspace declaration instead of a root `[patch.crates-io]` entry, because
-Cargo applies a `[patch]` table only to the workspace that declares it. Two
-resolvers outside the root workspace therefore took the unpatched crates.io
-release without a warning: the fuzz workspace and any separately rooted
-consumer of the auth crate, such as the SDK. This change repairs the fuzz
-workspace. The explicit edge was built and measured, and it is not applied,
-because it fails a gate that the frozen architecture names (below). X-09
-therefore stays open; this record covers its fuzz half.
+X-09 is implemented. The workspace declares the reviewed `opaque-ke` 4.0.1 tree as an explicit path dependency. Cargo carries that edge into separately rooted applications that depend on the auth crate through Git. The vendor tree is excluded from workspace membership. Architecture §28.8 already specifies workspace-member formatting, so adopting the explicit edge requires no contract amendment.
 
-## What changed
+## Workspace and independent consumer qualification
+
+Architecture Section 28.8 specifies `cargo fmt --check`.
+The workspace edge selects `vendor/opaque-ke-4.0.1` directly and excludes it
+from workspace membership. The fuzz auth dependency follows that same edge.
+The redb overrides remain in both workspaces. Both lockfiles and the reviewed
+OPAQUE tree remain byte-for-byte identical.
+
+The workspace and Stage 04 checkers pin the explicit path, workspace
+exclusion, and reviewed tree digest. The Stage 04 checker requires both lock
+files to contain one local OPAQUE package and refuses a registry override.
+The Stage 09 and Stage 10 command pins use the accepted formatting scope.
+
+The Stage 04 gate runs `python3 scripts/check-opaque-consumer.py` against its
+checked-out commit. Run `python3 scripts/check-opaque-consumer.py --git <server-git-url> --rev
+<full-server-commit>` to build and exercise the shared registration API
+from a fresh workspace with no Cargo patch. The check verifies the
+consumer-owned lock and Cargo metadata resolve exactly one OPAQUE package
+from the same Git revision as auth. It also rehashes the vendored checkout.
+
+## October 2026 fuzz-workspace qualification
 
 - `fuzz/Cargo.toml`: the fuzz workspace's own `[patch.crates-io]`, which
   already selects the redb fork, now also selects `../vendor/opaque-ke-4.0.1`.
@@ -33,7 +43,7 @@ The root manifest, `Cargo.lock`, the vendored tree and its digest
 `3365ac7382b2ed771d71c933c7bd1cf772e024042ed8db0899045ea1497a9678`, and the
 daemon's resolution are unchanged.
 
-## Evidence
+### Fuzz-workspace evidence
 
 - Failing before, fixed after: with `fuzz/Cargo.toml` and `fuzz/Cargo.lock`
   restored to their previous bytes, `python3 scripts/check-stage-four.py
@@ -47,7 +57,7 @@ daemon's resolution are unchanged.
   `cargo +nightly-2026-08-24 fmt --manifest-path fuzz/Cargo.toml -- --check`
   pass.
 
-## The explicit edge (not applied)
+### Earlier formatter investigation
 
 The edge was built exactly as X-09 describes: `path =
 "vendor/opaque-ke-4.0.1"` on the root declaration, `[workspace] exclude` for
@@ -83,14 +93,4 @@ file of the vendored tree and every bench, example and integration test of
 the published package already matches this repository's `rustfmt.toml`, so
 the missing module is the only obstacle. It would have to come from outside
 the reviewed package, or `lib.rs` would need a further reviewed patch, and
-either changes the tree digest. Both choices are the owner's; until one is
-made, a separately rooted consumer must repeat the root `[patch]`.
-
-## Limits
-
-- X-09 stays open: separately rooted consumers still resolve the unpatched
-  release unless they repeat the root `[patch]`, and the SDK's interim root
-  patch remains necessary.
-- The redb fork stays a root and fuzz `[patch]` as before.
-
-No Stage 04 or Stage 10 task changes state.
+either changes the tree digest. At that revision, a separately rooted consumer had to repeat the root `[patch]`.

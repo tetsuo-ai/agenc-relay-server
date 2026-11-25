@@ -25,7 +25,7 @@ on the same code proves nothing.
 - Documentation, `TODO.md` and comments: no test run. Run the static checker
   that reads the file, if one does.
 - A checker script or the gate manifest: that script's `check` and `self-test`.
-- A Rust change inside one crate: `cargo fmt --all --check`, clippy with
+- A Rust change inside one crate: `cargo fmt --check`, clippy with
   `-D warnings`, and `cargo nextest run -p <crate> --all-features --locked`;
   add the dependent crates when a public interface changed.
 - A change across crates, to the storage engine, to a wire format or to the

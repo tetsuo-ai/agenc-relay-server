@@ -432,13 +432,12 @@ def validate_modules(root: Path) -> None:
         raise StageFourError("crypto/auth source exposes a forbidden algorithm or serialization surface")
 
 
-def validate_fuzz_opaque_patch(manifest: dict[str, object]) -> None:
-    """Require the separately resolved fuzz workspace to select the reviewed source."""
+def validate_no_opaque_override(manifest: dict[str, object], name: str) -> None:
+    """Both workspaces inherit the explicit vendored edge through auth."""
     patches = manifest.get("patch")
     crates_io = patches.get("crates-io") if isinstance(patches, dict) else None
-    opaque_patch = crates_io.get("opaque-ke") if isinstance(crates_io, dict) else None
-    if opaque_patch != {"path": f"../{EXPECTED_SOURCE_PATCH['path']}"}:
-        raise StageFourError("fuzz workspace does not select the reviewed local OPAQUE source")
+    if isinstance(crates_io, dict) and "opaque-ke" in crates_io:
+        raise StageFourError(f"{name} must select OPAQUE without a registry override")
 
 
 def validate_opaque_lock(lock: dict[str, object], name: str) -> None:
@@ -478,13 +477,9 @@ def validate_manifests(root: Path, profile: dict[str, object]) -> None:
         "version": "=1.18.0", "default-features": False, "features": ["non-fips"]
     }:
         raise StageFourError("WebSocket handshake provider differs from the reviewed pin")
-    # Stage 04 owns the OPAQUE override alone; the complete reviewed patch
-    # table, including every other vendored crate, is the workspace checker's.
-    patches = workspace.get("patch")
-    crates_io = patches.get("crates-io") if isinstance(patches, dict) else None
-    opaque_patch = crates_io.get("opaque-ke") if isinstance(crates_io, dict) else None
-    if opaque_patch != {"path": EXPECTED_SOURCE_PATCH["path"]}:
-        raise StageFourError("root source patch differs from the reviewed OPAQUE override")
+    validate_no_opaque_override(workspace, "root workspace")
+    if workspace.get("workspace", {}).get("exclude") != [EXPECTED_SOURCE_PATCH["path"]]:
+        raise StageFourError("workspace must exclude the reviewed vendored OPAQUE package")
     patch_root = root / str(EXPECTED_SOURCE_PATCH["path"])
     if vendored_tree_sha256(patch_root) != EXPECTED_SOURCE_PATCH["tree_sha256"]:
         raise StageFourError("vendored OPAQUE tree digest differs from the reviewed source")
@@ -505,6 +500,8 @@ def validate_manifests(root: Path, profile: dict[str, object]) -> None:
             expected["features"] = features
         if logical_name != record["package"]:
             expected["package"] = record["package"]
+        if logical_name == "opaque-ke":
+            expected["path"] = EXPECTED_SOURCE_PATCH["path"]
         if configured != expected:
             raise StageFourError(f"workspace profile differs for {logical_name}")
 
@@ -538,9 +535,8 @@ def validate_manifests(root: Path, profile: dict[str, object]) -> None:
                 )
             if matches[0].get("source") != "registry+https://github.com/rust-lang/crates.io-index":
                 raise StageFourError(f"Cargo.lock source differs for {record['logical_name']}")
-    # The fuzz workspace resolves its own lockfile and links the auth crate
-    # too; the root [patch] does not reach it, so it repeats the selection.
-    validate_fuzz_opaque_patch(load_toml(root / "fuzz/Cargo.toml"))
+    # The separate fuzz lock follows the same explicit path through auth.
+    validate_no_opaque_override(load_toml(root / "fuzz/Cargo.toml"), "fuzz workspace")
     validate_opaque_lock(lock, "Cargo.lock")
     validate_opaque_lock(load_toml(root / "fuzz/Cargo.lock"), "fuzz/Cargo.lock")
     for package_name, expected_versions in EXPECTED_DUPLICATE_GENERATIONS.items():
@@ -831,24 +827,17 @@ def self_test(root: Path) -> int:
     cases = 4
 
     fuzz_manifest = load_toml(root / "fuzz/Cargo.toml")
-    validate_fuzz_opaque_patch(fuzz_manifest)
-    unpatched = copy.deepcopy(fuzz_manifest)
-    del unpatched["patch"]["crates-io"]["opaque-ke"]  # type: ignore[index]
-    expect_failure(
-        "fuzz workspace without the OPAQUE patch",
-        lambda: validate_fuzz_opaque_patch(unpatched),
-        "fuzz workspace does not select the reviewed local OPAQUE source",
-    )
-    moved = copy.deepcopy(fuzz_manifest)
-    moved["patch"]["crates-io"]["opaque-ke"] = {  # type: ignore[index]
-        "path": "../vendor/opaque-ke-4.0.2"
+    validate_no_opaque_override(fuzz_manifest, "fuzz workspace")
+    patched = copy.deepcopy(fuzz_manifest)
+    patched["patch"]["crates-io"]["opaque-ke"] = {  # type: ignore[index]
+        "path": f"../{EXPECTED_SOURCE_PATCH['path']}"
     }
     expect_failure(
-        "fuzz OPAQUE patch naming another directory",
-        lambda: validate_fuzz_opaque_patch(moved),
-        "fuzz workspace does not select the reviewed local OPAQUE source",
+        "fuzz workspace with a redundant OPAQUE override",
+        lambda: validate_no_opaque_override(patched, "fuzz workspace"),
+        "must select OPAQUE without a registry override",
     )
-    cases += 2
+    cases += 1
 
     root_lock = load_toml(root / "Cargo.lock")
     fuzz_lock = load_toml(root / "fuzz/Cargo.lock")
