@@ -59,6 +59,7 @@ mod recovery_gates;
 pub(crate) mod recovery_lineage;
 pub mod request;
 pub(crate) mod request_expiry;
+mod reservations;
 mod resident;
 pub(crate) mod response_read;
 pub mod results;
@@ -202,6 +203,7 @@ impl From<&Correlation> for CompanionOriginKey {
 pub struct CompanionState {
     /// Routes.
     pub routes: RouteTable,
+    reservations: reservations::Leases,
     /// Sequencer logs by conversation.
     pub logs: BTreeMap<[u8; 32], SequencerLog>,
     /// Lifecycles by conversation.
@@ -638,7 +640,7 @@ impl CompanionCoordinator {
         key: &agenc_relay_storage::StoredKey,
         value: &agenc_relay_storage::PersistentRecordValue,
     ) {
-        self.restore.admit(table, key, value);
+        self.restore.admit(table, key, value, None);
     }
 
     /// Supplies backing before a declared recovery row allocates retained metadata.
@@ -654,7 +656,7 @@ impl CompanionCoordinator {
         {
             self.restore.admit_gate(key, value, backing);
         } else {
-            self.admit_restored(table, key, value);
+            self.restore.admit(table, key, value, Some(backing));
         }
     }
 

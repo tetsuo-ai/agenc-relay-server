@@ -408,6 +408,11 @@ impl RouteTable {
             .or_insert(reservation);
     }
 
+    /// Remove an exact grant when its durable expiry batch commits.
+    pub fn remove_reservation(&mut self, id: ReservationId) {
+        self.reservations.remove(&id);
+    }
+
     /// Drops every reservation whose expiry passed.
     pub fn expire_reservations(&mut self, now: u64) -> usize {
         let before = self.reservations.len();

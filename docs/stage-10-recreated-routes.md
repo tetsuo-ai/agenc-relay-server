@@ -429,3 +429,26 @@ This commit changes no production source. Its Stage 08 evidence (G-07) is
 this daemon test, new evidence for S08-004 and S08-037 with no transcript
 row; no model action or count, transcript row or pinned test changed, and
 no box changes.
+
+## Recovery of unconsumed route grants
+
+A reservation survives a relay restart until the signed deadline. Startup
+recovers the grant from its durable claim and the referenced reservation
+object, verifies their identity, network and route commitment, and retains
+the indexed metadata under the memory budget. The signed object can stay
+on disk. Existing claim and object encodings remain readable. Older stores
+also kept claims after a successful BIND. Startup identifies those claims
+from the concrete route history, including closed routes, and retires them.
+
+BIND consumes the matching owner's claim in the same durable transaction
+as the route update. At or after the deadline, RESERVE can reclaim expired
+claims while issuing the next grant. A channel grant retains the channel
+instance. A Direct grant commits to the two accounts with a fresh nonce,
+so a new Direct grant requires newly signed route material. Independent
+clock-driven maintenance drains abandoned grants in bounded batches and
+shares the existing transaction limit with request expiry.
+
+The recreated-route tests cover both sides of the deadline across restart,
+the original owner, overlapping old grants, closure and a fresh incarnation.
+The normal-storage recovery test drops the callback after the atomic route
+and object-ownership commit and reopens the sealed database.
