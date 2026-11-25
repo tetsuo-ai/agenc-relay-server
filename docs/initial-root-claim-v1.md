@@ -23,6 +23,14 @@ coordinator may offer it directly. New account creation additionally requires
 an absent capability, NAK, CAP DEL, descriptor change or uncertain transfer.
 It must never retry with unguarded creation.
 
+Both receiving edges and local coordinators require the exact capability to
+remain negotiated on the current connection before admitting CLAIMSTART or
+ACCTROOT, including before reserving a transfer buffer. The coordinator
+requires the enhanced profile on the originating link. Withdrawal or
+reconnect invalidates uncommitted authority for that connection. A commit
+that already entered durable admission must be reconciled under fresh
+negotiation. A dropped response is never proof of rejection.
+
 Federation peers supporting this extension explicitly configure the enhanced
 base profile for their link. They use the existing authenticated FHELLO format,
 with profile version 2 and the 32-byte profile hash above. The agreed profile
@@ -130,9 +138,11 @@ InitialRootState (107 bytes)
   initial_object_id[32]
 ```
 
-The coordinator verifies the authenticated network, original recovery epoch,
+The coordinator verifies the authenticated network, current recovery-epoch
+HPKE binding,
 currently registered origin's exact account and session generation, start
-request ID and constant-time equality of the recomputed bound owner digest
+request ID and constant-time equality of the bound owner digest recomputed
+with the claim row's **original creation epoch**
 before returning a positive result. The registration must remain current
 through durable admission. Treat a missing row, lost right, wrong account,
 wrong preimage, differing chosen fingerprint and failed authorization as the
@@ -195,11 +205,15 @@ Restore and migration preserve each claim and its permanent publication gate.
 Corrupt or absent required data, impossibly mixed directory/claim state, and
 a writer that cannot enforce the gate fail closed before serving writes.
 Enabling the first guarded account requires an on-disk format fence that an
-older coordinator already refuses. Once a change of recovery epoch has been
-explicitly accepted, a claim from the previous epoch cannot select a new
-fingerprint. Its original Reserved or Chosen restriction continues to block
-other roots. An already chosen root can complete ordinary publication of that
-same signed object. An already published root remains in its verified
+older coordinator already refuses. Under a new recovery epoch, every choose
+for an older claim and a read of an older Reserved claim return Denied. The
+durable restriction still blocks other roots. After explicit descriptor
+confirmation, the holder can use a fresh HPKE read to recover a retained
+Chosen or Published result for the original creation operation. This permits
+an unsigned, locally protected root whose exact earlier choose committed
+just before the epoch change to proceed to its separately reviewed signature
+and ordinary publication. A rewind to Reserved, or any disagreement with the
+local saved choice, keeps the operation suspended. An already published root remains in its verified
 directory lineage. Account deletion and retention follow the existing
 deletion controls. They cannot reassign this Account ID to a new claimant.
 
@@ -242,9 +256,10 @@ The local caller receives a distinct, actionable outcome when its protected
 bootstrap material is unavailable. Retain the account and pending operation
 and identify the original installation or previously accepted root as the
 recovery dependency. On a changed recovery epoch, report the descriptor
-change and the original reservation's suspended status. Even after explicit
-descriptor confirmation, a new fingerprint cannot be selected under the old
-claim. When the pinned service gives an indistinguishable denial, report an
+change and suspend use of the original reservation. After explicit descriptor
+confirmation, a read may reconcile an already committed exact choice or
+published root. A new fingerprint cannot be selected under the old claim.
+When the pinned service gives an indistinguishable denial, report an
 unavailable reservation. Do not claim to know which private predicate failed.
 All three outcomes prohibit issuing fresh authority from this evidence.
 
@@ -269,7 +284,10 @@ account classes. Show one winner for two choices and for concurrent bare
 publication versus choose, including delayed durable admission. Interrupt
 creation, confirmation, choose, root publication and replies on both sides
 of commit. Reopen both stores, retry from a new origin and recover the same
-choice and signed object. Check original-response expiry, wrong network,
+choice and signed object. Lose a committed choose reply immediately before an
+epoch change, explicitly accept the new descriptor, and confirm that only the
+exact retained choice can resume. Repeat after restoring the preceding
+Reserved state and demonstrate suspension. Check original-response expiry, wrong network,
 recovery epoch, account, profile, secret, operation and fingerprint. Prove
 that a present Guarded account with a missing claim fails closed, a missing
 account has no genesis authority, a Legacy account still follows its original
