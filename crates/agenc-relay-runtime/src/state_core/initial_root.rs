@@ -8,17 +8,18 @@ use agenc_relay_storage::e2ee_records::initial_root::{
     FORMAT_KEY, InitialRootRow, KIND, RootClaimOwner, RootClaimState,
 };
 use agenc_relay_storage::{PersistentRecordValue, StorageError, StoredKey, TableId};
-use agenc_relay_types::{AccountId, Generation, RecoveryEpoch, Revision};
+use agenc_relay_types::{AccountId, Generation, RecoveryEpoch};
+use std::sync::{Arc, Weak};
 
 use super::StateCoreContext;
-use super::durable::AccountServiceDurableWrite;
+use super::durable::{AccountServiceDurableWrite, BackedRootClaim};
 use crate::RuntimeError;
 
 /// An opaque exact snapshot taken before a private response was prepared.
 pub(crate) struct InitialRootCut {
     account: AccountId,
     generation: Generation,
-    revision: Revision,
+    owner: Option<Weak<BackedRootClaim>>,
 }
 
 impl StateCoreContext {
@@ -110,7 +111,7 @@ impl StateCoreContext {
         }))
     }
 
-    /// Holds a checked revision and registration through the protected response preparation.
+    /// Binds the checked registration and its exact authenticated private row through sealing.
     pub(crate) fn initial_root_admission(
         &self,
         account: AccountId,
@@ -120,7 +121,11 @@ impl StateCoreContext {
         let cut = InitialRootCut {
             account,
             generation,
-            revision: self.domain.revision(),
+            owner: self
+                .index
+                .initial_root_owners
+                .get(&account)
+                .map(Arc::downgrade),
         };
         Ok((cut, self.initial_root_claim(account)?))
     }
@@ -141,7 +146,7 @@ impl StateCoreContext {
         Ok(())
     }
 
-    /// Even a pure read is abandoned if the committed cut or live registration has moved.
+    /// Every reply requires the original registered account and unchanged protected state.
     pub(crate) fn plan_initial_root_choice(
         &self,
         cut: InitialRootCut,
@@ -149,10 +154,14 @@ impl StateCoreContext {
         writes: &mut Vec<AccountServiceDurableWrite>,
     ) -> Result<MutationPlan, RuntimeError> {
         self.current_root_account(cut.account, cut.generation)?;
-        if self.domain.revision() != cut.revision {
+        let row = self.root_owner(cut.account)?;
+        // The immutable indexed row is replaced only when its owning write commits. A weak
+        // reference pins its identity without keeping a superseded private verifier alive.
+        // Other accounts and public directory operations may commit while the response is sealed.
+        let current = self.index.initial_root_owners.get(&cut.account);
+        if cut.owner.as_ref().map(Weak::as_ptr) != current.map(Arc::as_ptr) {
             return Err(inconsistent());
         }
-        let row = self.root_owner(cut.account)?;
         let plan = self
             .domain
             .plan_account_service_checkpoint()

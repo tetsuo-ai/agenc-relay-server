@@ -4251,6 +4251,8 @@ impl AccountServiceCoordinator {
             || self.pending_authority.is_some()
             || self.ready_stage.is_some()
             || self.has_seal_job()
+            || (context.pending_len() != 0
+                && matches!(self.ready_seals.front(), Some(ReadySeal::Claim { .. })))
         {
             return None;
         }

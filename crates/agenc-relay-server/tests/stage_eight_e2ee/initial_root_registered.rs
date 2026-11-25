@@ -564,6 +564,20 @@ fn two_registered_choices_and_bare_publication_share_one_genesis() -> TestResult
     let mut directory =
         authenticated_session(&network.edge_a, "Directory", "racing-creator", 51, account)?;
     await_directory_account(&mut directory, account)?;
+    for (client, id) in choices.iter_mut().zip([68, 69]) {
+        assert!(matches!(
+            claim(
+                client,
+                fixture,
+                account,
+                ids[0],
+                &secret,
+                ClaimAction::Read,
+                id
+            )?,
+            Some(ClaimState::Reserved)
+        ));
+    }
     let first = Principal::new(61, 62, account)?;
     let second = Principal::new(63, 64, account)?;
     let mut competing = Principal::new(65, 66, account)?;
@@ -597,7 +611,7 @@ fn two_registered_choices_and_bare_publication_share_one_genesis() -> TestResult
         Ok([one, two])
     })?;
     let mut fresh = registered_owner(fixture, "Reconcile", "racing-creator", 75, account)?;
-    let Some(ClaimState::Chosen(winner)) = claim(
+    let retained = claim(
         &mut fresh,
         fixture,
         account,
@@ -605,9 +619,21 @@ fn two_registered_choices_and_bare_publication_share_one_genesis() -> TestResult
         &secret,
         ClaimAction::Read,
         80,
-    )?
-    else {
-        return Err(failure("neither racing request fixed a root"));
+    );
+    let Ok(Some(ClaimState::Chosen(winner))) = retained else {
+        let outcome = |result: &TestResult<Option<ClaimState>>| match result {
+            Ok(Some(ClaimState::Reserved)) => "reserved",
+            Ok(Some(ClaimState::Chosen(_))) => "chosen",
+            Ok(Some(ClaimState::Published { .. })) => "published",
+            Ok(None) => "denied",
+            Err(_) => "no validated reply",
+        };
+        return Err(failure(format!(
+            "expected one durable choice, read {} after client outcomes {} and {}",
+            outcome(&retained),
+            outcome(&attempts[0]),
+            outcome(&attempts[1])
+        )));
     };
     if winner != a && winner != b {
         return Err(failure("unexpected selected root"));
@@ -619,12 +645,6 @@ fn two_registered_choices_and_bare_publication_share_one_genesis() -> TestResult
                 confirmed = true;
             }
             Ok(None) if requested != winner => {}
-            // The coordinator may fence a stale prepared request by closing its transport.
-            Err(error)
-                if requested != winner
-                    && error
-                        .to_string()
-                        .starts_with("transport closed before the expected reply") => {}
             Err(error) => return Err(error),
             _ => {
                 return Err(failure(
