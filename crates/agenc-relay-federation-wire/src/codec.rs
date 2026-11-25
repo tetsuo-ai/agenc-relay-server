@@ -110,7 +110,7 @@ impl DecodeBudget {
         self.remaining_values
     }
 
-    fn claim_bytes(&mut self, amount: usize) -> Result<(), CodecError> {
+    pub(crate) fn claim_bytes(&mut self, amount: usize) -> Result<(), CodecError> {
         self.remaining_bytes = self
             .remaining_bytes
             .checked_sub(amount)

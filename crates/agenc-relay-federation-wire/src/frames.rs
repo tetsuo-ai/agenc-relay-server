@@ -621,6 +621,13 @@ impl FederationFrame {
             next: 0,
         };
         let frame = parse_form(descriptor.form, &mut cursor, tags, profile)?;
+        if profile == FederationProfile::Base
+            && matches!(&frame, Self::Request { fragment, .. } | Self::Result { fragment, .. }
+                if fragment.part() == 0 && fragment.segment().starts_with(&2u16.to_be_bytes()))
+        {
+            // Reject before the link assembler reserves the declared object length.
+            return Err(FrameError::Codec(crate::CodecError::CrossReference));
+        }
         cursor.finish()?;
         Ok(frame)
     }

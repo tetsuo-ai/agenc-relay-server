@@ -46,6 +46,7 @@ pub use history::{
 };
 pub use initial_root::{
     FederationProfile, INITIAL_ROOT_PROFILE_SHA256, INITIAL_ROOT_PROFILE_TOKEN,
+    InitialRootOperation, InitialRootRequest, InitialRootResult,
 };
 pub use objects::{
     CrossProfilePart, EventHeader, FEDERATION_EXPORTER_CONTEXT_BYTES, FEDERATION_EXPORTER_LABEL,
