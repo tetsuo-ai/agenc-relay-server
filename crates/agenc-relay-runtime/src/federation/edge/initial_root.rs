@@ -18,7 +18,9 @@ use crate::state_core::StateCoreContext;
 /// Exact registered origin admitted at the first byte of a private claim.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct Principal {
+    origin: agenc_relay_types::OriginId,
     session: agenc_relay_types::SessionId,
+    user: agenc_relay_types::UserId,
     account: agenc_relay_types::AccountId,
     account_generation: u64,
     origin_generation: u64,
@@ -32,13 +34,33 @@ impl EdgeFederation {
         let origin = self
             .origins
             .get(&connection)
-            .filter(|origin| !origin.deleted)?;
+            .filter(|origin| !origin.deleted && !origin.revoked)?;
+        // Registration can finish while its exact declaration is awaiting an ACK.
+        // Use the generation that owns these facts on both sides of that ACK.
+        let (generation, declared) = match origin.pending_updates.back() {
+            Some(next) => (
+                next.generation,
+                (
+                    next.session
+                        .map(|session| (session.session_id, session.user_id)),
+                    next.account
+                        .map(|account| (account.account_id, account.account_session_generation)),
+                ),
+            ),
+            None => (origin.generation, origin.held_principal),
+        };
+        if declared != (origin.session, origin.account) {
+            return None;
+        }
+        let (session, user) = origin.session?;
         let (account, account_generation) = origin.account?;
         Some(Principal {
-            session: origin.session?.0,
+            origin: origin.origin_id,
+            session,
+            user,
             account,
             account_generation,
-            origin_generation: origin.generation,
+            origin_generation: generation,
         })
     }
 }
@@ -85,6 +107,22 @@ impl Carrier {
             InitialRootOperation::base_layout,
         )
     }
+    pub(super) fn completion(
+        self,
+        link: LinkId,
+        generation: ConnectionGeneration,
+        carrier_generation: u64,
+        outcome: RemoteCarrierOutcome,
+    ) -> EdgeCompletion {
+        EdgeCompletion::InitialRoot {
+            generation,
+            carrier_generation,
+            link,
+            phase: self.phase(),
+            outcome,
+        }
+    }
+
     pub(super) fn outcome(
         self,
         result: ResultArm,
@@ -109,22 +147,25 @@ impl Carrier {
 pub(crate) struct OwnedCarrier {
     pub(crate) carrier: Carrier,
     pub(crate) link: LinkId,
+    principal: Option<Principal>,
 }
 
 impl OwnedCarrier {
-    pub(super) fn completion(
-        self,
+    pub(crate) fn bind(
+        edge: &EdgeFederation,
         generation: ConnectionGeneration,
-        carrier_generation: u64,
-        outcome: RemoteCarrierOutcome,
-    ) -> EdgeCompletion {
-        EdgeCompletion::InitialRoot {
-            generation,
-            carrier_generation,
-            link: self.link,
-            phase: self.carrier.phase(),
-            outcome,
+        carrier: Carrier,
+        link: LinkId,
+    ) -> Option<Self> {
+        let principal = edge.initial_root_principal(generation);
+        if (carrier == Carrier::Claim) != principal.is_some() {
+            return None;
         }
+        Some(Self {
+            carrier,
+            link,
+            principal,
+        })
     }
 
     // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the exact active link and origin phase guard both the deferred and immediate append of this same fixed account envelope
@@ -138,6 +179,7 @@ impl OwnedCarrier {
     ) -> Result<(), Violation> {
         if !edge.network_available()
             || edge.initial_root_link() != Some(self.link)
+            || edge.initial_root_principal(generation) != self.principal
             || edge.journal.retry.recovering
         {
             return Err(Violation::Phase);
@@ -145,7 +187,7 @@ impl OwnedCarrier {
         let origin = edge
             .origins
             .get(&generation)
-            .filter(|origin| !origin.deleted)
+            .filter(|origin| !origin.deleted && !origin.revoked)
             .ok_or(Violation::Phase)?;
         let session = match self.carrier {
             Carrier::Claim if origin.account.is_some() => {
