@@ -117,6 +117,7 @@ The encrypted profile rides on the federation link between the coordinator and i
 - `certificate_spki_sha256` is the SHA-256 hash of the subject public key info of the peer's federation certificate.
 - `signing_public_key` is the Ed25519 public key of the raw 32-byte seed the peer's `init` wrote to `keys/federation-signing.key`. No `arcd` command prints it.
 - On an edge, the coordinator record's `endpoints` lists the coordinator's federation listener. A coordinator's edge records keep `endpoints = []`, because each edge dials its coordinator.
+- To offer guarded first-root creation through an edge, set `initial_root_profile = true` in the matching `[[federation.peer]]` on both that edge and its coordinator. Restart both peers to apply the change. Their signed handshake checks the selected profile. Other peer links default to base v1. The client requests the capability explicitly on each connection. See the [first-root service and database compatibility notes](stage-10-prospective-root-service.md).
 
 Every node then names the same public sequencer credentials document, and the coordinator also holds the sequencer key `init` wrote. Create the document of a new network once, on the coordinator, after its configuration passes `check-config`:
 
