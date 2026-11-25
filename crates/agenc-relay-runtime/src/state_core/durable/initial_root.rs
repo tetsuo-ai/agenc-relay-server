@@ -12,7 +12,7 @@ use crate::budget::{BackingReservationPort, MemoryBudget, MemoryPermit};
 /// Covers the private index entry, its immutable row, and the one replacement
 /// held by the serialized writer until its commit publishes or is discarded.
 /// The process budget adds allocator bookkeeping and rounds up to its quantum.
-const ROOT_SLOT_CAPACITY: usize = 2_048;
+pub(super) const ROOT_SLOT_CAPACITY: usize = 2_048;
 const _: () = assert!(2 * size_of::<BackedRootClaim>() < ROOT_SLOT_CAPACITY);
 
 /// An immutable private result and the lifetime reservation for this account.
@@ -51,6 +51,15 @@ impl DurableIndex {
     ) -> Result<Arc<BackedRootClaim>, RuntimeError> {
         let backing = match self.initial_root_owners.get(&row.account) {
             Some(previous) => Arc::clone(&previous.backing),
+            None if let Some(slot) =
+                self.guarded_directory
+                    .restored_slot(&super::guarded_directory::account(
+                        row.network,
+                        row.account,
+                    )?) =>
+            {
+                Arc::clone(slot)
+            }
             None => Arc::new(
                 self.initial_root_backing
                     .as_ref()

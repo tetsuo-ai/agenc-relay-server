@@ -7,6 +7,8 @@ use agenc_relay_types::{AccountId, AccountRandomId, NetworkId, RecoveryEpoch, Re
 use crate::codec::{Decoder, Encoder};
 use crate::{StorageError, StoredKey};
 
+pub mod directory;
+
 /// Account-private ownership row and feature-format discriminator.
 pub const KIND: u16 = 26;
 /// Prefix of immutable account-private ownership rows.
@@ -69,6 +71,8 @@ pub enum InitialRootRow {
     Format,
     /// One private immutable creation authority for a guarded account.
     Owner(RootClaimOwner),
+    /// The authenticated logical account-directory subtotal, including its own envelope.
+    Directory(directory::Subtotal),
 }
 
 impl RootClaimOwner {
@@ -133,7 +137,13 @@ impl InitialRootRow {
 
     /// Decodes only the two supported fixed-width arms.
     pub fn decode(body: &[u8]) -> Result<Self, StorageError> {
-        if ![3 + WRAPPER_BYTES, OWNER_BYTES + WRAPPER_BYTES].contains(&body.len()) {
+        if ![
+            3 + WRAPPER_BYTES,
+            OWNER_BYTES + WRAPPER_BYTES,
+            43 + WRAPPER_BYTES,
+        ]
+        .contains(&body.len())
+        {
             return Err(StorageError::InvalidEncoding);
         }
         let inner = zeroize::Zeroizing::new(super::unwrap(KIND, body)?);
@@ -151,6 +161,7 @@ impl InitialRootRow {
                 owner: InitialRootClaimOwner::from_protected_bytes(input.array()?),
                 state: decode_state(&mut input)?,
             }),
+            [2] => Self::Directory(directory::Subtotal::read(&mut input)?),
             _ => return Err(StorageError::InvalidEncoding),
         };
         input.finish()?;
@@ -178,6 +189,7 @@ impl InitialRootRow {
         let matches = match &row {
             Self::Format => key.as_bytes() == FORMAT_KEY,
             Self::Owner(owner) => RootClaimOwner::key(owner.network, owner.account)? == *key,
+            Self::Directory(subtotal) => subtotal.key()? == *key,
         };
         if !matches {
             return Err(StorageError::InvalidEncoding);
@@ -204,7 +216,9 @@ fn decode_state(input: &mut Decoder<'_>) -> Result<RootClaimState, StorageError>
 /// Private key space, including malformed suffixes that must never be accepted under another kind.
 #[must_use]
 pub fn is_reserved_key(key: &StoredKey) -> bool {
-    key.as_bytes().starts_with(PREFIX) || key.as_bytes().starts_with(FORMAT_KEY)
+    key.as_bytes().starts_with(PREFIX)
+        || key.as_bytes().starts_with(FORMAT_KEY)
+        || key.as_bytes().starts_with(directory::PREFIX)
 }
 
 #[cfg(test)]

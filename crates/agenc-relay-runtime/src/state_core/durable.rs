@@ -237,12 +237,15 @@ pub(crate) enum AdminMutationAfterImage {
     Channel(DurableChannel),
 }
 
+pub(super) mod guarded_directory;
 mod initial_root;
 pub use initial_root::BackedRootClaim;
 
 /// One change the index applies after the batch it belongs to commits.
 #[derive(Clone, Eq, PartialEq)]
 pub enum IndexUpdate {
+    /// Account-directory accounting and backed object ownership from this exact batch.
+    GuardedDirectory(std::sync::Arc<guarded_directory::Updates>),
     /// An original, immutable guarded creation was committed.
     InitialRootOwner(std::sync::Arc<BackedRootClaim>),
     /// A guarded account was authoritatively deleted with its private owner.
@@ -298,6 +301,7 @@ pub enum IndexUpdate {
 /// Before-images and secondary-row ownership for every durable row.
 #[derive(Default)]
 pub struct DurableIndex {
+    pub(super) guarded_directory: guarded_directory::Directory,
     pub(super) companion_disk: Option<agenc_relay_storage::CompanionDiskAccounting>,
     pub(super) initial_root_owners: BTreeMap<AccountId, std::sync::Arc<BackedRootClaim>>,
     initial_root_backing: Option<crate::budget::BackingReservationPort>,
@@ -377,6 +381,7 @@ impl DurableIndex {
 
     fn apply_one(&mut self, update: &IndexUpdate) {
         match update {
+            IndexUpdate::GuardedDirectory(changes) => self.guarded_directory.apply(changes),
             IndexUpdate::InitialRootOwner(owner) => {
                 self.initial_root_owners
                     .insert(owner.row().account, owner.clone());
@@ -1141,6 +1146,7 @@ pub(crate) fn project_admin_audit_retention(
 
 impl Projection<'_> {
     fn project_companion_disk(&mut self, revision: u64) -> Result<(), RuntimeError> {
+        self.project_guarded_directory(revision)?;
         let Some(current) = self.index.companion_disk else {
             return Ok(());
         };
@@ -1192,6 +1198,12 @@ impl Projection<'_> {
         bytes: &[u8],
     ) -> Result<(), RuntimeError> {
         use agenc_relay_storage::e2ee_records::initial_root::{FORMAT_KEY, InitialRootRow, PREFIX};
+        if key
+            .as_bytes()
+            .starts_with(agenc_relay_storage::e2ee_records::initial_root::directory::PREFIX)
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
         if !key.as_bytes().starts_with(PREFIX) && key.as_bytes() != FORMAT_KEY {
             return Ok(());
         }
@@ -1206,9 +1218,16 @@ impl Projection<'_> {
                         && !self.index.holds(TableId::E2eeState, key) => {}
                     _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
                 }
-                self.updates.push(IndexUpdate::InitialRootOwner(
-                    self.index.back_root_owner(owner)?,
-                ));
+                let owner = self
+                    .index
+                    .back_root_owner(owner)
+                    .map_err(|error| match error {
+                        RuntimeError::MemoryExhausted => {
+                            RuntimeError::Storage(StorageError::LimitExceeded)
+                        }
+                        other => other,
+                    })?;
+                self.updates.push(IndexUpdate::InitialRootOwner(owner));
             }
             _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
         }

@@ -81,7 +81,7 @@ fn signed_identity(
         profile_version: 1,
         network_id: *network.as_bytes(),
         account_id: account_field(account.to_text().as_bytes().try_into()?)?,
-        root_generation: u64::from(previous.is_some()),
+        root_generation: previous.map_or(0, |(_, old)| old.tbs.root_generation + 1),
         root_public_key: public(&identity),
         not_before: 10,
         not_after: 999_999,
@@ -102,11 +102,12 @@ fn signed_identity(
     })
 }
 
-async fn publish(
+fn stage_publication(
     fixture: &mut StateCoreFixture,
+    coordinator: &CompanionCoordinator,
     root: &ArcRootIdentity,
-    chain: &mut Vec<[u8; 32]>,
-) -> TestResult<[u8; 32]> {
+    chain: &[[u8; 32]],
+) -> TestResult<([u8; 32], crate::e2ee::coordinator::owners::Staged)> {
     let bytes = ArcWireObject::new(ArcWireObjectKind::RootIdentity, root.encode()?)?.encode()?;
     let object = *agenc_relay_e2ee::ObjectId::compute(&bytes).as_bytes();
     let fingerprint = root_fingerprint(root)?;
@@ -132,12 +133,11 @@ async fn publish(
             .map_err(|_| "signed object")?
             .at_revision(plan.resulting_revision().get())?,
     );
-    chain.push(object);
     let row = DirectoryRow::Identity {
         root_generation: root.tbs.root_generation,
         root_fingerprint: fingerprint,
         object_id: object,
-        chain_object_ids: chain.clone(),
+        chain_object_ids: chain.iter().copied().chain([object]).collect(),
     };
     let directory = PersistentRecordValue::new(
         TableId::E2eeState,
@@ -153,12 +153,56 @@ async fn publish(
         DirectoryRow::identity_key(&digest)?,
         directory.encode()?,
     )?);
+    let owners = coordinator
+        .stage_owners(&mut writes, 1_000, false, plan.resulting_revision().get())
+        .map_err(|_| "signed directory and object owners")?;
     stage(context, plan, writes)?;
+    Ok((object, owners))
+}
+
+async fn publish(
+    fixture: &mut StateCoreFixture,
+    coordinator: &mut CompanionCoordinator,
+    root: &ArcRootIdentity,
+    chain: &mut Vec<[u8; 32]>,
+) -> TestResult<[u8; 32]> {
+    let (object, owners) = stage_publication(fixture, coordinator, root, chain)?;
     fixture
         .commit_staged_batch()
         .await
         .map_err(|error| format!("publish generation {}: {error}", root.tbs.root_generation))?;
+    owners.apply(&mut coordinator.state);
+    chain.push(object);
     Ok(object)
+}
+
+fn saved_directory_bytes(fixture: &mut StateCoreFixture, account: AccountId) -> TestResult<u64> {
+    use agenc_relay_storage::e2ee_records::initial_root::directory::Subtotal;
+    use agenc_relay_storage::{ReadPlan, SealedRecord};
+    let digest = account_id_digest(
+        fixture.identity.network_id.as_bytes(),
+        account.to_text().as_bytes(),
+    )?;
+    let key = Subtotal {
+        account: digest,
+        bytes: 4096,
+    }
+    .key()?;
+    let result = fixture.read_rows(ReadPlan::exact(TableId::E2eeState, key.clone()))?;
+    let [row] = result.records.as_slice() else {
+        return Err("scoped directory receipt missing".into());
+    };
+    let plain = fixture.context_mut()?.keys.open(
+        TableId::E2eeState,
+        &key,
+        &SealedRecord::decode(&row.sealed_record)?,
+    )?;
+    let value =
+        PersistentRecordValue::decode(TableId::E2eeState, plain.expose_for_storage_codec())?;
+    let InitialRootRow::Directory(total) = InitialRootRow::check_record(&key, &value)? else {
+        return Err("expected directory subtotal".into());
+    };
+    Ok(total.bytes)
 }
 
 #[tokio::test]
@@ -176,6 +220,7 @@ async fn guarded_initial_root_survives_four_reopens_and_a_signed_rotation_with_o
         state: RootClaimState::Reserved,
     };
     reserved_database(&mut fixture, &original).await?;
+    assert_eq!(saved_directory_bytes(&mut fixture, account)?, 2 * 4096);
     let none = crate::sync::Arc::new(crate::budget::MemoryBudget::new(0));
     let Err(error) = fixture.recover_with_account_budget(&none) else {
         return Err("fresh startup must reserve the private owner".into());
@@ -202,6 +247,7 @@ async fn guarded_initial_root_survives_four_reopens_and_a_signed_rotation_with_o
     stage(context, plan, writes)?;
     fixture.commit_staged_batch().await?;
     fixture.restart_registration_storage(vec![49; 32_768])?;
+    assert_eq!(saved_directory_bytes(&mut fixture, account)?, 2 * 4096);
     let context = fixture.context_mut()?;
     assert!(
         context
@@ -213,12 +259,19 @@ async fn guarded_initial_root_survives_four_reopens_and_a_signed_rotation_with_o
         Err(E2eeReplyCode::BindingAuthInvalid)
     ));
     let mut chain = vec![];
-    let id = publish(&mut fixture, &first, &mut chain).await?;
+    let mut coordinator = CompanionCoordinator::new(
+        *network.as_bytes(),
+        fixture.identity.server_id,
+        "coord.test".into(),
+    );
+    let id = publish(&mut fixture, &mut coordinator, &first, &mut chain).await?;
     fixture.restart_registration_storage(vec![51; 32_768])?;
+    assert_eq!(saved_directory_bytes(&mut fixture, account)?, 5 * 4096);
     let second = signed_identity(network, account, 43, Some((41, &first)))?;
-    let next = publish(&mut fixture, &second, &mut chain).await?;
+    let next = publish(&mut fixture, &mut coordinator, &second, &mut chain).await?;
     assert_ne!(next, id);
     fixture.restart_registration_storage(vec![52; 32_768])?;
+    assert_eq!(saved_directory_bytes(&mut fixture, account)?, 7 * 4096);
     assert!(
         fixture
             .context_mut()?
@@ -232,3 +285,5 @@ async fn guarded_initial_root_survives_four_reopens_and_a_signed_rotation_with_o
     );
     Ok(())
 }
+
+mod quota;
