@@ -72,6 +72,7 @@ use crate::sync::Arc;
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn core::error::Error>>;
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static NEXT_CHANNEL_SEED: AtomicU64 = AtomicU64::new(100);
 
 /// Storage limits small enough for unit tests and large enough for every
 /// mutation batch a test stages.
@@ -1158,8 +1159,13 @@ pub(crate) fn answer_external(
 ) -> TestResult<agenc_relay_domain::ExternalInputs> {
     use agenc_relay_domain::{ExternalInputRequest, ExternalInputs};
     let mut inputs = ExternalInputs::default();
+    // Keep the usual rotating choice for separate plans and channel re-creations,
+    // skipping any IDs other plans have already installed in this fixture.
+    let start = NEXT_CHANNEL_SEED
+        .fetch_add(8, Ordering::Relaxed)
+        .to_le_bytes()[0];
     let mut free_channels = (0..=u8::MAX)
-        .map(agenc_relay_testkit::channel_id)
+        .map(|offset| agenc_relay_testkit::channel_id(start.wrapping_add(offset)))
         .filter(|id| context.domain().channel(*id).is_none());
     for request in requests {
         match request {
