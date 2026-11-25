@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1161
-reviewed_source_sha256 = "ef19e9a582558694fb9145a85f847b3a90c6c7c4249f6889e970a7beac0bf2b1"
+reviewed_source_files = 1162
+reviewed_source_sha256 = "003ca9ef708bbd9f367487666e84bec463a8215d919ee1f8b669834490b17a1e"
 deferred = []
 
 [[region]]
@@ -588,9 +588,9 @@ id = "guarded-exact-result-deadline"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/account_service/initial_root.rs"
 item = "require_live_claim_result"
-source_sha256 = "143bec9c9aabd8c88708e83280b0b30008526541248638067e37cde34ca6e4b6"
-start_line = 469
-end_line = 477
+source_sha256 = "864df6bc6925534ce9f878307246a4bc9637b8233f0c5c5f994caae31995a064"
+start_line = 472
+end_line = 480
 span_sha256 = "450697a46eb1568d26e34e9c9c264b310f9ebc2617ef62d4222244838b3f6d85"
 metric = "branches"
 reason = "Both first delivery and exact replay require a trusted observation strictly before the durable expiry."

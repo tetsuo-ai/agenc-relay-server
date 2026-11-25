@@ -24,7 +24,9 @@ An edge answers a protected probe only while its exact configured coordinator li
 
 A registered client may begin a private read while the coordinator is acknowledging its account declaration. The edge retains the exact origin, session, user, account, account generation and federation link that own the request. It forwards the sealed request after the matching acknowledgment. The edge tests exercise that interleaving, then change the account generation and the link independently and verify that each change prevents forwarding.
 
-The registered race case starts two TLS connections choosing distinct valid fingerprints for the same guarded account, while a third connection on an ordinary edge submits a different valid signed root. A fresh sign-in finds exactly one choice, the other signed root is refused, and the directory accepts the chosen signed object. A final private read matches the published fingerprint and object ID.
+Two registered TLS clients each read the original reservation and simultaneously choose distinct valid fingerprints, while a third client on an ordinary edge submits another valid signed root. The coordinator returns one protected choice and one protected denial. A fresh sign-in finds exactly that choice, the other signed root is refused, and the directory accepts the chosen signed object. A final private read matches the published fingerprint and object ID.
+
+When a durable write is pending, an opened private request stays in the bounded seal queue. Once the writer is idle, the service checks the registered caller and the immutable private account row before sealing and again at durable admission. An unrelated account write can complete in between. Replacing or deleting the original private row invalidates the prepared decision, including a read. The response counter and committed ciphertext remain subject to their own checks.
 
 ## Results on an authenticated federation link
 
