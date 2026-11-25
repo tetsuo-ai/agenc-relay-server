@@ -4,8 +4,8 @@
 //! close, bootstraps and carries traffic both ways. After a coordinator
 //! restart and then an edge restart the restored incarnation carries
 //! traffic, then closes in its turn, and the incarnation after it binds and
-//! carries traffic. While an incarnation is live the pair takes no other
-//! reservation and plaintext between the two accounts is refused; a closed
+//! carries traffic. An operational pair permits one explicit migration grant
+//! and retains its old binding and plaintext guard while that grant is open. A closed
 //! incarnation takes no traffic. Both accounts use edge A.
 #![forbid(unsafe_code)]
 
@@ -39,10 +39,60 @@ fn reserve(creator: &mut Party, peer: &Party) -> TestResult<Vec<String>> {
     labeled_reply(&mut creator.client, &label)
 }
 
-/// Another reservation of the pair is refused while an incarnation is live.
-pub(super) fn pair_held(creator: &mut Party, peer: &Party) -> TestResult {
-    let held = reserve(creator, peer)?;
-    assert_contains(&held, "FAIL EGROUP E2EE_GROUP_CONFLICT")
+/// Only the labeled scalar that ended this request can refuse the grant.
+fn group_conflict(reply: &[String]) -> bool {
+    completion_line(reply)
+        .ok()
+        .and_then(|line| result_words(line))
+        .is_some_and(|words| {
+            words
+                .iter()
+                .take(3)
+                .map(String::as_str)
+                .eq(["FAIL", "EGROUP", "E2EE_GROUP_CONFLICT"])
+        })
+}
+
+/// A live pair grants its creator one proposed successor. With or without a
+/// restart its current query still returns the original exact binding package.
+pub(super) fn pair_held(
+    creator: &mut Party,
+    peer: &Party,
+    bound: &BoundConversation,
+    previous: Option<&ArcReservation>,
+) -> TestResult<ArcReservation> {
+    let reply = reserve(creator, peer)?;
+    let grant = if let Some(kept) = previous
+        && group_conflict(&reply)
+    {
+        kept.clone()
+    } else {
+        let fresh = reservation_of(&reply)?;
+        assert_eq!(fresh.tbs.kind, ArcConversationKind::Direct);
+        assert_ne!(fresh.tbs.route_binding, bound.route_binding);
+        if let Some(kept) = previous {
+            let issued = fresh
+                .tbs
+                .expires_at
+                .checked_sub(e2ee::limits::RESERVATION_TIMEOUT_SECONDS)
+                .ok_or("grant deadline")?;
+            assert!(issued >= kept.tbs.expires_at);
+            assert_ne!(fresh.tbs.reservation_id, kept.tbs.reservation_id);
+            assert_eq!(fresh.tbs.conversation_nonce, kept.tbs.conversation_nonce);
+        }
+        assert!(group_conflict(&reserve(creator, peer)?));
+        fresh
+    };
+    let label = creator.keys.label();
+    creator.client.send(&format!(
+        "@label={label} EGROUP QUERY DIRECT {}",
+        base64url_encode(&peer.keys.account)
+    ))?;
+    let query = labeled_reply(&mut creator.client, &label)?;
+    assert_eq!(hash_at(&query, "BOUND", 3)?, bound.conversation);
+    assert_eq!(hash_at(&query, "BOUND", 4)?, bound.binding_id);
+    assert_eq!(batch_object(&query)?, bound.binding);
+    Ok(grant)
 }
 
 /// Reserves the pair and binds its incarnation `incarnation` naming
@@ -344,7 +394,10 @@ fn recreation_across_restarts(
         "first plaintext",
         plaintext_refused(&mut creator, &peer, "in the clear"),
     )?;
-    step("live reservation", pair_held(&mut creator, &peer))?;
+    step(
+        "live reservation",
+        pair_held(&mut creator, &peer, &first, None),
+    )?;
 
     // An authorized close ends it; it then takes no traffic.
     let close_id = step(
@@ -385,7 +438,10 @@ fn recreation_across_restarts(
         "next plaintext",
         plaintext_refused(&mut creator, &peer, "still in the clear"),
     )?;
-    step("next reservation", pair_held(&mut creator, &peer))?;
+    let pending_grant = step(
+        "next reservation",
+        pair_held(&mut creator, &peer, &second, None),
+    )?;
 
     // A coordinator restart restores both incarnations: the live one
     // carries traffic again, plaintext and another reservation of the pair
@@ -449,7 +505,10 @@ fn recreation_across_restarts(
         "closed traffic after restart",
         closed_refuses_traffic(&mut creator, &first),
     )?;
-    step("reservation after restart", pair_held(&mut creator, &peer))?;
+    step(
+        "reservation after restart",
+        pair_held(&mut creator, &peer, &second, Some(&pending_grant)),
+    )?;
 
     // An edge restart restores both incarnations from the edge's own rows:
     // the accounts log in again and attach, plaintext between them is still
@@ -518,5 +577,9 @@ fn recreation_across_restarts(
         "third plaintext",
         plaintext_refused(&mut creator, &peer, "in the clear once more"),
     )?;
-    step("third reservation", pair_held(&mut creator, &peer))
+    step(
+        "third reservation",
+        pair_held(&mut creator, &peer, &third, None),
+    )
+    .map(drop)
 }

@@ -385,6 +385,7 @@ fn route_and_claim_rows_round_trip_and_check_their_rules() -> TestResult {
         incarnation: 2,
     };
     let reservation = ClaimRow::Reservation {
+        previous_binding: None,
         owner_account_digest: ACCOUNT,
         owner_device_id: DEVICE,
         kind: 1,

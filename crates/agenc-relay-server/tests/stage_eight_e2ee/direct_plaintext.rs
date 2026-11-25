@@ -241,7 +241,7 @@ fn live_closed_recreated(
         exchange(creator, peer, &second, second_terminal, 1),
     )?;
     step("recreated", check(creator, peer, "recreated"))?;
-    step("next reservation", pair_held(creator, peer))
+    step("next reservation", pair_held(creator, peer, &second, None)).map(drop)
 }
 
 #[test]

@@ -28,7 +28,7 @@ use crate::objects::sequencing::{
     ArcCommitFinalizationCertificate, ArcFinalityVote, ArcFinalizationProof,
 };
 use crate::policy::{VerifiedPolicy, verify_policy};
-use crate::route::{is_binding_successor, verify_binding_package};
+use crate::route::{is_same_group_binding_successor, verify_binding_package};
 use crate::sequencer::verify_sequencer_credential;
 use crate::tls::{DecodeBudget, TlsDecode, ensure_canonical};
 use agenc_relay_crypto::SemanticHashDomain;
@@ -356,9 +356,13 @@ impl HistoricalChain {
         let package: ArcConversationBindingPackage =
             decode_object(bytes, ArcWireObjectKind::ConversationBinding, budget)?;
         let successor = verify_binding_package(&self.network_id, &package, &self.principals)?;
-        let named = (successor.binding_id, successor.conversation_id);
-        let expected = (authorization.transition_target_digest, self.conversation_id);
-        if !is_binding_successor(&self.binding, &successor) || named != expected {
+        if successor.conversation_id != self.conversation_id
+            || !is_same_group_binding_successor(
+                &self.binding,
+                &successor,
+                &authorization.transition_target_digest,
+            )
+        {
             return Err(E2eeError::InvalidValue);
         }
         transitions.binding_id = Some(successor.binding_id);

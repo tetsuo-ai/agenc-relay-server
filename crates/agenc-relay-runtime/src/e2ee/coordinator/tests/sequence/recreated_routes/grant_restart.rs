@@ -173,6 +173,55 @@ fn legacy_grants_for_one_target_are_reclaimed_independently() -> TestResult {
     Ok(())
 }
 
+/// Expiry removes the grant's authority. The current binding still owns
+/// the random target for which its creator prepared the replacement.
+#[tokio::test]
+async fn same_group_direct_nonce_survives_expiry_maintenance_and_a_sealed_restart() -> TestResult {
+    let mut source = Harness::new()?;
+    source.publish_identity_and_roster()?;
+    source.attach()?;
+    let peer = direct_peer(&mut source)?;
+    let account = peer.root.tbs.account_id.as_slice().try_into()?;
+    let (first, initial_nonce) = ok_reservation(reserve_direct(&mut source, &account)?)?;
+    let group = direct_group(&source, &peer, (0, [0; 32]), initial_nonce, DIRECT_GROUP)?;
+    bind_and_publish(&mut source, first, &group)?;
+    operate(&mut source, group.conversation, None)?;
+    let (grant, target) = ok_reservation(reserve_direct(&mut source, &account)?)?;
+    assert_ne!(initial_nonce, target);
+    let expires = source
+        .coordinator
+        .state
+        .routes
+        .reservations()
+        .find(|entry| entry.reservation_id.0 == grant)
+        .ok_or("missing migration grant")?
+        .expires_at;
+    let batch = Prepared::capture(
+        &source.coordinator,
+        Cursor::default(),
+        expires,
+        &source.backing,
+    )?;
+    for write in batch.writes(1)? {
+        source.apply_logical_write(&write)?;
+    }
+    let mut renewed = sealed_restart(&source).await?;
+    // Each simulated independent process has its own entropy stream.
+    renewed.entropy.0 = 97;
+    renewed.now = expires;
+    assert!(!renewed.coordinator.state.reservations.contains(&grant));
+    let (replacement, nonce) = ok_reservation(reserve_direct(&mut renewed, &account)?)?;
+    assert_ne!(grant, replacement);
+    assert_eq!(target, nonce);
+    close(&mut renewed, group.conversation, 2)?;
+    let mut next = sealed_restart(&renewed).await?;
+    next.entropy.0 = 193;
+    let (fresh, next_nonce) = ok_reservation(reserve_direct(&mut next, &account)?)?;
+    assert_ne!(replacement, fresh);
+    assert_ne!(next_nonce, target);
+    Ok(())
+}
+
 /// A reservation row exactly as a pre-upgrade server would leave it on disk.
 fn archived_claim(
     h: &Harness,

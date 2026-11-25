@@ -37,6 +37,7 @@ use crate::state_core::durable::AccountServiceDurableWrite;
 
 mod delivery_owner;
 mod direct_release;
+mod direct_renewal;
 pub(crate) mod object_read;
 pub(crate) use delivery_owner::acknowledgement::read::{
     Job as AckReadJob, Request as AckReadRequest,
@@ -278,6 +279,10 @@ pub struct CompanionState {
     pub binding_locks: BTreeMap<([u8; 32], [u8; 32]), LockChain>,
     /// Restored object bytes drop before their backing reservations.
     pub(crate) object_memory: BTreeMap<[u8; 32], crate::budget::MemoryPermit>,
+    /// The concrete next Direct nonce survives expiry of its signed grant.
+    renewals: direct_renewal::Nonces,
+    /// Process backing held for retained binding-admission metadata.
+    pub(crate) binding_memory: BTreeMap<([u8; 32], u64), crate::budget::MemoryPermit>,
     /// The durable ownership account of every retained object (companion 15, 16).
     pub(crate) owners: owners::Ledger,
     /// The recovery submissions and records of pending routes (companion 13.7.4).
@@ -413,6 +418,13 @@ pub struct ConversationState {
     /// that entered it carries no proof `AuthorizedReinit::from_proof`
     /// admits, so no attempt can follow it.
     pub reinit: Option<agenc_relay_e2ee::reinit_target::AuthorizedReinit>,
+    /// Accepted binding action that fences the old concrete route until BIND.
+    pub(crate) pending_binding: Option<BindingFinality>,
+    /// All admitted binding generations in this group, excluding its genesis or ReInit anchor.
+    pub(crate) binding_admissions:
+        BTreeMap<u64, agenc_relay_storage::e2ee_records::binding_admission::BindingAdmissionRow>,
+    /// Encoded package bytes accumulated along this group's binding chain.
+    pub(crate) binding_chain_bytes: usize,
     /// The facts of the current binding a ReInit successor must replace
     /// (companion 13.8), taken from the binding as it was verified when it
     /// was bound or installed, and at a restart from the retained binding
@@ -421,6 +433,14 @@ pub struct ConversationState {
     /// rosters that verified the binding. `None` only in a state no bind,
     /// install or restore produced.
     pub reinit_facts: Option<agenc_relay_e2ee::reinit_target::ReinitPredecessor>,
+}
+
+/// The authoritative position of the old group's finalized binding action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BindingFinality {
+    pub(crate) target: [u8; 32],
+    pub(crate) sequence: u64,
+    pub(crate) record_object: [u8; 32],
 }
 
 /// One published policy the sequencer retains for its quorum check.

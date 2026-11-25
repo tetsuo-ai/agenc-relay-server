@@ -76,6 +76,52 @@ impl RouteTable {
             && self.locks.get(&entry.lock) == Some(&entry.conversation_id)
     }
 
+    /// Selects the current binding of a ReInit successor after the caller
+    /// verifies every same-group admission from its exact activation package.
+    pub fn select_continued_successor(
+        &mut self,
+        predecessor: ConversationId,
+        anchor: &BindingSummary,
+    ) -> Result<(), RouteConflict> {
+        let old = self
+            .routes
+            .get(&predecessor)
+            .ok_or(RouteConflict::RouteInvalid)?;
+        let new = *self
+            .routes
+            .get(&anchor.conversation_id)
+            .ok_or(RouteConflict::RouteInvalid)?;
+        if !Self::activation_matches(old, anchor) || !Self::continues_anchor(&new, anchor) {
+            return Err(RouteConflict::NotSuccessor);
+        }
+        self.take_indexes(&new, Indexes::ALL);
+        Ok(())
+    }
+
+    fn activation_matches(old: &RouteEntry, anchor: &BindingSummary) -> bool {
+        let concrete = match old.target {
+            RouteTarget::Channel(instance) => {
+                anchor.channel_instance_id == Some(instance) && anchor.direct_pair.is_none()
+            }
+            RouteTarget::Direct(pair) => {
+                anchor.direct_pair == Some(pair) && anchor.channel_instance_id.is_none()
+            }
+        };
+        concrete
+            && old.binding_id == anchor.previous_binding_id
+            && old.lock == anchor.lock
+            && old.lineage == anchor.lineage
+            && old.incarnation == anchor.incarnation
+            && old.binding_generation.checked_add(1) == Some(anchor.binding_generation)
+    }
+
+    fn continues_anchor(current: &RouteEntry, anchor: &BindingSummary) -> bool {
+        current.lock == anchor.lock
+            && current.lineage == anchor.lineage
+            && current.incarnation == anchor.incarnation
+            && current.binding_generation > anchor.binding_generation
+    }
+
     /// Selects an already-restored successor after the caller rechecks its
     /// retained activation. Read-back order must not select the old route,
     /// and the successor takes each index only as a restore does: a later

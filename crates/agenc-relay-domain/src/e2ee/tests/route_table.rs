@@ -459,6 +459,129 @@ fn bindings_are_replaced_only_by_their_successor() -> TestResult {
 }
 
 #[test]
+fn a_finalized_binding_spends_only_the_signed_grant_and_preserves_its_plaintext_guards()
+-> TestResult {
+    let owner = account(1);
+    let pair = DirectPair::new(owner, account(2))?;
+    for direct in [false, true] {
+        let mut table = RouteTable::new();
+        let first = ReservationId([1; 16]);
+        let original = if direct {
+            table.reserve_direct(first, pair, [6; 32], owner, 20)?;
+            summary(1, 4, None, Some(6))
+        } else {
+            table.reserve_channel(first, instance(5), owner, 20)?;
+            summary(1, 4, Some(5), None)
+        };
+        let entry = table.bind(first, owner, original, 1)?;
+        let target = if direct {
+            RouteTarget::Direct(pair)
+        } else {
+            RouteTarget::Channel(instance(8))
+        };
+        let grant = RouteReservation {
+            reservation_id: ReservationId([2; 16]),
+            target,
+            owner,
+            expires_at: 30,
+            conversation_nonce: direct.then_some([9; 32]),
+        };
+        table.reserve_binding_change(entry.conversation_id, grant)?;
+        let mut next = original;
+        next.binding_id = [89; 32];
+        next.binding_generation = 1;
+        next.previous_binding_id = entry.binding_id;
+        next.channel_instance_id = (!direct).then_some(instance(8));
+        next.conversation_nonce = grant.conversation_nonce;
+        let unchanged = table.clone();
+        let mut invalid = next;
+        invalid.previous_binding_id = [19; 32];
+        assert!(
+            table
+                .replace_reserved_binding(grant.reservation_id, owner, invalid, 2)
+                .is_err()
+        );
+        assert!(
+            table
+                .replace_reserved_binding(grant.reservation_id, account(3), next, 2)
+                .is_err()
+        );
+        assert!(
+            table
+                .replace_reserved_binding(grant.reservation_id, owner, next, grant.expires_at)
+                .is_err()
+        );
+        let mut wrong_target = next;
+        if direct {
+            wrong_target.conversation_nonce = Some([6; 32]);
+        } else {
+            wrong_target.channel_instance_id = Some(instance(5));
+        }
+        assert!(
+            table
+                .replace_reserved_binding(grant.reservation_id, owner, wrong_target, 2)
+                .is_err()
+        );
+        assert_eq!(table, unchanged);
+        let mut gated = table.clone();
+        gated.restore_pending();
+        assert!(
+            gated
+                .replace_reserved_binding(grant.reservation_id, owner, next, 2)
+                .is_err()
+        );
+        let admitted = table.replace_reserved_binding(grant.reservation_id, owner, next, 2)?;
+        assert_eq!(admitted.target, target);
+        assert_eq!(admitted.binding_id, next.binding_id);
+        assert_eq!(admitted.binding_generation, 1);
+        assert!(table.is_current(&entry.conversation_id));
+        assert_eq!(table.reservations().count(), 0);
+        if direct {
+            assert_eq!(table.direct_route(&pair), Some(&admitted));
+            assert!(!table.direct_plaintext_allowed(&pair));
+        } else {
+            assert_eq!(table.channel_route(&instance(8)), Some(&admitted));
+            assert!(table.channel_route(&instance(5)).is_none());
+            assert!(!table.channel_plaintext_allowed(&instance(5)));
+            assert!(
+                table
+                    .reserve_channel(ReservationId([3; 16]), instance(5), owner, 80)
+                    .is_err()
+            );
+            table.destroy_channel_instance(&instance(5))?;
+            assert!(table.channel_plaintext_allowed(&instance(5)));
+            assert!(!table.channel_plaintext_allowed(&instance(8)));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn an_unchanged_target_grant_cannot_create_a_second_group() -> TestResult {
+    let pair = DirectPair::new(account(1), account(2))?;
+    let owner = pair.smaller();
+    let mut table = RouteTable::new();
+    let first = ReservationId([4; 16]);
+    table.reserve_direct(first, pair, [6; 32], owner, 60)?;
+    let current = table.bind(first, owner, summary(1, 4, None, Some(6)), 1)?;
+    let grant = RouteReservation {
+        reservation_id: ReservationId([5; 16]),
+        target: RouteTarget::Direct(pair),
+        conversation_nonce: Some([6; 32]),
+        owner,
+        expires_at: 60,
+    };
+    table.reserve_binding_change(current.conversation_id, grant)?;
+    let before = table.clone();
+    assert_eq!(
+        table.bind(grant.reservation_id, owner, summary(2, 9, None, Some(6)), 2),
+        Err(RouteConflict::GroupConflict)
+    );
+    assert_eq!(table, before);
+    Ok(())
+}
+
+#[test]
 fn the_recovery_gate_only_closes_or_conflicts() -> TestResult {
     let mut table = RouteTable::new();
     let owner = account(1);

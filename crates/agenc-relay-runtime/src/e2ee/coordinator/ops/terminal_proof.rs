@@ -35,7 +35,7 @@ pub(super) fn receipt(
 }
 
 /// Checks the public hash links. This does not assert MLS ACK coverage.
-pub(super) fn finalization(proof: &ArcFinalizationProof) -> Result<(), Fail> {
+pub(in crate::e2ee::coordinator) fn finalization(proof: &ArcFinalizationProof) -> Result<(), Fail> {
     let core = &proof.core;
     let invalid = || Fail::with(E2eeReplyCode::BindingAuthInvalid, &core.conversation_id);
     let authorization_id = semantic_id_of(

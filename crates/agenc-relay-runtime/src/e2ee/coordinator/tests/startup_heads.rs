@@ -418,6 +418,8 @@ fn an_unservable_retained_terminal_is_a_recovery_error() -> TestResult {
         predecessor_record_id: predecessor,
     };
     let mut rows = SequencerRows {
+        keys: binding::Keys::default(),
+        admissions: BTreeMap::new(),
         records: BTreeMap::from([((conversation, sequence), row)]),
         candidates: BTreeMap::new(),
         proofs: Vec::new(),

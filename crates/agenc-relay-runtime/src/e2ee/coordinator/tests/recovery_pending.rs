@@ -256,6 +256,7 @@ fn evaluate_complete_with_queries(
         hosting: &hosting,
         attached_edges: &attached,
         channel_member: &member,
+        binding_channel: &|_| None,
         plan_binding: &plan_binding,
         state_generation: super::super::STATE_GENERATION,
         source_view: Vec::new(),

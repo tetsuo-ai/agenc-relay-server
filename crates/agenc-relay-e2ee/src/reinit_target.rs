@@ -527,6 +527,12 @@ pub struct ReinitPredecessor {
 }
 
 impl ReinitPredecessor {
+    /// Concrete nonce of this admitted binding, when it is a Direct pair.
+    #[must_use]
+    pub const fn conversation_nonce(&self) -> Option<[u8; 32]> {
+        self.conversation_nonce
+    }
+
     /// The facts of `binding`, as verified.
     #[must_use]
     pub fn of_binding(binding: &VerifiedBinding) -> Self {

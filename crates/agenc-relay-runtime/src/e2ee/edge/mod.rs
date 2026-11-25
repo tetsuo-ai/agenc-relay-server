@@ -473,9 +473,7 @@ impl E2eeEdge {
     /// Whether `channel` is bound to an active encrypted route here.
     #[must_use]
     pub fn channel_bound(&self, channel: &ChannelInstanceId) -> bool {
-        self.routes.channel_route(channel).is_some_and(|route| {
-            !self.routes.channel_plaintext_allowed(channel) || route.accepts_traffic()
-        })
+        !self.routes.channel_plaintext_allowed(channel)
     }
 
     /// The nine `STATS E2EE` values of an edge (spec 22.3): the enabled

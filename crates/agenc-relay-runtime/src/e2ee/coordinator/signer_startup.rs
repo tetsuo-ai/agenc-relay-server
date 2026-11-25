@@ -67,7 +67,7 @@ pub struct SignerReport {
     pub released: u64,
 }
 
-fn credential_of(
+pub(super) fn credential_of(
     row: &SequencerHistoryRow,
     credential_id: [u8; 32],
 ) -> Option<VerifiedSequencerCredential> {

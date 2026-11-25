@@ -149,6 +149,7 @@ fn evaluate_lookup(
         hosting: &|_| Vec::new(),
         attached_edges: &|_| Vec::new(),
         channel_member: &|_| false,
+        binding_channel: &|_| None,
         plan_binding: &|_, _| Ok(None),
         state_generation: 7,
         source_view: Vec::new(),

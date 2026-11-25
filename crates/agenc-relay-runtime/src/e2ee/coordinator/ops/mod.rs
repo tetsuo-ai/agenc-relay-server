@@ -15,6 +15,7 @@ use super::request::{Decoded, Outcome};
 use super::{CompanionCoordinator, CompanionOrigin};
 
 mod ack_context;
+pub(super) mod binding_change;
 mod binding_delivery;
 mod close_authority;
 mod cut_backing;
@@ -35,7 +36,7 @@ pub(super) mod reinit_install;
 pub mod route;
 pub(super) mod route_successor;
 pub mod sequence;
-mod terminal_proof;
+pub(super) mod terminal_proof;
 
 /// A handler failure: the reply code and the copied request context.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,6 +75,14 @@ pub type PlanBinding<'a> = dyn Fn(
     ) -> Result<Option<agenc_relay_domain::MutationPlan>, E2eeReplyCode>
     + 'a;
 
+/// Current base directory facts used to authorize a channel binding change.
+#[derive(Clone, Copy)]
+pub(super) struct BindingChannel {
+    pub(super) name_hash: [u8; 32],
+    pub(super) protected: bool,
+    pub(super) owner: bool,
+}
+
 /// What every handler sees.
 pub struct Exec<'a> {
     /// A runtime lookup either needs storage or carries one exact completed read.
@@ -106,6 +115,8 @@ pub struct Exec<'a> {
     pub attached_edges: &'a dyn Fn(&[u8; 32]) -> Vec<ServerId>,
     /// Whether the requesting origin's base session is a member of a channel.
     pub channel_member: &'a dyn Fn(ChannelInstanceId) -> bool,
+    /// The actual base name, encryption policy and requesting user's ownership.
+    pub(super) binding_channel: &'a dyn Fn(ChannelInstanceId) -> Option<BindingChannel>,
     /// The base binding plan for a channel whose members are exactly the
     /// named principal accounts; `None` on a node without base state.
     pub plan_binding: &'a PlanBinding<'a>,

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Included};
 
 use agenc_relay_domain::e2ee::{
-    BindingSummary, DirectPair, ReservationId, RouteTable, RouteTarget,
+    BindingSummary, DirectPair, ReservationId, RouteReservation, RouteTable, RouteTarget,
 };
 use agenc_relay_e2ee::limits::MAX_RESERVATION_OBJECT;
 use agenc_relay_e2ee::object::{ArcWireObject, ArcWireObjectKind};
@@ -80,6 +80,8 @@ pub(super) struct Lease {
     id: Id,
     expires: u64,
     owner: [u8; 32],
+    device: [u8; 16],
+    predecessor: Option<[u8; 32]>,
     target: Target,
     _backing: Option<MemoryPermit>,
 }
@@ -95,6 +97,8 @@ impl Lease {
     pub(super) fn new(
         grant: &ArcReservation,
         owner: [u8; 32],
+        device: [u8; 16],
+        predecessor: Option<[u8; 32]>,
         backing: Option<MemoryPermit>,
     ) -> Result<Self, CompanionFault> {
         let t = &grant.tbs;
@@ -126,10 +130,33 @@ impl Lease {
             id: t.reservation_id,
             expires: t.expires_at,
             owner,
+            device,
+            predecessor,
             target,
             _backing: backing,
         })
     }
+    fn permits_bind(
+        &self,
+        exec: &super::ops::Exec<'_>,
+        summary: &BindingSummary,
+        target: RouteTarget,
+        owner: [u8; 32],
+    ) -> Option<bool> {
+        let migration = summary.binding_generation != 0;
+        let same_binding = self
+            .predecessor
+            .is_none_or(|id| migration && id == summary.previous_binding_id);
+        let same_device = !migration || self.device == exec.attached_device().ok()?.0;
+        Some(
+            self.owner == owner
+                && same_binding
+                && same_device
+                && self.expires > exec.now
+                && self.target.matches(&exec.coordinator.network_id, target),
+        )
+    }
+
     pub(super) fn reserve_backing(
         port: &BackingReservationPort,
     ) -> Result<MemoryPermit, CompanionFault> {
@@ -141,21 +168,33 @@ impl Lease {
 #[derive(Default)]
 pub(super) struct Leases {
     by_id: BTreeMap<Id, Lease>,
+    by_predecessor: BTreeMap<[u8; 32], Id>,
     deadlines: BTreeSet<Deadline>,
     scopes: BTreeSet<(Scope, u64, Id)>,
 }
 
 impl Leases {
     pub(super) fn insert(&mut self, lease: Lease) {
+        if let Some(binding) = lease.predecessor {
+            self.by_predecessor.insert(binding, lease.id);
+        }
         self.scopes.insert((lease.scope(), lease.expires, lease.id));
         self.deadlines.insert((lease.expires, lease.id));
         self.by_id.insert(lease.id, lease);
     }
     pub(super) fn remove(&mut self, id: Id) {
         if let Some(lease) = self.by_id.remove(&id) {
+            if let Some(binding) = lease.predecessor
+                && self.by_predecessor.get(&binding) == Some(&id)
+            {
+                self.by_predecessor.remove(&binding);
+            }
             self.scopes.remove(&(lease.scope(), lease.expires, id));
             self.deadlines.remove(&(lease.expires, id));
         }
+    }
+    pub(super) fn for_predecessor(&self, binding: &[u8; 32]) -> Option<Id> {
+        self.by_predecessor.get(binding).copied()
     }
     pub(super) fn contains(&self, id: &Id) -> bool {
         self.by_id.contains_key(id)
@@ -227,9 +266,8 @@ impl Leases {
             (None, Some(pair)) => RouteTarget::Direct(pair),
             _ => return None,
         };
-        if lease.owner != owner
-            || lease.expires <= now
-            || !lease.target.matches(network, target)
+        let binding_change = summary.binding_generation != 0;
+        if !lease.permits_bind(exec, summary, target, owner)?
             || self.conflict(network, &owner, target, now, Some(id))
         {
             return None;
@@ -238,6 +276,24 @@ impl Leases {
             return Some(());
         }
         let id = ReservationId(id);
+        if binding_change {
+            let nonce = match lease.target {
+                Target::Direct { nonce, .. } => Some(nonce),
+                Target::Channel(_) => None,
+            };
+            return routes
+                .reserve_binding_change(
+                    summary.conversation_id,
+                    RouteReservation {
+                        reservation_id: id,
+                        target,
+                        owner: account,
+                        expires_at: lease.expires,
+                        conversation_nonce: nonce,
+                    },
+                )
+                .ok();
+        }
         match (target, lease.target) {
             (RouteTarget::Channel(instance), _) => routes
                 .reserve_channel(id, instance, account, lease.expires)
@@ -250,6 +306,31 @@ impl Leases {
     }
 }
 
+/// A finalized ReInit takes ownership of the successor. Retire any outstanding
+/// same-group grant in the receipt that freezes the old group.
+pub(super) fn retire_predecessor(
+    exec: &super::ops::Exec<'_>,
+    outcome: &mut super::request::Outcome,
+    binding: [u8; 32],
+) -> Result<(), super::ops::Fail> {
+    let Some(grant) = exec
+        .coordinator
+        .state
+        .reservations
+        .for_predecessor(&binding)
+    else {
+        return Ok(());
+    };
+    outcome.writes.push(delete(grant).map_err(|_| {
+        super::ops::Fail::from(agenc_relay_e2ee::wire::reply::E2eeReplyCode::InvalidFragment)
+    })?);
+    outcome.effects.push(Box::new(move |state| {
+        state.reservations.remove(grant);
+        state.routes.remove_reservation(ReservationId(grant));
+    }));
+    Ok(())
+}
+
 pub(super) fn delete(id: Id) -> Result<Write, crate::RuntimeError> {
     Write::delete(TableId::E2eeState, ClaimRow::reservation_key(&id)?)
 }
@@ -257,6 +338,8 @@ pub(super) fn delete(id: Id) -> Result<Write, crate::RuntimeError> {
 struct Row {
     id: Id,
     owner: [u8; 32],
+    device: [u8; 16],
+    predecessor: Option<[u8; 32]>,
     kind: u16,
     binding: [u8; 32],
     expires: u64,
@@ -284,7 +367,13 @@ impl Row {
             return Err(CompanionFault::Storage);
         }
         self.network = Some(t.network_id);
-        self.grant = Some(Lease::new(&grant, self.owner, self.backing.take())?);
+        self.grant = Some(Lease::new(
+            &grant,
+            self.owner,
+            self.device,
+            self.predecessor,
+            self.backing.take(),
+        )?);
         Ok(())
     }
 }
@@ -306,6 +395,8 @@ impl Rows {
             }
             ClaimRow::Reservation {
                 owner_account_digest,
+                owner_device_id,
+                previous_binding,
                 kind,
                 lock_id,
                 route_binding,
@@ -323,6 +414,8 @@ impl Rows {
                     Row {
                         id,
                         owner: owner_account_digest,
+                        device: owner_device_id,
+                        predecessor: previous_binding,
                         kind,
                         binding: route_binding,
                         expires: expires_at,
@@ -363,9 +456,27 @@ impl Rows {
         // Old stores kept the owner row after BIND. The concrete commitment
         // persists on the bound conversation, including its closed history.
         // Index only the claim rows being recovered when reconciling that history.
-        let mut unused: BTreeSet<_> = self.0.values().map(|row| row.binding).collect();
-        for conversation in state.conversations.values() {
+        let mut unused: BTreeSet<_> = self
+            .0
+            .values()
+            .filter(|row| row.predecessor.is_none())
+            .map(|row| row.binding)
+            .collect();
+        let requested: BTreeSet<_> = self.0.values().filter_map(|row| row.predecessor).collect();
+        let mut current = BTreeSet::new();
+        for (id, conversation) in &state.conversations {
             unused.remove(&conversation.route_binding);
+            if requested.contains(&conversation.binding)
+                && state
+                    .routes
+                    .route(&agenc_relay_domain::e2ee::ConversationId(*id))
+                    .is_some_and(|entry| entry.accepts_traffic())
+                && state
+                    .routes
+                    .is_current(&agenc_relay_domain::e2ee::ConversationId(*id))
+            {
+                current.insert(conversation.binding);
+            }
         }
         let mut leases = Leases::default();
         for (id, mut row) in self.0 {
@@ -376,7 +487,11 @@ impl Rows {
                 return Err(CompanionFault::Storage);
             }
             let mut lease = row.grant.ok_or(CompanionFault::Storage)?;
-            if !unused.contains(&row.binding) {
+            let retired = row.predecessor.map_or_else(
+                || !unused.contains(&row.binding),
+                |id| !current.contains(&id),
+            );
+            if retired {
                 // A consumed claim is immediately eligible for durable cleanup.
                 lease.expires = 0;
             }
@@ -401,6 +516,8 @@ mod tests {
             leases.insert(Lease {
                 id: u128::try_from(serial)?.to_be_bytes(),
                 owner: [3; 32],
+                device: [0; 16],
+                predecessor: None,
                 target: Target::Channel(channel),
                 expires: 90,
                 _backing: None,

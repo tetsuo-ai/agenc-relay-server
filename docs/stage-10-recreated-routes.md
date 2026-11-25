@@ -365,7 +365,7 @@ files) and four restore tests in
 | `stores_written_before_recreated_routes_restore_at_incarnation_zero` | Each store, sealed into a storage fixture and read back as a restart reads it, restores with its route at incarnation zero, its lineage its own lock, current, and naming no close. |
 | `an_earlier_closed_direct_pair_is_reserved_and_bound_again` | After a restart from the closed pair, the pair is reserved again; incarnation zero again is refused; the next incarnation binds naming the stored close in the stored route's lineage, operates, and survives a restart. |
 | `an_earlier_closed_channel_route_binds_its_next_incarnation` | After a restart from the closed channel, its next incarnation binds on a fresh instance naming the stored close, in the stored route's lineage, and operates across a restart. |
-| `an_earlier_live_direct_pair_keeps_its_pair_and_traffic` | After a restart from the live pair, its reservation is still `E2EE_GROUP_CONFLICT` and its traffic flows. |
+| `an_earlier_live_direct_pair_keeps_its_pair_and_traffic` | After a restart from the live pair, its creator can hold one migration grant. A second reservation is refused and the existing route still carries encrypted traffic. |
 
 With the start commit's keying restored, the closed pair's and the closed
 channel's tests fail and the other two pass, pinning behaviour this topic
@@ -400,7 +400,7 @@ edges, through the client surface:
 
 | Test | What it pins |
 | --- | --- |
-| `a_closed_direct_conversation_is_recreated_across_coordinator_and_edge_restarts` | Two accounts bind a direct conversation at incarnation zero, activate its bootstrap and exchange application objects both ways; while it is live, plaintext between them is `E2EE_REQUIRED` and another reservation of the pair is `E2EE_GROUP_CONFLICT`. Its closing Commit is finalized and `EGROUP CLOSE` carries both controller roots' approvals, as the fixed direct policy requires; its application objects are then `E2EE_ROUTE_INVALID`. The pair is reserved again, and incarnation one, naming the close and continuing both roots' binding locks, binds, bootstraps and carries traffic both ways, with plaintext and another reservation refused again. After a coordinator restart incarnation one carries traffic both ways, plaintext and another reservation are still refused and incarnation zero still takes no traffic. After the edge restarts and both accounts log in again, plaintext is still refused and incarnation one carries traffic. Incarnation one then closes, and incarnation two, naming that close, binds, bootstraps and carries traffic, with plaintext and another reservation refused. |
+| `a_closed_direct_conversation_is_recreated_across_coordinator_and_edge_restarts` | Two accounts operate three successive Direct incarnations across the authorized closes and both restarts. Encrypted traffic stays with the current incarnation and plaintext stays fenced. The creator may hold one successor grant while queries still return the exact current package. A second live grant is refused. A grant renewed after restart must preserve the proposed nonce and respect the original signed expiry. |
 
 Both accounts use one edge; the other stays linked. Incarnation one's
 conversation identifier sorts before incarnation zero's, so a restore in
@@ -452,3 +452,46 @@ The recreated-route tests cover both sides of the deadline across restart,
 the original owner, overlapping old grants, closure and a fresh incarnation.
 The normal-storage recovery test drops the callback after the atomic route
 and object-ownership commit and reopens the sealed database.
+
+## A new binding on the same MLS group
+
+Under the [ARC companion](arc-mls-e2ee-extension.md), a controlled BINDING
+transition commits the resulting binding ID. The old controllers approve the
+candidate and the old council finalizes it while the old route still owns the
+group. The registered creator uses the existing BIND command with a live signed
+reservation, the exact approved package and the endpoint's private context
+hash. This hash is an assertion from the authenticated endpoint. Other clients
+verify their own private MLS context. BOUND and subsequent route queries name
+the same conversation, binding ID and complete binding object.
+
+The relay preserves the group, cipher suite, semantic route, bootstrap
+policies, member plan, principal set and signed timeline. Each generation
+increments once. After finality the old route refuses new group traffic until
+the exact package is installed. BIND durably consumes the grant in the same
+batch as the new route, the two package references and the exact old-group
+terminal. On restart the relay replays the signed candidate and finality under
+the historical credential, controller policy and council. It checks the saved
+route projection against the admitted package and the accepted state and epoch
+against the retained finalization before indexing the physical target. The admitted package
+chain shares the protocol's one-MiB byte limit. Stores with generation-zero or
+ReInit-only history retain their existing recovery path.
+
+A Direct grant for an operational pair saves its proposed new nonce with the
+current binding. After expiry the registered creator can acquire a new signed
+grant for that nonce. The expired grant stays unusable. A successful BIND,
+authorized close or finalized ReInit retires pending renewal state. An
+operational protected channel requires its current owner and canonical name. If
+the physical instance has disappeared, its replacement must also have the
+same name and owner authority. The former instance continues to deny plaintext.
+Edges that lose the channel receive a hidden notification without the new
+binding. The public channel service refuses unregistering a protected instance
+while it is bound.
+
+The runtime tests under
+`e2ee::coordinator::tests::sequence::recreated_routes::same_group` exercise two
+successive signed changes, restart before and after BIND, rejected changes to
+retained admissions, the same protected channel, a removed physical instance
+and retirement at ReInit. The removed-instance test supplies the base
+directory state directly. The registered SDK campaign runs Direct and an
+existing owner-protected channel on both suites, including actual grant expiry
+on Direct and the public unregister refusal on channels.

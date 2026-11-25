@@ -345,6 +345,45 @@ fn channel_bindings_need_the_authority_root_and_replacements_carry_no_proofs() -
     let verified_replacement = verify_binding_package(&NETWORK, &replacement, &rosters)?;
     assert!(is_binding_successor(&verified, &verified_replacement));
     assert!(!is_binding_successor(&verified_replacement, &verified));
+    let target = verified_replacement.binding_id;
+    assert!(is_same_group_binding_successor(
+        &verified,
+        &verified_replacement,
+        &target
+    ));
+    assert!(!is_same_group_binding_successor(
+        &verified,
+        &verified_replacement,
+        &verified.binding_id
+    ));
+    let mut other_suite = verified_replacement.clone();
+    other_suite.cipher_suite = if verified.cipher_suite == 1 { 3 } else { 1 };
+    assert!(!is_same_group_binding_successor(
+        &verified,
+        &other_suite,
+        &target
+    ));
+    let mut other_group = verified_replacement.clone();
+    other_group.group_id[0] ^= 1;
+    assert!(!is_same_group_binding_successor(
+        &verified,
+        &other_group,
+        &target
+    ));
+    let mut other_conversation = verified_replacement.clone();
+    other_conversation.conversation_id[0] ^= 1;
+    assert!(!is_same_group_binding_successor(
+        &verified,
+        &other_conversation,
+        &target
+    ));
+    let mut other_incarnation = verified_replacement.clone();
+    other_incarnation.route.incarnation += 1;
+    assert!(!is_same_group_binding_successor(
+        &verified,
+        &other_incarnation,
+        &target
+    ));
     let mut proofs_on_replacement = replacement;
     proofs_on_replacement.root_binding_locks = package.root_binding_locks.clone();
     assert_eq!(
