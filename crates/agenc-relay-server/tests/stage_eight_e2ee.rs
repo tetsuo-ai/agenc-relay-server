@@ -1128,6 +1128,41 @@ impl ArcClient {
         Ok(())
     }
 
+    /// Keep the inactive registered connection live while the other client owns
+    /// the blocking multi-megabyte transfer. Its PONGs stay in its usual reader.
+    fn during_large_transfer<T>(
+        &mut self,
+        large: bool,
+        work: impl FnOnce() -> TestResult<T>,
+    ) -> TestResult<T> {
+        if !large {
+            return work();
+        }
+        thread::scope(|scope| {
+            let (finish, closed) = std::sync::mpsc::sync_channel::<()>(0);
+            let heartbeat = scope.spawn(move || -> TestResult {
+                loop {
+                    self.send("PING :large-welcome-transfer")?;
+                    match closed.recv_timeout(Duration::from_secs(20)) {
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            return Ok(());
+                        }
+                    }
+                }
+            });
+            // A failing transfer or unwinding assertion also drops the sender.
+            let result = work();
+            drop(finish);
+            let alive = heartbeat
+                .join()
+                .map_err(|_| failure("keepalive worker panicked"))?;
+            let value = result?;
+            alive?;
+            Ok(value)
+        })
+    }
+
     fn read_until(&mut self, complete: impl FnMut(&str) -> bool) -> TestResult<Vec<String>> {
         self.read_until_within(TRANSCRIPT_LINES, complete)
     }
@@ -1172,6 +1207,13 @@ impl ArcClient {
                 )));
             }
             let line = line.trim_end_matches(['\r', '\n']).to_owned();
+            let command = line
+                .strip_prefix(':')
+                .and_then(|prefixed| prefixed.split_once(' '))
+                .map_or(line.as_str(), |(_, command)| command);
+            if let Some(token) = command.strip_prefix("PING :") {
+                self.send(&format!("PONG :{token}"))?;
+            }
             let done = complete(&line);
             lines.push(line);
             if done {
@@ -4612,61 +4654,70 @@ mod real_clients {
             base64url_encode(&bound.conversation),
             base64url_encode(&certified.finalization_id)
         );
-        if welcome.len() == e2ee::limits::MAX_EMBEDDED_MLS_WELCOME_BYTES {
-            super::encrypted_clients::check_welcome_carrier_boundary(
-                sender,
-                sender_keys,
-                &command,
-                &object,
-            )?;
-        }
-        let label = sender_keys.label();
-        send_object(sender, &label, &command, &object)?;
-        let reply = labeled_reply(sender, &label)?;
-        assert_contains(&reply, " EKEY STORED WELCOME ")?;
-        let object_id = *e2ee::ObjectId::compute(&object).as_bytes();
+        let large = welcome.len() == e2ee::limits::MAX_EMBEDDED_MLS_WELCOME_BYTES;
+        receiver.during_large_transfer(large, || {
+            if large {
+                super::encrypted_clients::check_welcome_carrier_boundary(
+                    sender,
+                    sender_keys,
+                    &command,
+                    &object,
+                )?;
+            }
+            let label = sender_keys.label();
+            send_object(sender, &label, &command, &object)?;
+            let reply = labeled_reply(sender, &label)?;
+            assert_contains(&reply, " EKEY STORED WELCOME ")?;
+            Ok(())
+        })?;
+        sender.during_large_transfer(large, || {
+            let object_id = *e2ee::ObjectId::compute(&object).as_bytes();
 
-        let label = target.label();
-        receiver.send(&format!("@label={label} EKEY FETCH MAILBOX WELCOME *"))?;
-        let page = object_reply(receiver, &label, object.len())?;
-        assert_contains(&page, " EKEY MAILBOX ")?;
-        let token = hash_at(&page, "MAILBOX", 3)?;
-        let fetched = fragments_object(&page)?;
-        if fetched != object {
-            return Err(failure(
-                "mailbox fetch did not reproduce the delivered Welcome",
-            ));
-        }
-        if welcome.len() == e2ee::limits::MAX_EMBEDDED_MLS_WELCOME_BYTES {
             let label = target.label();
-            receiver.send(&format!(
-                "@label={label} EGROUP FETCH OBJECT {} {}",
-                base64url_encode(&bound.conversation),
-                base64url_encode(&object_id)
-            ))?;
-            let answer = object_reply(receiver, &label, object.len())?;
-            if fragments_object(&answer)? != object {
+            receiver.send(&format!("@label={label} EKEY FETCH MAILBOX WELCOME *"))?;
+            let page = object_reply(receiver, &label, object.len())?;
+            assert_contains(&page, " EKEY MAILBOX ")?;
+            let token = hash_at(&page, "MAILBOX", 3)?;
+            let fetched = fragments_object(&page)?;
+            if fetched != object {
                 return Err(failure(
-                    "registered recipient object query returned different bytes",
+                    "mailbox fetch did not reproduce the delivered Welcome",
                 ));
             }
-        }
-        let label = target.label();
-        receiver.send(&format!(
-            "@label={label} EKEY ACK MAILBOX {} {}",
-            base64url_encode(&token),
-            base64url_encode(&object_id)
-        ))?;
-        let acked = labeled_reply(receiver, &label)?;
-        assert_contains(&acked, " EKEY ACKED ")?;
-        let mut budget = DecodeBudget::new(e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT, 1 << 16);
-        let envelope =
-            ArcWireObject::decode_kind(&fetched, Some(ArcWireObjectKind::WelcomeMls), &mut budget)?;
-        let delivered: ArcDeliveredWelcome = ArcDeliveredWelcome::decode_exact(
-            envelope.body(),
-            &mut DecodeBudget::new(e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT, 1 << 16),
-        )?;
-        Ok(delivered.welcome_bytes.as_slice().to_owned())
+            if large {
+                let label = target.label();
+                receiver.send(&format!(
+                    "@label={label} EGROUP FETCH OBJECT {} {}",
+                    base64url_encode(&bound.conversation),
+                    base64url_encode(&object_id)
+                ))?;
+                let answer = object_reply(receiver, &label, object.len())?;
+                if fragments_object(&answer)? != object {
+                    return Err(failure(
+                        "registered recipient object query returned different bytes",
+                    ));
+                }
+            }
+            let label = target.label();
+            receiver.send(&format!(
+                "@label={label} EKEY ACK MAILBOX {} {}",
+                base64url_encode(&token),
+                base64url_encode(&object_id)
+            ))?;
+            let acked = labeled_reply(receiver, &label)?;
+            assert_contains(&acked, " EKEY ACKED ")?;
+            let mut budget = DecodeBudget::new(e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT, 1 << 16);
+            let envelope = ArcWireObject::decode_kind(
+                &fetched,
+                Some(ArcWireObjectKind::WelcomeMls),
+                &mut budget,
+            )?;
+            let delivered: ArcDeliveredWelcome = ArcDeliveredWelcome::decode_exact(
+                envelope.body(),
+                &mut DecodeBudget::new(e2ee::limits::MAX_WELCOME_MAILBOX_OBJECT, 1 << 16),
+            )?;
+            Ok(delivered.welcome_bytes.as_slice().to_owned())
+        })
     }
 
     /// Sends real MLS application bytes on the bound channel and returns the
