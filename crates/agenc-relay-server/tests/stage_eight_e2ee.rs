@@ -1650,13 +1650,13 @@ impl ArcClient {
         open_account_payload(token, decoded)
     }
 
-    fn account_carrier_bytes(
+    fn begin_account_carrier(
         &mut self,
         command: &str,
         selector: &str,
         response_type: &str,
         envelope: &[u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
-    ) -> TestResult<Vec<u8>> {
+    ) -> TestResult {
         self.send(&format!(
             "{command} {} {ACCOUNT_SERVICE_ENVELOPE_BYTES}",
             selector
@@ -1693,6 +1693,17 @@ impl ArcClient {
             )));
         }
 
+        Ok(())
+    }
+
+    fn account_carrier_bytes(
+        &mut self,
+        command: &str,
+        selector: &str,
+        response_type: &str,
+        envelope: &[u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
+    ) -> TestResult<Vec<u8>> {
+        self.begin_account_carrier(command, selector, response_type, envelope)?;
         let mut encoded_response = String::with_capacity(ACCOUNT_RESPONSE_CHARACTERS);
         let mut ended = false;
         for _ in 0..16 {
