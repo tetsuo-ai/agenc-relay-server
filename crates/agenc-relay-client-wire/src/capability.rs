@@ -3,7 +3,9 @@
 use std::error::Error;
 use std::fmt;
 
-use agenc_relay_types::CAPABILITIES;
+use agenc_relay_types::{CAPABILITIES, INITIAL_ROOT_CAPABILITY, INITIAL_ROOT_PROFILE_TOKEN};
+
+pub(crate) const MAX_CAPABILITIES: usize = CAPABILITIES.len() + 1;
 
 use crate::{CanonicalBase64Url, MAX_TRADITIONAL_LINE_BYTES};
 
@@ -34,7 +36,7 @@ pub struct CapabilitySpec {
 impl CapabilitySpec {
     /// Creates a known bare capability name and optional advertised value.
     pub fn new(name: &str, value: Option<&str>) -> Result<Self, CapError> {
-        if !CAPABILITIES.contains(&name) || name.contains('=') || name.contains(' ') {
+        if !(CAPABILITIES.contains(&name) || name == INITIAL_ROOT_CAPABILITY) {
             return Err(CapError::UnknownCapability);
         }
         if value.is_some_and(|value| {
@@ -135,7 +137,7 @@ impl CapabilityProfile {
         &self.capabilities
     }
 
-    fn contains(&self, name: &str) -> bool {
+    pub(crate) fn contains(&self, name: &str) -> bool {
         self.capabilities
             .iter()
             .any(|capability| capability.name == name)
@@ -615,6 +617,9 @@ fn validate_profile_value(name: &str, value: Option<&str>) -> Result<(), CapErro
             .and_then(|value| value.strip_prefix("v1."))
             .is_some_and(|epoch| CanonicalBase64Url::parse(epoch, 16, 16).is_ok()),
         "agenc.ag/e2ee-mls" => value.is_some_and(validate_e2ee_value),
+        INITIAL_ROOT_CAPABILITY => {
+            value.and_then(|v| v.strip_prefix("v1.")) == Some(INITIAL_ROOT_PROFILE_TOKEN)
+        }
         "sasl" => value == Some("AGENC-OPAQUE"),
         "sts" => value == Some("duration=31536000"),
         _ => value.is_none(),
@@ -627,7 +632,10 @@ fn validate_profile_value(name: &str, value: Option<&str>) -> Result<(), CapErro
 }
 
 fn reconnects_on_value_change(name: &str) -> bool {
-    matches!(name, "agenc.ag/recovery" | "agenc.ag/e2ee-mls")
+    matches!(
+        name,
+        "agenc.ag/recovery" | "agenc.ag/e2ee-mls" | INITIAL_ROOT_CAPABILITY
+    )
 }
 
 fn validate_e2ee_value(value: &str) -> bool {
@@ -641,7 +649,7 @@ fn validate_e2ee_value(value: &str) -> bool {
 }
 
 fn validate_advertisement(advertised: &[CapabilitySpec]) -> Result<(), CapError> {
-    if advertised.len() > CAPABILITIES.len() {
+    if advertised.len() > MAX_CAPABILITIES {
         return Err(CapError::InvalidAdvertisement);
     }
     for (index, capability) in advertised.iter().enumerate() {

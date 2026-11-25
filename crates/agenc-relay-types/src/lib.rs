@@ -10,6 +10,7 @@ mod admin;
 mod bounded;
 mod errors;
 mod identifiers;
+mod initial_root;
 mod masks;
 mod names;
 mod quantities;
@@ -23,6 +24,9 @@ pub use identifiers::{
     DatabaseId, EntryId, EventId, InviteId, MessageId, NetworkId, OpaqueCredentialId, OperatorId,
     OriginId, RecoveryEpoch, RequestId, ServerId, ServerIncarnation, SessionId, TransactionId,
     UserId,
+};
+pub use initial_root::{
+    INITIAL_ROOT_CAPABILITY, INITIAL_ROOT_PROFILE_SHA256, INITIAL_ROOT_PROFILE_TOKEN,
 };
 pub use masks::{CompiledGlob, MAX_GLOB_BYTES, MAX_TYPED_MASK_BYTES, MaskSubject, TypedMask};
 pub use names::{

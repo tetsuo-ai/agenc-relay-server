@@ -993,6 +993,7 @@ impl RegistrationRouter {
                         AccountCarrierKind::Credentials,
                         message,
                     ),
+                    RegistrationAuthCarrier::InitialRoot(_) => CarrierRoute::Close,
                 };
                 return self.complete_carrier_route(
                     context,
@@ -1484,6 +1485,9 @@ impl RegistrationRouter {
         mut message: agenc_relay_client_wire::ParsedMessage,
         observation: CarrierObservation<'_>,
     ) -> Result<ActionStep, RuntimeError> {
+        if matches!(carrier, RegistrationAuthCarrier::InitialRoot(_)) {
+            return Ok(ActionStep::Close(CloseReason::ProtocolError));
+        }
         let now = context.now().get();
         let target = self.target(state).to_owned();
         let prefix = self.config.server_prefix.clone();
@@ -1497,6 +1501,7 @@ impl RegistrationRouter {
             slot.insert(EdgeCarrier::new()?);
         }
         let route = match carrier {
+            RegistrationAuthCarrier::InitialRoot(_) => CarrierRoute::Close,
             RegistrationAuthCarrier::Sasl => {
                 let parameter = (message.parameter_count() == 1)
                     .then(|| message.take_parameter(0))
@@ -1768,6 +1773,7 @@ impl RegistrationRouter {
                 outcome,
                 now,
             ),
+            RegistrationAuthCarrier::InitialRoot(_) => None,
             RegistrationAuthCarrier::AccountCreate => edge_account_answer(
                 carrier,
                 &prefix,

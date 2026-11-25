@@ -542,6 +542,36 @@ impl AccountCarrierKind {
     }
 }
 
+/// The two optional client command families negotiated by the initial-root profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InitialRootCarrier {
+    /// A guarded account creation, followed by the ordinary FINISH wire exchange.
+    GuardedCreation,
+    /// A single private read or choice on a registered connection.
+    Claim,
+}
+
+impl InitialRootCarrier {
+    /// Exact public command token for this transfer.
+    #[must_use]
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::GuardedCreation => "ACCTCREATE",
+            Self::Claim => "ACCTROOT",
+        }
+    }
+
+    /// The public READY selector expected for this transfer and phase.
+    #[must_use]
+    pub const fn ready(self, phase: AccountCarrierPhase) -> &'static str {
+        match (self, phase) {
+            (Self::GuardedCreation, AccountCarrierPhase::Start) => "CLAIMSTART",
+            (Self::GuardedCreation, AccountCarrierPhase::Finish) => "FINISH",
+            (Self::Claim, _) => "CLAIM",
+        }
+    }
+}
+
 /// Start or finish half of an account-service exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccountCarrierPhase {
@@ -598,7 +628,8 @@ enum AccountState {
 
 /// One-transfer-per-connection ACCTCREATE or ACCTCRED carrier.
 pub struct AccountTransfer {
-    kind: AccountCarrierKind,
+    command: &'static str,
+    initial_root: Option<InitialRootCarrier>,
     state: AccountState,
     encoded: String,
     chunks: usize,
@@ -614,7 +645,8 @@ impl AccountTransfer {
             .try_reserve_exact(ACCOUNT_REQUEST_CHARACTERS)
             .map_err(|_| AuthTransportError::AllocationFailed)?;
         Ok(Self {
-            kind,
+            command: kind.command(),
+            initial_root: None,
             state: AccountState::Idle,
             encoded,
             chunks: 0,
@@ -623,10 +655,25 @@ impl AccountTransfer {
         })
     }
 
+    /// Creates an explicitly negotiated initial-root exchange. The fixed transfer
+    /// buffer is allocated only after checking its family, declaration and deadline.
+    #[must_use]
+    pub fn initial_root(carrier: InitialRootCarrier) -> Self {
+        Self {
+            command: carrier.command(),
+            initial_root: Some(carrier),
+            state: AccountState::Idle,
+            encoded: String::new(),
+            chunks: 0,
+            total_deadline: None,
+            idle_deadline: None,
+        }
+    }
+
     /// Returns the exact command owned by this carrier.
     #[must_use]
     pub const fn command(&self) -> &'static str {
-        self.kind.command()
+        self.command
     }
 
     /// Accepts one exact subcommand/parameter pair.
@@ -641,11 +688,16 @@ impl AccountTransfer {
         if has_tags {
             return self.fail(AuthTransportError::TagsForbidden);
         }
-        let actions = match subcommand {
-            "START" => self.begin(AccountCarrierPhase::Start, parameter, now),
-            "FINISH" => self.begin(AccountCarrierPhase::Finish, parameter, now),
-            "DATA" => self.data(parameter, now),
-            "END" if parameter.is_none() => self.end(now),
+        let actions = match (self.initial_root, subcommand) {
+            (None, "START") | (Some(InitialRootCarrier::GuardedCreation), "CLAIMSTART") => {
+                self.begin(AccountCarrierPhase::Start, parameter, now)
+            }
+            (None | Some(InitialRootCarrier::GuardedCreation), "FINISH")
+            | (Some(InitialRootCarrier::Claim), "CLAIM") => {
+                self.begin(AccountCarrierPhase::Finish, parameter, now)
+            }
+            (_, "DATA") => self.data(parameter, now),
+            (_, "END") if parameter.is_none() => self.end(now),
             _ => self.fail(AuthTransportError::BadState),
         }?;
         Ok(actions)
@@ -722,18 +774,22 @@ impl AccountTransfer {
         declared: Option<&str>,
         now: u64,
     ) -> Result<Vec<AccountCarrierAction>, AuthTransportError> {
+        let single = self.initial_root == Some(InitialRootCarrier::Claim);
         let allowed = matches!(
             (self.state, phase),
             (AccountState::Idle, AccountCarrierPhase::Start)
                 | (AccountState::AwaitingFinish, AccountCarrierPhase::Finish)
-        );
+        ) || (single
+            && self.state == AccountState::Idle
+            && phase == AccountCarrierPhase::Finish);
         if !allowed || declared != Some("4726") {
             return self.fail(AuthTransportError::BadState);
         }
         let Some(idle_deadline) = now.checked_add(ACCOUNT_IDLE_TIMEOUT_MILLIS) else {
             return self.fail(AuthTransportError::Overflow);
         };
-        let total_deadline = if phase == AccountCarrierPhase::Start {
+        let first = self.state == AccountState::Idle;
+        let total_deadline = if first {
             let Some(deadline) = now.checked_add(ACCOUNT_TOTAL_TIMEOUT_MILLIS) else {
                 return self.fail(AuthTransportError::Overflow);
             };
@@ -742,9 +798,10 @@ impl AccountTransfer {
             self.total_deadline
         };
         let mut actions = action_buffer(1)?;
-        if phase == AccountCarrierPhase::Start {
-            self.total_deadline = total_deadline;
-        }
+        self.encoded
+            .try_reserve_exact(ACCOUNT_REQUEST_CHARACTERS)
+            .map_err(|_| AuthTransportError::AllocationFailed)?;
+        self.total_deadline = total_deadline;
         self.idle_deadline = Some(idle_deadline);
         self.state = AccountState::Receiving(phase);
         self.chunks = 0;
@@ -1143,6 +1200,71 @@ mod tests {
             transfer.client("START", Some("4726"), false, 1).err(),
             Some(AuthTransportError::BadState)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn initial_root_transfers_admit_only_the_requested_family_before_allocating()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{AccountCarrierAction as Action, InitialRootCarrier as Carrier};
+        for (carrier, refused) in [
+            (Carrier::GuardedCreation, "START"),
+            (Carrier::Claim, "FINISH"),
+            (Carrier::Claim, "CLAIMSTART"),
+        ] {
+            let mut transfer = AccountTransfer::initial_root(carrier);
+            assert!(transfer.client(refused, Some("4726"), false, 0).is_err());
+            assert_eq!(transfer.encoded.capacity(), 0);
+        }
+        for carrier in [Carrier::GuardedCreation, Carrier::Claim] {
+            let mut bad = AccountTransfer::initial_root(carrier);
+            assert!(
+                bad.client(
+                    carrier.ready(AccountCarrierPhase::Start),
+                    Some("4725"),
+                    false,
+                    0
+                )
+                .is_err()
+            );
+            assert_eq!(bad.encoded.capacity(), 0);
+            let mut transfer = AccountTransfer::initial_root(carrier);
+            let request = [0x8b; super::ACCOUNT_REQUEST_BYTES];
+            let data = super::encode_account_payload(&request);
+            let phases: &[AccountCarrierPhase] = match carrier {
+                Carrier::GuardedCreation => {
+                    &[AccountCarrierPhase::Start, AccountCarrierPhase::Finish]
+                }
+                Carrier::Claim => &[AccountCarrierPhase::Finish],
+            };
+            for phase in phases {
+                let actions = transfer.client(carrier.ready(*phase), Some("4726"), false, 10)?;
+                assert!(matches!(actions.as_slice(), [Action::Ready(ready)] if ready == phase));
+                assert_eq!(
+                    transfer.total_deadline,
+                    Some(10 + super::ACCOUNT_TOTAL_TIMEOUT_MILLIS)
+                );
+                for chunk in data.as_bytes().chunks(AUTH_CHUNK_CHARACTERS) {
+                    assert!(
+                        transfer
+                            .client("DATA", Some(std::str::from_utf8(chunk)?), false, 11)?
+                            .is_empty()
+                    );
+                }
+                let sent = transfer.client("END", None, false, 12)?;
+                assert!(
+                    matches!(sent.as_slice(), [Action::RequestEnvelope {phase: got, bytes}] if got == phase && bytes.expose() == request)
+                );
+                let response =
+                    transfer.server_response(*phase, &[0x41; ACCOUNT_RESPONSE_BYTES], 13)?;
+                assert_eq!(response.len(), 17);
+                assert!(
+                    matches!(response.first(), Some(Action::ResponseStart(got)) if got == phase)
+                );
+                assert!(matches!(response.last(), Some(Action::End)));
+            }
+            assert_eq!(transfer.state, AccountState::Complete);
+        }
         Ok(())
     }
 

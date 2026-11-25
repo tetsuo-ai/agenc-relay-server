@@ -1075,3 +1075,53 @@ fn parsed(line: &str) -> Result<ParsedMessage, Box<dyn Error>> {
     parse_message(FramedLine::new(line)?)?
         .ok_or_else(|| io::Error::other("missing parsed message").into())
 }
+
+#[test]
+fn initial_root_carrier_productions_require_the_explicit_grammar_and_exact_family()
+-> Result<(), Box<dyn Error>> {
+    use agenc_relay_client_wire::{InitialRootCarrier as Family, parse_initial_root_command};
+    for (text, family, arm) in [
+        (
+            "ACCTCREATE CLAIMSTART 4726",
+            Family::GuardedCreation,
+            RegistrationAccountCommand::Start,
+        ),
+        (
+            "ACCTCREATE FINISH 4726",
+            Family::GuardedCreation,
+            RegistrationAccountCommand::Finish,
+        ),
+        (
+            "ACCTROOT CLAIM 4726",
+            Family::Claim,
+            RegistrationAccountCommand::Start,
+        ),
+        (
+            "ACCTROOT DATA AQ",
+            Family::Claim,
+            RegistrationAccountCommand::Data,
+        ),
+        (
+            "ACCTROOT END",
+            Family::Claim,
+            RegistrationAccountCommand::End,
+        ),
+    ] {
+        let message = parsed(text)?;
+        assert_eq!(parse_initial_root_command(&message, family)?, arm);
+    }
+    for (text, family) in [
+        ("ACCTCREATE START 4726", Family::GuardedCreation),
+        ("ACCTCREATE CLAIMSTART 4725", Family::GuardedCreation),
+        ("ACCTROOT CLAIM 4726", Family::GuardedCreation),
+        ("ACCTROOT FINISH 4726", Family::Claim),
+        ("ACCTCRED CLAIM 4726", Family::Claim),
+        ("ACCTROOT CLAIM 04726", Family::Claim),
+    ] {
+        assert!(parse_initial_root_command(&parsed(text)?, family).is_err());
+    }
+    for text in ["ACCTCREATE CLAIMSTART 4726", "ACCTROOT CLAIM 4726"] {
+        assert!(classify(text).is_err());
+    }
+    Ok(())
+}
