@@ -128,6 +128,7 @@ fn minimal_account(seed: u8) -> Result<DurableAccount, StorageError> {
         session_generation: quantity(Generation::new(1))?,
         revision: quantity(Revision::new(1))?,
         admin_suspension_expires_at: None,
+        initial_root: None,
     })
 }
 
@@ -334,6 +335,7 @@ fn full_account() -> Result<DurableAccount, Box<dyn Error>> {
         session_generation: Generation::new(7)?,
         revision: Revision::new(42)?,
         admin_suspension_expires_at: Some(UtcSecond::from_unix_seconds(1_700_000_100)),
+        initial_root: None,
     })
 }
 
@@ -841,7 +843,7 @@ fn decoders_reject_each_closed_enum_ordering_and_ceiling_violation() -> Result<(
 
 #[test]
 fn body_ceilings_are_derived_from_the_domain_limits() {
-    assert_eq!(MAX_ACCOUNT_RECORD_BODY_BYTES, 16_271);
+    assert_eq!(MAX_ACCOUNT_RECORD_BODY_BYTES, 16_336);
     assert_eq!(MAX_SESSION_RECORD_BODY_BYTES, 4_655);
     assert_eq!(MAX_CHANNEL_RECORD_BODY_BYTES, 5_824_355);
     assert_eq!(MAX_SANCTION_RECORD_BODY_BYTES, 597);

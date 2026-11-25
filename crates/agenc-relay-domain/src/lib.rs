@@ -37,7 +37,7 @@ pub use history::{
 pub use model::{
     AccountLabelValue, AccountState, AwayText, ChannelKeyVerifier, ChannelModes, ChannelNameValue,
     ChannelScope, ChannelState, ContentPolicy, DirectMessagePolicy, DisplayNameValue, DomainState,
-    GuestDirectMessagePolicy, HistoryPolicy, ListEntry, MAX_CHANNELS_PER_SESSION,
+    GuestDirectMessagePolicy, HistoryPolicy, InitialRootState, ListEntry, MAX_CHANNELS_PER_SESSION,
     MAX_CONTACTS_PER_ACCOUNT, MAX_GLOBAL_CHANNELS, MAX_INVITES_PER_CHANNEL, MAX_LOCAL_CHANNELS,
     MAX_MASK_ENTRIES_PER_LIST, MAX_MEMBERS_PER_CHANNEL, MAX_MONITORED_NICKNAMES,
     MAX_RESERVED_NICKNAMES, MAX_ROLE_GRANTS_PER_CHANNEL, MAX_SESSIONS_PER_ACCOUNT, Membership,

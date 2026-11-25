@@ -49,6 +49,9 @@ pub(super) fn decode_e2ee_restore(
     let state = PersistentRecordValue::decode(TableId::E2eeState, plaintext)?;
     check_state_key(key, state.record_kind())?;
     match state.record_kind() {
+        crate::e2ee_records::initial_root::KIND => {
+            crate::e2ee_records::initial_root::InitialRootRow::decode_keyed(key, state.body())?;
+        }
         ROUTE_ROW_KIND => validate_route_key(key, state.body())?,
         RECOVERY_GATE_KIND => {
             let gate = crate::E2eeRecoveryGate::decode(state.body())?;

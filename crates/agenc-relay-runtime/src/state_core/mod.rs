@@ -18,6 +18,7 @@ pub(crate) mod edge_checkpoint;
 pub mod fanout;
 pub(crate) mod history;
 pub mod inbox;
+mod initial_root;
 pub(crate) mod local_join;
 mod pending;
 pub mod projector;

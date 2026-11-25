@@ -652,8 +652,11 @@ pub enum DomainEvent {
     SanctionRecorded(Principal),
 }
 
+mod initial_root;
+
 enum Mutation {
     InsertAccount(AccountState),
+    SetInitialRoot(AccountId, std::sync::Arc<crate::InitialRootState>),
     InsertSession(SessionState),
     SwitchSessionAccount {
         user_id: UserId,
@@ -816,7 +819,8 @@ impl TouchedEntities {
                     self.note_closed_session(state, *user_id);
                 }
             }
-            Mutation::AccountSetting { account_id, .. } => {
+            Mutation::AccountSetting { account_id, .. }
+            | Mutation::SetInitialRoot(account_id, _) => {
                 self.accounts.insert(*account_id);
             }
             Mutation::Rename { user_id, .. }
@@ -1044,6 +1048,7 @@ impl Mutation {
     fn duplicate_for_projection(&self) -> Result<Self, DomainError> {
         Ok(match self {
             Self::InsertAccount(account) => Self::InsertAccount(account.clone()),
+            Self::SetInitialRoot(account, state) => Self::SetInitialRoot(*account, state.clone()),
             Self::InsertSession(session) => {
                 Self::InsertSession(DurableSession::from_state(session).into_state()?)
             }
@@ -3855,6 +3860,12 @@ impl DomainState {
     fn apply_mutation(&mut self, mutation: Mutation, revision: Revision) {
         match mutation {
             Mutation::InsertAccount(account) => self.apply_account(account, revision),
+            Mutation::SetInitialRoot(account, state) => {
+                if let Some(live) = self.accounts.get_mut(&account) {
+                    live.initial_root = Some(state);
+                    live.revision = revision;
+                }
+            }
             Mutation::InsertSession(session) => self.apply_session(session, revision),
             Mutation::SwitchSessionAccount {
                 user_id,
