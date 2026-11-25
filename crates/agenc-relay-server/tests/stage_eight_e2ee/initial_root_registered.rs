@@ -213,6 +213,13 @@ fn registered_guarded_creation_choice_and_directory_survive_coordinator_restart(
     drop(directory);
     let _ = edge.stop()?;
     let _ = daemon.stop()?;
+    if let Some(previous) = std::env::var_os("ARC_INITIAL_ROOT_PREVIOUS_ARCD") {
+        super::initial_root_downgrade::verify_guarded_snapshot(
+            fixture,
+            Path::new(&previous),
+            "registered-guarded-copy",
+        )?;
+    }
 
     let mut daemon = DaemonProcess::start(&fixture.config_path)?;
     let mut restored = registered_owner(fixture, "Returned", 47, account)?;
