@@ -441,35 +441,53 @@ pub fn reconstruct(
     monotonic_now: MonotonicTick,
     utc_now: UtcSecond,
 ) -> Result<Reconstruction, RuntimeError> {
-    let mut scan = Scan::default();
-    scan.index.companion_disk = seed.storage().companion_disk_accounting();
-    for table in RECONSTRUCTED_TABLES {
-        scan_table(port, table, |key, sealed| {
-            scan.admit(keys, table, key, &sealed)
-        })?;
+    DurableIndex::new().reconstruct(seed, port, keys, role, monotonic_now, utc_now)
+}
+
+impl DurableIndex {
+    /// Restores using the index's configured retained-resource backing.
+    pub(crate) fn reconstruct(
+        self,
+        seed: &StateCoreSeed,
+        port: &StoragePort,
+        keys: &KeyDeriver,
+        role: NodeRole,
+        monotonic_now: MonotonicTick,
+        utc_now: UtcSecond,
+    ) -> Result<Reconstruction, RuntimeError> {
+        let mut scan = Scan {
+            index: self,
+            ..Scan::default()
+        };
+        scan.index.companion_disk = seed.storage().companion_disk_accounting();
+        for table in RECONSTRUCTED_TABLES {
+            scan_table(port, table, |key, sealed| {
+                scan.admit(keys, table, key, &sealed)
+            })?;
+        }
+        scan.check_initial_roots(keys, port)?;
+        scan.bind_nicknames(keys)?;
+        scan.bind_channel_names(keys)?;
+        let account_service = scan.account_service.finish(role)?;
+        let revision = Revision::new(seed.storage().state_generation())
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let domain = DomainState::restore_authoritative(
+            revision,
+            scan.accounts.into_values().collect(),
+            scan.sessions.into_values().collect(),
+            scan.channels.into_values().collect(),
+            scan.sanctions,
+            monotonic_now,
+            utc_now,
+        )
+        .map_err(|_| RuntimeError::Storage(StorageError::StaleState))?;
+        Ok(Reconstruction {
+            domain,
+            index: scan.index,
+            head: HeadCounters::from_recovered(seed.storage()),
+            account_service,
+        })
     }
-    scan.check_initial_roots(keys, port)?;
-    scan.bind_nicknames(keys)?;
-    scan.bind_channel_names(keys)?;
-    let account_service = scan.account_service.finish(role)?;
-    let revision =
-        Revision::new(seed.storage().state_generation()).map_err(|_| RuntimeError::InvalidValue)?;
-    let domain = DomainState::restore_authoritative(
-        revision,
-        scan.accounts.into_values().collect(),
-        scan.sessions.into_values().collect(),
-        scan.channels.into_values().collect(),
-        scan.sanctions,
-        monotonic_now,
-        utc_now,
-    )
-    .map_err(|_| RuntimeError::Storage(StorageError::StaleState))?;
-    Ok(Reconstruction {
-        domain,
-        index: scan.index,
-        head: HeadCounters::from_recovered(seed.storage()),
-        account_service,
-    })
 }
 
 /// Visits every row of one table in key order through bounded pages.
@@ -631,33 +649,23 @@ impl Scan {
         value: &PersistentRecordValue,
     ) -> Result<(), RuntimeError> {
         use agenc_relay_storage::e2ee_records::initial_root::{
-            FORMAT_KEY, InitialRootRow, KIND, PREFIX,
+            InitialRootRow, KIND, is_reserved_key,
         };
-        let reserved = key.as_bytes().starts_with(PREFIX) || key.as_bytes().starts_with(FORMAT_KEY);
-        if !reserved && value.record_kind() != KIND {
+        if !is_reserved_key(key) && value.record_kind() != KIND {
             return Ok(());
         }
-        if !reserved
-            || value.record_kind() != KIND
-            || value.expires_at().is_some()
-            || value.generation() != 0
-            || !value.references().is_empty()
-        {
-            return Err(RuntimeError::Storage(StorageError::StaleState));
-        }
-        if let InitialRootRow::Owner(owner) = InitialRootRow::decode_keyed(key, value.body())? {
+        if let InitialRootRow::Owner(owner) = InitialRootRow::check_record(key, value)? {
             if owner.network != keys.binding().network_id()
                 || !self.accounts.get(&owner.account).is_some_and(|a| {
                     a.genesis_policy == agenc_relay_domain::AccountGenesisPolicy::Guarded
                 })
-                || self
-                    .index
-                    .initial_root_owners
-                    .insert(owner.account, std::sync::Arc::new(owner))
-                    .is_some()
+                || self.index.initial_root_owners.contains_key(&owner.account)
             {
                 return Err(RuntimeError::Storage(StorageError::StaleState));
             }
+            self.index
+                .initial_root_owners
+                .insert(owner.account, self.index.back_root_owner(owner)?);
         }
         Ok(())
     }

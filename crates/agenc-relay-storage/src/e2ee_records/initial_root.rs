@@ -157,6 +157,21 @@ impl InitialRootRow {
         Ok(row)
     }
 
+    /// Checks the permanent record's exact storage header, row key and typed body.
+    pub fn check_record(
+        key: &StoredKey,
+        value: &crate::PersistentRecordValue,
+    ) -> Result<Self, StorageError> {
+        if value.record_kind() != KIND
+            || value.generation() != 0
+            || value.expires_at().is_some()
+            || !value.references().is_empty()
+        {
+            return Err(StorageError::InvalidEncoding);
+        }
+        Self::decode_keyed(key, value.body())
+    }
+
     /// Matches exact key plus identity even when the row is otherwise well formed.
     pub fn decode_keyed(key: &StoredKey, body: &[u8]) -> Result<Self, StorageError> {
         let row = Self::decode(body)?;

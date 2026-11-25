@@ -237,13 +237,14 @@ pub(crate) enum AdminMutationAfterImage {
     Channel(DurableChannel),
 }
 
+mod initial_root;
+pub use initial_root::BackedRootClaim;
+
 /// One change the index applies after the batch it belongs to commits.
 #[derive(Clone, Eq, PartialEq)]
 pub enum IndexUpdate {
     /// An original, immutable guarded creation was committed.
-    InitialRootOwner(
-        std::sync::Arc<agenc_relay_storage::e2ee_records::initial_root::RootClaimOwner>,
-    ),
+    InitialRootOwner(std::sync::Arc<BackedRootClaim>),
     /// A guarded account was authoritatively deleted with its private owner.
     RemoveInitialRootOwner(AccountId),
     /// The aggregate valid at this batch's committed cut.
@@ -298,10 +299,8 @@ pub enum IndexUpdate {
 #[derive(Default)]
 pub struct DurableIndex {
     pub(super) companion_disk: Option<agenc_relay_storage::CompanionDiskAccounting>,
-    pub(super) initial_root_owners: BTreeMap<
-        AccountId,
-        std::sync::Arc<agenc_relay_storage::e2ee_records::initial_root::RootClaimOwner>,
-    >,
+    pub(super) initial_root_owners: BTreeMap<AccountId, std::sync::Arc<BackedRootClaim>>,
+    initial_root_backing: Option<crate::budget::BackingReservationPort>,
     rows: BTreeMap<(TableId, StoredKey), IndexedRow>,
     nicknames: BTreeMap<AccountId, BTreeMap<String, StoredKey>>,
     channel_names: BTreeMap<ChannelInstanceId, StoredKey>,
@@ -380,7 +379,7 @@ impl DurableIndex {
         match update {
             IndexUpdate::InitialRootOwner(owner) => {
                 self.initial_root_owners
-                    .insert(owner.account, owner.clone());
+                    .insert(owner.row().account, owner.clone());
             }
             IndexUpdate::RemoveInitialRootOwner(account) => {
                 self.initial_root_owners.remove(account);
@@ -1197,18 +1196,19 @@ impl Projection<'_> {
             return Ok(());
         }
         let value = PersistentRecordValue::decode(TableId::E2eeState, bytes)?;
-        match InitialRootRow::decode_keyed(key, value.body())? {
+        match InitialRootRow::check_record(key, &value)? {
             InitialRootRow::Format if !self.index.holds(TableId::E2eeState, key) => {}
             InitialRootRow::Owner(owner) if owner.network == self.keys.binding().network_id() => {
                 match self.index.initial_root_owners.get(&owner.account) {
-                    Some(old) if old.transition(owner.state)? == owner => {}
+                    Some(old) if old.row().transition(owner.state)? == owner => {}
                     None if owner.state
                         == agenc_relay_storage::e2ee_records::initial_root::RootClaimState::Reserved
                         && !self.index.holds(TableId::E2eeState, key) => {}
                     _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
                 }
-                self.updates
-                    .push(IndexUpdate::InitialRootOwner(std::sync::Arc::new(owner)));
+                self.updates.push(IndexUpdate::InitialRootOwner(
+                    self.index.back_root_owner(owner)?,
+                ));
             }
             _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
         }
@@ -1320,7 +1320,7 @@ impl Projection<'_> {
         self.put(TableId::Account, key, value)?;
         if let Some(owner) = self.index.initial_root_owners.get(&account_id) {
             let key = agenc_relay_storage::e2ee_records::initial_root::RootClaimOwner::key(
-                owner.network,
+                owner.row().network,
                 account_id,
             )?;
             self.delete(TableId::E2eeState, key)?;

@@ -175,6 +175,7 @@ impl FaultFixture {
             60,
         )?;
         Ok(LiveStorage {
+            budget: crate::daemon::memory_budget(&self.config)?,
             companion_spool: None,
             owner,
             limit_writer,

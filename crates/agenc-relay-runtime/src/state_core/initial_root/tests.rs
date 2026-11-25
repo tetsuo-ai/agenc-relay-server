@@ -79,7 +79,7 @@ async fn initial_root_read_and_competing_choice_use_one_private_revision_fence()
     assert!(context.initial_root_admission(account, generation).is_err());
     assert!(matches!(
         context.plan_signed_root(account, generation, 0, [6; 32], [4; 32]),
-        Err(E2eeReplyCode::AccountRequired)
+        Err(E2eeReplyCode::RateLimited)
     ));
     fixture.commit_staged_batch().await?;
     let context = fixture.context_mut()?;
@@ -127,3 +127,5 @@ async fn initial_root_read_and_competing_choice_use_one_private_revision_fence()
     ));
     Ok(())
 }
+
+mod restart;
