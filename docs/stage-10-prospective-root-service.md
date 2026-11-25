@@ -22,6 +22,8 @@ A Linux recovery test backs up one guarded account before and after a choice, dr
 
 An edge answers a protected probe only while its exact configured coordinator link has completed the enhanced authenticated handshake and entered the active state. It binds that link generation to the soliciting physical client. A Linux daemon test leaves this client idle, stops the coordinator, receives CAP DEL and observes the connection close. A different client receives a normal base listing and NAK while the link is down, gets no unsolicited advertisement when it returns, and a fresh connection can request the reviewed token again.
 
+A registered client may begin a private read while the coordinator is acknowledging its account declaration. The edge retains the exact origin, session, user, account, account generation and federation link that own the request. It forwards the sealed request after the matching acknowledgment. The edge tests exercise that interleaving, then change the account generation and the link independently and verify that each change prevents forwarding.
+
 The registered race case starts two TLS connections choosing distinct valid fingerprints for the same guarded account, while a third connection on an ordinary edge submits a different valid signed root. A fresh sign-in finds exactly one choice, the other signed root is refused, and the directory accepts the chosen signed object. A final private read matches the published fingerprint and object ID.
 
 ## Results on an authenticated federation link
