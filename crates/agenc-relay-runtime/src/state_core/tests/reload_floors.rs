@@ -133,7 +133,7 @@ fn plan_invite(
     else {
         return Err("the invite needed no external inputs".into());
     };
-    let mut inputs = answer_external(&requests);
+    let mut inputs = answer_external(context, &requests)?;
     inputs.invite_ids = vec![agenc_relay_types::InviteId::from_bytes([seed; 16])];
     let PlanDecision::Mutation(plan) = agenc_relay_testkit::plan(
         context.domain(),
