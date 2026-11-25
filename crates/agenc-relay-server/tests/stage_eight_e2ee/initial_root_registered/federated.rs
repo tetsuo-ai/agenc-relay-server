@@ -109,6 +109,33 @@ fn assert_withdrawn(owner: &mut ArcClient) -> TestResult {
     Err(failure("old client never closed after link replacement"))
 }
 
+fn unexpected_full_origin_reply(line: &str, peer: &str) -> Box<dyn std::error::Error> {
+    let mut fields = line.split_ascii_whitespace();
+    let first = fields.next().unwrap_or_default();
+    let (source, command) = match first.strip_prefix(':') {
+        Some(prefix) if prefix == peer => ("expected edge", fields.next().unwrap_or_default()),
+        Some(_) => ("other prefix", fields.next().unwrap_or_default()),
+        None => ("unprefixed", first),
+    };
+    let kind = match (command, fields.next(), fields.next()) {
+        ("FAIL", Some("ACCTROOT"), Some("UNAVAILABLE")) => {
+            "FAIL ACCTROOT UNAVAILABLE with different trailing text"
+        }
+        ("FAIL", _, _) => "other FAIL",
+        ("ACCTROOT", Some("COMPLETE"), _) => "ACCTROOT COMPLETE",
+        ("ACCTROOT", Some("DATA"), _) => "ACCTROOT DATA",
+        ("PING", _, _) => "PING",
+        ("CAP", _, _) => "CAP",
+        (numeric, _, _) if numeric.len() == 3 && numeric.bytes().all(|b| b.is_ascii_digit()) => {
+            numeric
+        }
+        _ => "other command",
+    };
+    failure(format!(
+        "unexpected full-origin reply from {source} ({kind})"
+    ))
+}
+
 #[test]
 fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_restart()
 -> TestResult {
@@ -273,9 +300,7 @@ fn a_full_remote_origin_refuses_before_hpke_and_keeps_its_sibling_on_the_same_li
         edge.dns_name
     );
     if refusal != expected {
-        return Err(failure(
-            "the full origin did not return its ordinary account-service refusal",
-        ));
+        return Err(unexpected_full_origin_reply(&refusal, &edge.dns_name));
     }
     assert_withdrawn(&mut filling)?;
     assert!(
