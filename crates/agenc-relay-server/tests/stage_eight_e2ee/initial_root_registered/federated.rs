@@ -41,8 +41,10 @@ fn same_sealed_read_twice(
     expected: ClaimState,
 ) -> TestResult {
     let (request, opener) = sealed_claim(fixture, account, start, secret, ClaimAction::Read, 176)?;
+    eprintln!("federated account check: initial read on the registered origin");
     let first =
         client.account_carrier_bytes("ACCTROOT", "CLAIM", "COMPLETE", request.as_bytes())?;
+    eprintln!("federated account check: identical private read on a new federation sequence");
     let second =
         client.account_carrier_bytes("ACCTROOT", "CLAIM", "COMPLETE", request.as_bytes())?;
     if first != second {
@@ -134,6 +136,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
     let mut selected = Principal::new(86, 87, account)?;
     let fingerprint = builders::root_fingerprint(&selected.keys.root)?;
     let wrong = InitialRootSecret::generate()?;
+    eprintln!("federated account check: a different private owner reads");
     assert!(
         claim(
             &mut owner,
@@ -154,6 +157,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
         &secret,
         ClaimState::Reserved,
     )?;
+    eprintln!("federated account check: first valid choice");
     assert!(
         claim(
             &mut owner,
@@ -165,6 +169,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
             177
         )? == Some(ClaimState::Chosen(fingerprint))
     );
+    eprintln!("federated account check: competing choice");
     assert!(
         claim(
             &mut owner,
@@ -190,6 +195,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
     assert_withdrawn(&mut owner)?;
     drop(owner);
     let mut reopened = registered_owner(fixture, "NewOwner", login, 188, account)?;
+    eprintln!("federated account check: published choice after coordinator restart");
     assert!(
         claim(
             &mut reopened,
