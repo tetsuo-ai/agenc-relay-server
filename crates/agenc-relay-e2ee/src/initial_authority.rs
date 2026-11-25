@@ -17,6 +17,8 @@
 
 mod anchors;
 mod prior;
+/// An independently pinned unsigned proposal for protected genesis signing.
+pub mod proposal;
 
 pub use prior::PriorTerminal;
 

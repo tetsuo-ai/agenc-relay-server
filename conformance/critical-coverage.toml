@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1116
-reviewed_source_sha256 = "9f833d4e794611d1fec6df7bca93db8704be3f480b7e489c5618f85091397d1c"
+reviewed_source_files = 1117
+reviewed_source_sha256 = "42ba595ea5311f6f96d22644e34a17c58f34907a4a23a11a933fa2003f3805d4"
 deferred = []
 
 [[region]]
@@ -522,3 +522,27 @@ end_line = 61
 span_sha256 = "dbee7bc02185db0636e03def69d5f3ea047001b35237d6de678b8c9b08ec61f6"
 metric = "branches"
 reason = "Every durable binding admission must have a matching route before it can restore authority."
+
+[[region]]
+id = "genesis-proposal-requires-unsigned-binding"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
+item = "unsigned_package"
+source_sha256 = "42e690f6e31b91f87c52e4ccb96fc988676f8510e63a0565d6c8fb7e3e6f419a"
+start_line = 171
+end_line = 173
+span_sha256 = "8f6d00b3e48fee10dd4d545d31cd88b5ef9418a0d93f6b07822b2def68615df3"
+metric = "branches"
+reason = "Only the unsigned canonical proposal can enter the protected device and root pre-signature route."
+
+[[region]]
+id = "genesis-proposal-signed-plan-group-ceiling"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
+item = "check_plan"
+source_sha256 = "42e690f6e31b91f87c52e4ccb96fc988676f8510e63a0565d6c8fb7e3e6f419a"
+start_line = 275
+end_line = 277
+span_sha256 = "c14fd98352bc7b9affadf92591be333f1c3d2abc1d4ded1b98aafce728f22f4e"
+metric = "branches"
+reason = "The total device plan must fit the strictest signed policy before a binding can lock its semantic route."
