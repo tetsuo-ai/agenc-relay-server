@@ -19,6 +19,7 @@ pub mod profile;
 mod service;
 mod transaction;
 mod wire;
+pub use wire::initial_root;
 
 pub use channel_key::{
     CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_ITERATIONS, CHANNEL_KEY_LANES, CHANNEL_KEY_MEMORY_KIB,
@@ -63,7 +64,7 @@ pub use wire::{
     AccountServiceEnvelope, AccountServiceResponse, AccountServiceResponsePayload,
     AuthenticatedAccountRequest, AuthenticationFinish, AuthenticationStart, Completion,
     CreationFinish, CreationStart, CredentialChangeFinish, CredentialChangeStart,
-    EncodedAccountRequestPlaintext, EncodedAccountResponsePlaintext, OpenedAccountServiceRequest,
-    encode_request_plaintext, encode_response_plaintext, open_and_parse_request,
-    open_and_parse_response,
+    EncodedAccountRequestPlaintext, EncodedAccountResponsePlaintext, InitialRootServiceEnvelope,
+    InitialRootServiceResponse, OpenedAccountServiceRequest, encode_request_plaintext,
+    encode_response_plaintext, open_and_parse_request, open_and_parse_response,
 };

@@ -11,6 +11,8 @@ use crate::secret::SecretBytes;
 
 mod snapshot;
 pub use snapshot::FederationSnapshotHash;
+mod initial_root;
+pub use initial_root::{InitialRootClaimOwner, InitialRootPrecommit, InitialRootSecret};
 
 const LOGIN_INDEX_LABEL: &[u8] = b"agenc-chat login index v1";
 const LOGIN_INDEX_KEY_ID_LABEL: &[u8] = b"agenc-chat login index key id v1";
