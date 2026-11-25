@@ -94,18 +94,7 @@ pub fn authenticate_initial_proposal(
     operational_policy_object: &[u8],
     budget: &mut DecodeBudget,
 ) -> Result<InitialBindingProposal, E2eeError> {
-    if evidence.principals.is_empty() || evidence.principals.len() > MAX_BINDING_PRINCIPALS {
-        return Err(E2eeError::LimitExceeded);
-    }
-    let package: ArcConversationBindingPackage = decode_object(
-        evidence.binding_object,
-        ArcWireObjectKind::ConversationBinding,
-        budget,
-    )?;
-    if !package.binding.approvals.is_empty() || !package.root_binding_locks.is_empty() {
-        return Err(E2eeError::InvalidValue);
-    }
-    anchors::binding(expected, None, &package)?;
+    let package = unsigned_package(expected, evidence, budget)?;
     let binding = &package.binding.tbs;
     let route = verify_semantic_route(&expected.network_id, &binding.semantic_route)?;
     check_binding_shape(&expected.network_id, binding, &route)?;
@@ -120,23 +109,7 @@ pub fn authenticate_initial_proposal(
     let principals = anchors::principals(expected, &package, evidence.principals, time, budget)?;
     check_principals(binding, &route, &principals)?;
     let sequencer = anchors::sequencer(expected, evidence.sequencer_credential, &core, budget)?;
-    let mut validity = sequencer.interval;
-    let mut remaining = MAX_BINDING_APPROVALS;
-    for (root, roster) in principals.values() {
-        intersect(&mut validity, root.interval);
-        intersect(&mut validity, roster.interval);
-        let mut count = 0;
-        for device in roster.devices.values().filter(|device| device.may_bind()) {
-            intersect(&mut validity, device.interval);
-            count += 1;
-        }
-        if count == 0 {
-            return Err(E2eeError::InvalidValue);
-        }
-        remaining = remaining
-            .checked_sub(count)
-            .ok_or(E2eeError::LimitExceeded)?;
-    }
+    let mut validity = directory_validity(&principals, sequencer.interval)?;
     let initial = policy(
         binding,
         &principals,
@@ -154,10 +127,87 @@ pub fn authenticate_initial_proposal(
         &mut validity,
         budget,
     )?;
+    check_governance(&route.key, &principals, &initial, &operational)?;
+    check_plan(
+        &package.initial_member_plan,
+        &route.key,
+        &principals,
+        &initial,
+        &operational,
+        &mut validity,
+    )?;
+    if !council_is_planned(&operational, &principals, &package.initial_member_plan)
+        || !validity.covers(time)
+    {
+        return Err(E2eeError::InvalidValue);
+    }
+    Ok(InitialBindingProposal {
+        binding_id: expected.binding_id,
+        binding: package.binding.tbs,
+        plan: package.initial_member_plan,
+        route,
+        core,
+        principals,
+        initial,
+        operational,
+        sequencer,
+        validity,
+    })
+}
+
+fn unsigned_package(
+    expected: &ExpectedInitialAuthority,
+    evidence: &InitialAuthorityEvidence<'_>,
+    budget: &mut DecodeBudget,
+) -> Result<ArcConversationBindingPackage, E2eeError> {
+    if evidence.principals.is_empty() || evidence.principals.len() > MAX_BINDING_PRINCIPALS {
+        return Err(E2eeError::LimitExceeded);
+    }
+    let package: ArcConversationBindingPackage = decode_object(
+        evidence.binding_object,
+        ArcWireObjectKind::ConversationBinding,
+        budget,
+    )?;
+    if !package.binding.approvals.is_empty() || !package.root_binding_locks.is_empty() {
+        return Err(E2eeError::InvalidValue);
+    }
+    anchors::binding(expected, None, &package)?;
+    Ok(package)
+}
+
+fn directory_validity(
+    principals: &PrincipalRosters,
+    mut validity: Interval,
+) -> Result<Interval, E2eeError> {
+    let mut remaining = MAX_BINDING_APPROVALS;
+    for (root, roster) in principals.values() {
+        intersect(&mut validity, root.interval);
+        intersect(&mut validity, roster.interval);
+        let mut count = 0;
+        for device in roster.devices.values().filter(|device| device.may_bind()) {
+            intersect(&mut validity, device.interval);
+            count += 1;
+        }
+        if count == 0 {
+            return Err(E2eeError::InvalidValue);
+        }
+        remaining = remaining
+            .checked_sub(count)
+            .ok_or(E2eeError::LimitExceeded)?;
+    }
+    Ok(validity)
+}
+
+fn check_governance(
+    route: &SemanticRouteKey,
+    principals: &PrincipalRosters,
+    initial: &VerifiedPolicy,
+    operational: &VerifiedPolicy,
+) -> Result<(), E2eeError> {
     let creator = initial.council.first().ok_or(E2eeError::InvalidValue)?;
     let creator_only = initial.controllers.as_slice() == [creator.root_fingerprint]
         && initial.controller_threshold == 1;
-    let agreed = match &route.key {
+    let agreed = match route {
         SemanticRouteKey::Channel { authority_root, .. } => principals.values().all(|(root, _)| {
             root.fingerprint == *authority_root || operational.is_controller(&root.fingerprint)
         }),
@@ -171,16 +221,20 @@ pub fn authenticate_initial_proposal(
                     .all(|(root, _)| operational.is_controller(&root.fingerprint))
         }
     };
-    check_plan(
-        &package.initial_member_plan,
-        &route.key,
-        &principals,
-        &initial,
-        &operational,
-        &mut validity,
-    )?;
-    let entries = package.initial_member_plan.entries.as_slice();
-    let planned_council = operational.council.iter().all(|member| {
+    if creator_only && agreed {
+        Ok(())
+    } else {
+        Err(E2eeError::InvalidValue)
+    }
+}
+
+fn council_is_planned(
+    operational: &VerifiedPolicy,
+    principals: &PrincipalRosters,
+    plan: &ArcInitialMemberPlan,
+) -> bool {
+    let entries = plan.entries.as_slice();
+    operational.council.iter().all(|member| {
         let Some((account, _)) = principals
             .iter()
             .find(|(_, (root, _))| root.fingerprint == member.root_fingerprint)
@@ -202,21 +256,6 @@ pub fn authenticate_initial_proposal(
                     .cmp(&expected)
             })
             .is_ok()
-    });
-    if !creator_only || !agreed || !planned_council || !validity.covers(time) {
-        return Err(E2eeError::InvalidValue);
-    }
-    Ok(InitialBindingProposal {
-        binding_id: expected.binding_id,
-        binding: package.binding.tbs,
-        plan: package.initial_member_plan,
-        route,
-        core,
-        principals,
-        initial,
-        operational,
-        sequencer,
-        validity,
     })
 }
 
@@ -242,18 +281,20 @@ fn check_plan(
         }
         let first = group.first().ok_or(E2eeError::InvalidValue)?;
         let account = crate::objects::account_id_bytes(&first.account_id)?;
-        if let Some((root, roster)) = principals.get(&account) {
-            for member in group {
-                if member.root_fingerprint != root.fingerprint {
-                    return Err(E2eeError::InvalidValue);
-                }
-                let device = roster
-                    .device(&member.device_id)
-                    .ok_or(E2eeError::InvalidValue)?;
-                intersect(validity, device.interval);
+        let Some((root, roster)) = principals.get(&account) else {
+            if matches!(route, SemanticRouteKey::Direct { .. }) {
+                return Err(E2eeError::InvalidValue);
             }
-        } else if matches!(route, SemanticRouteKey::Direct { .. }) {
-            return Err(E2eeError::InvalidValue);
+            continue;
+        };
+        for member in group {
+            if member.root_fingerprint != root.fingerprint {
+                return Err(E2eeError::InvalidValue);
+            }
+            let device = roster
+                .device(&member.device_id)
+                .ok_or(E2eeError::InvalidValue)?;
+            intersect(validity, device.interval);
         }
     }
     Ok(())

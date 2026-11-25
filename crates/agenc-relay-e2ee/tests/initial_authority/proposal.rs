@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::support::*;
 use agenc_relay_e2ee::initial_authority::{
     InitialAuthorityEvidence, InitialPrincipalEvidence,
