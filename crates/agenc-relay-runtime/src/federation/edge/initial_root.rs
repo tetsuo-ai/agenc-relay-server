@@ -91,6 +91,11 @@ impl Carrier {
         replies: &[WireMessage],
     ) -> RemoteCarrierOutcome {
         match (self, result) {
+            (_, ResultArm::Failed { code, context })
+                if code == "ORIGIN_EXPIRED" && context.is_empty() =>
+            {
+                RemoteCarrierOutcome::OriginExpired
+            }
             (Self::GuardedFinish, arm) => request::carrier_outcome(arm, replies, false),
             (carrier, ResultArm::InitialRoot(op, bytes)) if carrier.operation() == Some(op) => {
                 RemoteCarrierOutcome::Challenge(bytes.into_vec())

@@ -26,8 +26,17 @@ pub(crate) struct Mapping {
     digest: [u8; 32],
     pub(crate) deadline: u64,
     pub(crate) closing: bool,
+    pub(crate) observed: bool,
 }
 impl Mapping {
+    fn accepts_transition(self, next: Self) -> bool {
+        self.digest == next.digest
+            && !self.closing
+            && next.deadline >= self.deadline
+            && next.observed
+            && (!self.observed || next.closing)
+    }
+
     pub(crate) fn may_replay(self, now: u64) -> bool {
         !self.closing || now < self.deadline
     }
@@ -57,10 +66,11 @@ pub(crate) fn read(
     if value.record_kind() != COORDINATOR_RESULT_KIND {
         return Ok(None);
     }
-    let record = CoordinatorResultRecord::decode(value.body())?;
-    if !record.result_object.starts_with(&2u16.to_be_bytes()) {
+    let bytes = CoordinatorResultRecord::result_bytes(value.body())?;
+    if !bytes.starts_with(&2u16.to_be_bytes()) {
         return Ok(None);
     }
+    let record = CoordinatorResultRecord::decode(value.body())?;
     let mut budget = DecodeBudget::new(1 << 20, 4_096);
     let result = InitialRootResult::decode(
         FederationProfile::InitialRoot,
@@ -72,7 +82,7 @@ pub(crate) fn read(
         || *result.layout.request_id.as_bytes() != record.request_id
         || *result.layout.request_object_id.as_bytes() != record.request_object_id
         || record.completion_event_id.is_some()
-        || value.generation() > 1
+        || value.generation() > 2
         || *federation_object_id(&record.result_object).as_bytes() != record.result_object_id
     {
         return Err(RuntimeError::InvalidValue);
@@ -82,6 +92,7 @@ pub(crate) fn read(
         digest: record.result_object_id,
         deadline: value.expires_at().ok_or(RuntimeError::InvalidValue)?,
         closing: value.generation() == 1,
+        observed: value.generation() != 0,
     }))
 }
 
@@ -183,7 +194,7 @@ impl Projection<'_> {
         let Ok(raw) = <Key>::try_from(key.as_bytes()) else {
             return Ok(());
         };
-        let prior = self.index.federated_claim(&raw);
+        let prior = self.index.federated_claims.0.get(&raw);
         let Some(row) = read(key, value)? else {
             return if prior.is_some() {
                 Err(RuntimeError::InvalidValue)
@@ -197,38 +208,36 @@ impl Projection<'_> {
         }) {
             return Err(RuntimeError::InvalidValue);
         }
-        if let Some(old) = prior {
-            if old.digest != row.digest
-                || old.closing
-                || !row.closing
-                || row.deadline < old.deadline
-            {
-                return Err(RuntimeError::InvalidValue);
-            }
-        } else {
-            if self.index.holds(TableId::RequestResult, key) || row.closing {
-                return Err(RuntimeError::InvalidValue);
-            }
-            let staged = self.updates.iter().filter_map(|update| match update {
-                IndexUpdate::RetainFederatedClaim(held)
-                    if self.index.federated_claim(&held.row.key).is_none() =>
-                {
-                    Some(&held.row.key)
-                }
-                _ => None,
-            });
-            self.index.require_federated_claim_room(&raw, staged)?;
-        }
-        let slot = if let Some(previous) = self.index.federated_claims.0.get(&raw) {
-            Arc::new(BackedMapping {
+        let slot = match prior {
+            Some(previous) if previous.row.accepts_transition(row) => Arc::new(BackedMapping {
                 row,
                 _backing: previous._backing.clone(),
-            })
-        } else {
-            self.index.back_federated_claim(row)?
+            }),
+            Some(_) => return Err(RuntimeError::InvalidValue),
+            None => self.admit_new_federated_claim(key, row)?,
         };
         self.updates.push(IndexUpdate::RetainFederatedClaim(slot));
         Ok(())
+    }
+
+    fn admit_new_federated_claim(
+        &self,
+        key: &StoredKey,
+        row: Mapping,
+    ) -> Result<Arc<BackedMapping>, RuntimeError> {
+        if self.index.holds(TableId::RequestResult, key) || row.observed {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let staged = self.updates.iter().filter_map(|update| match update {
+            IndexUpdate::RetainFederatedClaim(held)
+                if self.index.federated_claim(&held.row.key).is_none() =>
+            {
+                Some(&held.row.key)
+            }
+            _ => None,
+        });
+        self.index.require_federated_claim_room(&row.key, staged)?;
+        self.index.back_federated_claim(row)
     }
     pub(super) fn forget_federated_claim(&mut self, key: &StoredKey) -> Result<(), RuntimeError> {
         let Ok(raw) = <Key>::try_from(key.as_bytes()) else {
@@ -245,24 +254,81 @@ impl Projection<'_> {
 }
 
 impl crate::state_core::StateCoreContext {
+    pub(crate) fn trusted_federation_utc(&self) -> Result<u64, RuntimeError> {
+        let wall = self.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
+        self.drift()
+            .accepts_wall(self.now(), wall)
+            .then_some(wall.get())
+            .ok_or(RuntimeError::InvalidValue)
+    }
+
     /// Recheck the durable expiration and clock at storage admission, after an asynchronous sweep.
-    pub(in crate::state_core) fn revalidate_federated_deletion(
+    pub(in crate::state_core) fn revalidate_federated_write(
         &self,
         write: super::AccountServiceDurableWrite,
     ) -> Result<super::AccountServiceDurableWrite, RuntimeError> {
-        if let super::AccountServiceDurableWrite::Delete {
-            table: TableId::RequestResult,
-            key,
-        } = &write
-            && let Ok(raw) = <Key>::try_from(key.as_bytes())
-            && let Some(held) = self.index().federated_claim(&raw)
-        {
-            let wall = self.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
-            if !self.drift().accepts_wall(self.now(), wall) || held.may_replay(wall.get()) {
-                return Err(RuntimeError::InvalidValue);
+        use super::AccountServiceDurableWrite;
+        match &write {
+            AccountServiceDurableWrite::Delete {
+                table: TableId::RequestResult,
+                key,
+            } if let Ok(raw) = <Key>::try_from(key.as_bytes())
+                && let Some(held) = self.index().federated_claim(&raw) =>
+            {
+                if held.may_replay(self.trusted_federation_utc()?) {
+                    return Err(RuntimeError::InvalidValue);
+                }
             }
+            AccountServiceDurableWrite::Put {
+                table: TableId::RequestResult,
+                key,
+                plaintext,
+            } if key.as_bytes().len() == 64 => {
+                if let Some(restamped) = self.restamp_new_federated_result(key, plaintext)? {
+                    return Ok(restamped);
+                }
+            }
+            _ => {}
         }
         write.revalidate()
+    }
+
+    fn restamp_new_federated_result(
+        &self,
+        key: &StoredKey,
+        plaintext: &[u8],
+    ) -> Result<Option<super::AccountServiceDurableWrite>, RuntimeError> {
+        if PersistentRecordValue::generation_expiry(plaintext, COORDINATOR_RESULT_KIND, 0)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let value = PersistentRecordValue::decode(TableId::RequestResult, plaintext)?;
+        let Some(mapping) = read(key, &value)? else {
+            return Ok(None);
+        };
+        let floor = self
+            .trusted_federation_utc()?
+            .checked_add(WEEK)
+            .ok_or(RuntimeError::Overflow)?;
+        if mapping.deadline >= floor {
+            return Ok(None);
+        }
+        let updated = PersistentRecordValue::new(
+            TableId::RequestResult,
+            value.record_kind(),
+            value.revision(),
+            0,
+            Some(floor),
+            value.references().to_vec(),
+            value.body().to_vec(),
+        )?
+        .encode()?;
+        Ok(Some(super::AccountServiceDurableWrite::put(
+            TableId::RequestResult,
+            key.clone(),
+            updated,
+        )?))
     }
 }
 

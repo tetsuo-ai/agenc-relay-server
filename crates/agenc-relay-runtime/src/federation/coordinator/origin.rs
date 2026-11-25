@@ -168,6 +168,40 @@ fn refuse(
     stage_origin(coordinator, context, link, peer, key, None, charge)
 }
 
+/// Already committed closure before this sequence: a repeated refusal does not reopen the origin.
+pub(super) fn after_deleted_cut(
+    coordinator: &FederationCoordinator,
+    key: &agenc_relay_domain::federation::OperationKey,
+) -> bool {
+    coordinator
+        .origins
+        .origin(&key.origin)
+        .is_some_and(|entry| {
+            entry.generation == key.generation
+                && entry.status == OriginStatus::Deleted
+                && entry.deleted_after.is_some_and(|cut| key.sequence >= cut)
+        })
+}
+
+/// Retain the ordinary origin tombstone at the first unaccepted request. The edge may then
+/// confirm DEL for this origin alone, just as after an independently refused declaration.
+pub(super) fn close_full_request(
+    coordinator: &mut FederationCoordinator,
+    context: &StateCoreContext,
+    peer: ServerId,
+    key: &agenc_relay_domain::federation::OperationKey,
+) -> Result<(), Violation> {
+    coordinator
+        .origins
+        .delete(key.origin, key.generation, key.sequence)
+        .map_err(|_| Violation::Origin)?;
+    coordinator
+        .refused_declarations
+        .insert(key.origin, key.generation);
+    close_sessions(coordinator, context, peer, key.origin);
+    Ok(())
+}
+
 /// Queues for cleanup the live sessions a closed origin owned: its
 /// principal's and those its committed registrations created.
 fn close_sessions(

@@ -597,7 +597,6 @@ impl FederationCoordinator {
     /// Finishes the request a virtual connection was answering with the
     /// result the router built from the captured frames; returns the
     /// opcode and carrier generation it answered.
-    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=a guarded challenge can retain its original link only when the committed private response and matching in-flight operation agree
     pub(crate) fn finish_remote_carrier(
         &mut self,
         context: &mut StateCoreContext,
@@ -607,7 +606,7 @@ impl FederationCoordinator {
     ) -> Option<(FederationOpcode, u64)> {
         let carrier = self.remote_accounts.carriers.get_mut(&generation)?;
         let peer = carrier.peer;
-        let in_flight = carrier.in_flight.take()?;
+        let mut in_flight = carrier.in_flight.take()?;
         if in_flight.opcode == FederationOpcode::AccountCreateFinish {
             carrier.guarded_start = None;
         }
@@ -616,41 +615,13 @@ impl FederationCoordinator {
         }
         let link = in_flight.link;
         let answered = (in_flight.opcode, in_flight.carrier_generation);
-        let committed = if let Some(bytes) = in_flight.committed {
-            Some(bytes)
-        } else if let Some(result) = context.take_remote_account_result(generation) {
-            if self.record_remote_result(&result).is_err() {
-                self.fail_link(context, link, peer, Violation::Origin);
+        match self.release_committed_carrier(context, generation, peer, &mut in_flight, &arm) {
+            Ok(true) => return Some(answered),
+            Err(violation) => {
+                self.fail_link(context, link, peer, violation);
                 return None;
             }
-            Some(result.bytes)
-        } else {
-            None
-        };
-        if let Some(bytes) = committed {
-            if let Some(operation) = in_flight.fresh.extension
-                && !crate::federation::codec::initial_root::released_response(
-                    operation, &bytes, &arm,
-                )
-            {
-                self.fail_link(context, link, peer, Violation::Origin);
-                return None;
-            }
-            if in_flight.fresh.extension
-                == Some(agenc_relay_federation_wire::InitialRootOperation::ClaimedCreateStart)
-                && matches!(
-                    arm,
-                    ResultArm::InitialRoot(
-                        agenc_relay_federation_wire::InitialRootOperation::ClaimedCreateStart,
-                        _
-                    )
-                )
-                && let Some(carrier) = self.remote_accounts.carriers.get_mut(&generation)
-            {
-                carrier.guarded_start = Some(link);
-            }
-            self.send_result(context, link, peer, in_flight.fresh.descriptor, &bytes);
-            return Some(answered);
+            Ok(false) => {}
         }
         if in_flight.fresh.extension.is_some()
             && !matches!(arm, ResultArm::Failed { .. })
@@ -661,16 +632,14 @@ impl FederationCoordinator {
             return None;
         }
         context.forget_remote_account_result(generation);
-        let mut objects = Vec::new();
-        for reply in &replies {
-            match crate::federation::codec::results::reply_object(reply) {
-                Ok(object) => objects.push(object),
-                Err(_) => {
-                    self.fail_link(context, link, peer, Violation::Codec);
-                    return None;
-                }
-            }
-        }
+        let Ok(objects) = replies
+            .iter()
+            .map(crate::federation::codec::results::reply_object)
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            self.fail_link(context, link, peer, Violation::Codec);
+            return None;
+        };
         if !self.link_is_live(link, peer) {
             return None;
         }
@@ -688,6 +657,45 @@ impl FederationCoordinator {
         }
         super::request::drain_queued(self, context);
         Some(answered)
+    }
+
+    fn release_committed_carrier(
+        &mut self,
+        context: &mut StateCoreContext,
+        generation: ConnectionGeneration,
+        peer: ServerId,
+        in_flight: &mut InFlightCarrier,
+        arm: &ResultArm,
+    ) -> Result<bool, Violation> {
+        use agenc_relay_federation_wire::InitialRootOperation::ClaimedCreateStart;
+        let bytes = if let Some(bytes) = in_flight.committed.take() {
+            bytes
+        } else if let Some(result) = context.take_remote_account_result(generation) {
+            self.record_remote_result(&result)
+                .map_err(|_| Violation::Origin)?;
+            result.bytes
+        } else {
+            return Ok(false);
+        };
+        if let Some(operation) = in_flight.fresh.extension
+            && !crate::federation::codec::initial_root::released_response(operation, &bytes, arm)
+        {
+            return Err(Violation::Origin);
+        }
+        if in_flight.fresh.extension == Some(ClaimedCreateStart)
+            && matches!(arm, ResultArm::InitialRoot(ClaimedCreateStart, _))
+            && let Some(carrier) = self.remote_accounts.carriers.get_mut(&generation)
+        {
+            carrier.guarded_start = Some(in_flight.link);
+        }
+        self.send_result(
+            context,
+            in_flight.link,
+            peer,
+            in_flight.fresh.descriptor,
+            &bytes,
+        );
+        Ok(true)
     }
 
     /// Fails the link of one virtual connection after a router-side

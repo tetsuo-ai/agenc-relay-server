@@ -2244,6 +2244,8 @@ pub(super) fn continue_join_names(
 /// What the coordinator's account service answered for one forwarded
 /// carrier envelope.
 pub enum RemoteCarrierOutcome {
+    /// This virtual client origin has closed; other clients continue on the authenticated link.
+    OriginExpired,
     /// The sealed start challenge, for the edge transport to chunk.
     Challenge(Vec<u8>),
     /// The client authenticated; the reply block carried the sealed

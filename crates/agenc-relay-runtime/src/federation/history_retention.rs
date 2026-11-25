@@ -99,9 +99,8 @@ impl Retention {
                 && let Ok(key) = <[u8; 64]>::try_from(row.key.as_bytes())
                 && let Some(held) = context.index().federated_claim(&key)
             {
-                if terminal(&key)
-                    && let Some(write) =
-                        retirement_of_protected(&row.key, &value, held, revision, now)?
+                if let Some(write) =
+                    retirement_of_protected(&row.key, &value, held, terminal(&key), revision, now)?
                 {
                     if held.closing {
                         cleanup.deleted.push(key);
@@ -200,6 +199,7 @@ fn retirement_of_protected(
     key: &StoredKey,
     value: &PersistentRecordValue,
     held: crate::state_core::durable::federated_claims::Mapping,
+    terminal: bool,
     revision: u64,
     now: u64,
 ) -> Result<Option<AccountServiceDurableWrite>, RuntimeError> {
@@ -207,7 +207,7 @@ fn retirement_of_protected(
         return Err(RuntimeError::InvalidValue);
     }
     if held.closing {
-        return if now < held.deadline {
+        return if !terminal || now < held.deadline {
             Ok(None)
         } else {
             Ok(Some(AccountServiceDurableWrite::delete(
@@ -216,17 +216,29 @@ fn retirement_of_protected(
             )?))
         };
     }
-    // The first authenticated observation of terminal origin state is at or after its actual deletion.
-    // Persist both floors across restart. A live origin never enters this branch.
-    let deadline = held.deadline.max(
-        now.checked_add(RETENTION_SECONDS)
-            .ok_or(RuntimeError::Overflow)?,
-    );
+    if held.observed && !terminal {
+        return Ok(None);
+    }
+    // The first authenticated disk read follows the mutation's actual commit, even after a
+    // delayed writer or restart. Start a full seven days there, and a full day at terminal origin.
+    let mut deadline = held.deadline;
+    if !held.observed {
+        deadline = deadline.max(
+            now.checked_add(crate::state_core::durable::federated_claims::WEEK)
+                .ok_or(RuntimeError::Overflow)?,
+        );
+    }
+    if terminal {
+        deadline = deadline.max(
+            now.checked_add(RETENTION_SECONDS)
+                .ok_or(RuntimeError::Overflow)?,
+        );
+    }
     let updated = PersistentRecordValue::new(
         TableId::RequestResult,
         value.record_kind(),
         revision,
-        1,
+        if terminal { 1 } else { 2 },
         Some(deadline),
         Vec::new(),
         value.body().to_vec(),

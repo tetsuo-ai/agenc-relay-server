@@ -67,31 +67,6 @@ fn same_sealed_read_twice(
     Ok(())
 }
 
-fn wait_for_public_account(client: &mut ArcClient, account: AccountId) -> TestResult {
-    let expected = URL_SAFE_NO_PAD.encode(account.to_text().as_bytes());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    for attempt in 0_u32.. {
-        let label = format!("guardedpublisher{attempt}");
-        client.send(&format!("@label={label} EKEY WHOAMI"))?;
-        let reply = labeled_reply(client, &label)?;
-        let words = result_words(completion_line(&reply)?)
-            .ok_or_else(|| failure("missing scalar WHOAMI"))?;
-        if matches!(words.as_slice(), [kind,verb,id,..] if kind == "EKEY" && verb == "ACCOUNT" && id == &expected)
-        {
-            return Ok(());
-        }
-        if !matches!(words.as_slice(), [kind,command,code,..] if kind == "FAIL" && command == "EKEY" && matches!(code.as_str(), "E2EE_SYNCING" | "E2EE_ACCOUNT_REQUIRED"))
-            || Instant::now() >= deadline
-        {
-            return Err(failure(
-                "the ordinary edge did not resolve the signed-in publication account",
-            ));
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    Err(failure("WHOAMI label range exhausted"))
-}
-
 fn assert_withdrawn(owner: &mut ArcClient) -> TestResult {
     fn closed(e: &io::Error) -> bool {
         matches!(
@@ -203,7 +178,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
         .is_none()
     );
     let mut publisher = authenticated_session(&network.edge_b, "Publisher", login, 181, account)?;
-    wait_for_public_account(&mut publisher, account)?;
+    await_directory_account(&mut publisher, account)?;
     let object_id = publish(&mut publisher, &mut selected, true)?;
     drop(publisher);
     assert!(baseline.stop()?.success());
@@ -232,5 +207,99 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
     drop(reopened);
     assert!(edge.stop()?.success());
     assert!(coord.stop()?.success());
+    Ok(())
+}
+
+#[test]
+fn a_full_remote_origin_refuses_before_hpke_and_keeps_its_sibling_on_the_same_link() -> TestResult {
+    let network = build_network()?;
+    let edge = &network.edge_a;
+    select_peer(&network.coordinator, edge)?;
+    select_peer(edge, &network.coordinator)?;
+    let mut coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+    let mut serving = DaemonProcess::start(&edge.config_path)?;
+    wait_for_link(edge, 0)?;
+    let connections = links_established(edge);
+    let requests = account_requests(72)?;
+    let [start, ..] = requests;
+    let secret = InitialRootSecret::generate()?;
+    let login = "root-capacity";
+    let mut creator = ArcClient::connect(edge)?;
+    creator.negotiate_sasl()?;
+    negotiate_root(&mut creator)?;
+    let id = create_account_with_root_option(&mut creator, edge, login, requests, Some(&secret))?;
+    drop(creator);
+    let mut filling = registered_owner(edge, "Filling", login, 77, id)?;
+    let mut sibling = registered_owner(edge, "Sibling", login, 87, id)?;
+    let (frozen, opener) = sealed_claim(edge, id, start, &secret, ClaimAction::Read, 97)?;
+    let first =
+        filling.account_carrier_bytes("ACCTROOT", "CLAIM", "COMPLETE", frozen.as_bytes())?;
+    let opened = InitialRootServiceResponse::parse(first.as_slice().try_into()?)?;
+    assert!(opener.open(&opened)?.state() == Some(ClaimState::Reserved));
+    for n in 1..128 {
+        // Each exchange sends 18 IRC commands. Stage 08 admits 40 registered
+        // commands per second. Leave both the configured rate and its burst intact.
+        thread::sleep(Duration::from_millis(500));
+        let again =
+            filling.account_carrier_bytes("ACCTROOT", "CLAIM", "COMPLETE", frozen.as_bytes())?;
+        if again != first {
+            return Err(failure(
+                "room for the same inner replay changed the committed response",
+            ));
+        }
+        if n % 8 == 0 {
+            sibling.send_until("PING :capacity-sibling", " PONG ")?;
+        }
+    }
+    let mut root = Principal::new(91, 92, id)?;
+    let fingerprint = builders::root_fingerprint(&root.keys.root)?;
+    let (overflow, _unused) = sealed_claim(
+        edge,
+        id,
+        start,
+        &secret,
+        ClaimAction::Choose(fingerprint),
+        98,
+    )?;
+    let refusal = filling.account_carrier_header("ACCTROOT", "CLAIM", overflow.as_bytes())?;
+    let expected = format!(
+        ":{} FAIL ACCTROOT UNAVAILABLE :Account root claim unavailable",
+        edge.dns_name
+    );
+    if refusal != expected {
+        return Err(failure(
+            "the full origin did not return its ordinary account-service refusal",
+        ));
+    }
+    assert_withdrawn(&mut filling)?;
+    assert!(
+        claim(
+            &mut sibling,
+            edge,
+            id,
+            start,
+            &secret,
+            ClaimAction::Read,
+            99
+        )? == Some(ClaimState::Reserved)
+    );
+    assert!(
+        claim(
+            &mut sibling,
+            edge,
+            id,
+            start,
+            &secret,
+            ClaimAction::Choose(fingerprint),
+            100
+        )? == Some(ClaimState::Chosen(fingerprint))
+    );
+    let mut ordinary = authenticated_session(edge, "Ordinary", login, 102, id)?;
+    await_directory_account(&mut ordinary, id)?;
+    publish(&mut ordinary, &mut root, true)?;
+    assert_eq!(links_established(edge), connections);
+    drop((ordinary, sibling));
+    assert!(serving.stop()?.success());
+    assert!(coordinator.stop()?.success());
     Ok(())
 }

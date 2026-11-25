@@ -1692,13 +1692,12 @@ impl ArcClient {
         open_account_payload(token, decoded)
     }
 
-    fn begin_account_carrier(
+    fn account_carrier_header(
         &mut self,
         command: &str,
         selector: &str,
-        response_type: &str,
         envelope: &[u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
-    ) -> TestResult {
+    ) -> TestResult<String> {
         self.send(&format!(
             "{command} {} {ACCOUNT_SERVICE_ENVELOPE_BYTES}",
             selector
@@ -1723,8 +1722,18 @@ impl ArcClient {
         }
         self.send(&format!("{command} END"))?;
 
-        let response_start = read_line_for(&mut self.reader, "account carrier response header")
-            .map_err(|error| failure(format!("{command} {} response header: {error}", selector)))?;
+        read_line_for(&mut self.reader, "account carrier response header")
+            .map_err(|error| failure(format!("{command} {} response header: {error}", selector)))
+    }
+
+    fn begin_account_carrier(
+        &mut self,
+        command: &str,
+        selector: &str,
+        response_type: &str,
+        envelope: &[u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
+    ) -> TestResult {
+        let response_start = self.account_carrier_header(command, selector, envelope)?;
         let response_marker = format!(
             " {command} {} {ACCOUNT_SERVICE_RESPONSE_BYTES}",
             response_type
