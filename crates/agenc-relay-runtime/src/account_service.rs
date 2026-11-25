@@ -4158,10 +4158,7 @@ impl AccountServiceCoordinator {
         let protocol =
             ProtocolRecordBody::decode(TableId::RequestResult, REQUEST_RESULT_KIND, value.body())?;
         if request.carrier == RequestCarrier::InitialRoot(InitialRootCarrier::Claim) {
-            let expires = value.expires_at().ok_or(RuntimeError::InvalidValue)?;
-            if initial_root::trusted_now(context).is_some_and(|now| now >= expires) {
-                return Err(RuntimeError::InvalidValue);
-            }
+            Self::require_live_claim_result(context, value.expires_at())?;
             return self.replay_registered_claim(context, request, protocol.canonical_object());
         }
         let stored = RequestResultRecord::decode(protocol.canonical_object())?;

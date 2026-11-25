@@ -11,7 +11,7 @@ use agenc_relay_types::SessionId;
 const REGISTERED_CLAIM_VERSION: u16 = 3;
 const MAX_IDLE_RETIREMENTS: usize = 32;
 
-pub(super) fn trusted_now(context: &StateCoreContext) -> Option<u64> {
+fn trusted_now(context: &StateCoreContext) -> Option<u64> {
     context
         .utc_now()
         .ok()
@@ -465,6 +465,16 @@ impl AccountServiceCoordinator {
         Ok(())
     }
 
+    pub(crate) fn require_live_claim_result(
+        context: &StateCoreContext,
+        expires: Option<u64>,
+    ) -> Result<(), RuntimeError> {
+        match trusted_now(context).zip(expires) {
+            Some((now, deadline)) if now < deadline => Ok(()),
+            _ => Err(RuntimeError::InvalidValue),
+        }
+    }
+
     pub(super) fn release_claim(
         &mut self,
         context: &mut StateCoreContext,
@@ -490,6 +500,8 @@ impl AccountServiceCoordinator {
         {
             return Err(RuntimeError::InvalidValue);
         }
+        // The durable readback can complete after the admitted result's delivery window.
+        Self::require_live_claim_result(context, value.expires_at())?;
         let saved_request = InitialRootServiceEnvelope::parse(stored.request)
             .map_err(|_| RuntimeError::InvalidValue)?;
         let saved_response = InitialRootServiceResponse::parse(stored.response)
