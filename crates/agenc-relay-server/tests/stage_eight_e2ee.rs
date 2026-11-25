@@ -111,6 +111,8 @@ mod direct_offline;
 mod direct_plaintext;
 #[path = "stage_eight_e2ee/encrypted_clients.rs"]
 mod encrypted_clients;
+#[path = "stage_eight_e2ee/initial_root_downgrade.rs"]
+mod initial_root_downgrade;
 #[path = "stage_eight_e2ee/link_faults.rs"]
 mod link_faults;
 #[path = "stage_eight_e2ee/listing_pages.rs"]
@@ -818,7 +820,20 @@ impl DaemonProcess {
         cgroup_leaf: Option<&Path>,
         stderr_log: Option<&Path>,
     ) -> TestResult<Self> {
-        let daemon = env!("CARGO_BIN_EXE_arcd");
+        Self::start_binary(
+            Path::new(env!("CARGO_BIN_EXE_arcd")),
+            config_path,
+            cgroup_leaf,
+            stderr_log,
+        )
+    }
+
+    fn start_binary(
+        daemon: &Path,
+        config_path: &Path,
+        cgroup_leaf: Option<&Path>,
+        stderr_log: Option<&Path>,
+    ) -> TestResult<Self> {
         let mut command = match cgroup_leaf {
             Some(leaf) => {
                 let mut command = Command::new("/bin/sh");
