@@ -97,6 +97,38 @@ fn claim(
     Ok(result.state())
 }
 
+fn await_directory_account(client: &mut ArcClient, account: AccountId) -> TestResult {
+    let expected = format!(
+        " EKEY ACCOUNT {} 0",
+        URL_SAFE_NO_PAD.encode(account.to_text().as_bytes())
+    );
+    let deadline = Instant::now() + NETWORK_WAIT;
+    for sequence in 0u64.. {
+        let label = format!("guarded-ready-{sequence}");
+        client.send(&format!("@label={label} EKEY WHOAMI"))?;
+        let reply = labeled_reply(client, &label)?;
+        let line = completion_line(&reply)?;
+        if tag_value(line, "label").as_deref() != Some(&label) {
+            return Err(failure(
+                "directory readiness reply lost its originating label",
+            ));
+        }
+        if line.ends_with(&expected) {
+            return Ok(());
+        }
+        if !(line.contains(" FAIL EKEY E2EE_ACCOUNT_REQUIRED ")
+            || line.contains(" FAIL EKEY E2EE_SYNCING "))
+            || Instant::now() >= deadline
+        {
+            return Err(failure(format!(
+                "registered directory did not confirm this account: {line}"
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(failure("directory readiness sequence exhausted"))
+}
+
 fn publish(
     client: &mut ArcClient,
     principal: &mut Principal,
@@ -106,15 +138,22 @@ fn publish(
     let label = principal.label();
     send_object(client, &label, "EKEY PUBLISH IDENTITY", &bytes)?;
     let lines = labeled_reply(client, &label)?;
-    assert_contains(
-        &lines,
-        if accepted {
-            " EKEY STORED IDENTITY "
-        } else {
-            " FAIL EKEY "
-        },
-    )?;
-    Ok(*e2ee::ObjectId::compute(&bytes).as_bytes())
+    let line = completion_line(&lines)?;
+    let object = *e2ee::ObjectId::compute(&bytes).as_bytes();
+    let exact = if accepted {
+        line.ends_with(&format!(
+            " EKEY STORED IDENTITY {}",
+            URL_SAFE_NO_PAD.encode(object)
+        ))
+    } else {
+        line.contains(" FAIL EKEY E2EE_BINDING_AUTH_INVALID ")
+    };
+    if tag_value(line, "label").as_deref() != Some(&label) || !exact {
+        return Err(failure(format!(
+            "unexpected signed root publication for label {label}: {line}"
+        )));
+    }
+    Ok(object)
 }
 
 #[test]
@@ -148,6 +187,7 @@ fn registered_guarded_creation_choice_and_directory_survive_coordinator_restart(
         55,
         account,
     )?;
+    await_directory_account(&mut directory, account)?;
     let mut selected = Principal::new(72, 73, account)?;
     let mut other = Principal::new(74, 75, account)?;
     let fingerprint = builders::root_fingerprint(&selected.keys.root)?;
@@ -210,6 +250,7 @@ fn registered_guarded_creation_choice_and_directory_survive_coordinator_restart(
         63,
         account,
     )?;
+    await_directory_account(&mut directory, account)?;
     let object_id = publish(&mut directory, &mut selected, true)?;
     let published = ClaimState::Published {
         fingerprint,
@@ -519,6 +560,7 @@ fn two_registered_choices_and_bare_publication_share_one_genesis() -> TestResult
     ];
     let mut directory =
         authenticated_session(&network.edge_a, "Directory", "racing-creator", 51, account)?;
+    await_directory_account(&mut directory, account)?;
     let first = Principal::new(61, 62, account)?;
     let second = Principal::new(63, 64, account)?;
     let mut competing = Principal::new(65, 66, account)?;
