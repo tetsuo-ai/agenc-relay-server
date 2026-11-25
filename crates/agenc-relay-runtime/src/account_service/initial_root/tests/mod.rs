@@ -7,16 +7,11 @@ use agenc_relay_auth::initial_root::{ClaimAction, open_claim, seal_claim};
 use agenc_relay_crypto::{AccountHpkePrivateKey, AccountRequestBinding, InitialRootSecret};
 use agenc_relay_types::AccountRandomId;
 
-#[tokio::test]
-async fn a_registered_seal_waits_in_its_bounded_queue_for_an_unrelated_writer() -> TestResult {
-    let mut core = StateCoreFixture::new(vec![9; 16_384])?;
-    let mut service = AccountServiceCoordinator::new(account_service_config(
-        &core.identity,
-        &core.opaque,
-        core.key_state,
-    )?)?;
-    let network = core.identity.network_id;
-    let epoch = core.identity.recovery_epoch;
+fn opened_read(
+    network: NetworkId,
+    epoch: RecoveryEpoch,
+    connection: ConnectionGeneration,
+) -> TestResult<ReadySeal> {
     let account = AccountRandomId::from_bytes([61; 16]).to_account_id();
     let generation = Generation::new(1)?;
     let private = AccountHpkePrivateKey::generate()?;
@@ -37,8 +32,7 @@ async fn a_registered_seal_waits_in_its_bounded_queue_for_an_unrelated_writer() 
         ClaimAction::Read,
     )?;
     let opened = open_claim(&private, network, epoch, &sealed)?;
-    let connection = ConnectionGeneration::new(19);
-    service.push_ready_seal(ReadySeal::Claim {
+    Ok(ReadySeal::Claim {
         request: RequestContext {
             generation: connection,
             carrier_generation: 1,
@@ -59,11 +53,27 @@ async fn a_registered_seal_waits_in_its_bounded_queue_for_an_unrelated_writer() 
             session: SessionId::from_bytes([7; 16]),
         },
         opened,
-    })?;
+    })
+}
+
+#[tokio::test]
+async fn a_registered_seal_waits_in_its_bounded_queue_for_an_unrelated_writer() -> TestResult {
+    let mut core = StateCoreFixture::new(vec![9; 16_384])?;
+    let mut service = AccountServiceCoordinator::new(account_service_config(
+        &core.identity,
+        &core.opaque,
+        core.key_state,
+    )?)?;
+    let connection = ConnectionGeneration::new(19);
+    service.push_ready_seal(opened_read(
+        core.identity.network_id,
+        core.identity.recovery_epoch,
+        connection,
+    )?)?;
     let context = core.context_mut()?;
     let plan = context.domain().plan_account_created(AccountState::new(
         AccountRandomId::from_bytes([62; 16]).to_account_id(),
-        generation,
+        Generation::new(1)?,
         context.domain().revision(),
     ))?;
     context
