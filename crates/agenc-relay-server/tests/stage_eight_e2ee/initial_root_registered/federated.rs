@@ -41,8 +41,10 @@ fn same_sealed_read_twice(
     expected: ClaimState,
 ) -> TestResult {
     let (request, opener) = sealed_claim(fixture, account, start, secret, ClaimAction::Read, 176)?;
+    eprintln!("federated account check: initial read on the registered origin");
     let first =
         client.account_carrier_bytes("ACCTROOT", "CLAIM", "COMPLETE", request.as_bytes())?;
+    eprintln!("federated account check: identical private read on a new federation sequence");
     let second =
         client.account_carrier_bytes("ACCTROOT", "CLAIM", "COMPLETE", request.as_bytes())?;
     if first != second {
@@ -107,6 +109,33 @@ fn assert_withdrawn(owner: &mut ArcClient) -> TestResult {
     Err(failure("old client never closed after link replacement"))
 }
 
+fn unexpected_full_origin_reply(line: &str, peer: &str) -> TestError {
+    let mut fields = line.split_ascii_whitespace();
+    let first = fields.next().unwrap_or_default();
+    let (source, command) = match first.strip_prefix(':') {
+        Some(prefix) if prefix == peer => ("expected edge", fields.next().unwrap_or_default()),
+        Some(_) => ("other prefix", fields.next().unwrap_or_default()),
+        None => ("unprefixed", first),
+    };
+    let kind = match (command, fields.next(), fields.next()) {
+        ("FAIL", Some("ACCTROOT"), Some("UNAVAILABLE")) => {
+            "FAIL ACCTROOT UNAVAILABLE with different trailing text"
+        }
+        ("FAIL", _, _) => "other FAIL",
+        ("ACCTROOT", Some("COMPLETE"), _) => "ACCTROOT COMPLETE",
+        ("ACCTROOT", Some("DATA"), _) => "ACCTROOT DATA",
+        ("PING", _, _) => "PING",
+        ("CAP", _, _) => "CAP",
+        (numeric, _, _) if numeric.len() == 3 && numeric.bytes().all(|b| b.is_ascii_digit()) => {
+            numeric
+        }
+        _ => "other command",
+    };
+    failure(format!(
+        "unexpected full-origin reply from {source} ({kind})"
+    ))
+}
+
 #[test]
 fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_restart()
 -> TestResult {
@@ -134,6 +163,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
     let mut selected = Principal::new(86, 87, account)?;
     let fingerprint = builders::root_fingerprint(&selected.keys.root)?;
     let wrong = InitialRootSecret::generate()?;
+    eprintln!("federated account check: a different private owner reads");
     assert!(
         claim(
             &mut owner,
@@ -154,6 +184,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
         &secret,
         ClaimState::Reserved,
     )?;
+    eprintln!("federated account check: first valid choice");
     assert!(
         claim(
             &mut owner,
@@ -165,6 +196,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
             177
         )? == Some(ClaimState::Chosen(fingerprint))
     );
+    eprintln!("federated account check: competing choice");
     assert!(
         claim(
             &mut owner,
@@ -190,6 +222,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
     assert_withdrawn(&mut owner)?;
     drop(owner);
     let mut reopened = registered_owner(fixture, "NewOwner", login, 188, account)?;
+    eprintln!("federated account check: published choice after coordinator restart");
     assert!(
         claim(
             &mut reopened,
@@ -264,12 +297,10 @@ fn a_full_remote_origin_refuses_before_hpke_and_keeps_its_sibling_on_the_same_li
     let refusal = filling.account_carrier_header("ACCTROOT", "CLAIM", overflow.as_bytes())?;
     let expected = format!(
         ":{} FAIL ACCTROOT UNAVAILABLE :Account root claim unavailable",
-        edge.dns_name
+        edge.server_name
     );
     if refusal != expected {
-        return Err(failure(
-            "the full origin did not return its ordinary account-service refusal",
-        ));
+        return Err(unexpected_full_origin_reply(&refusal, edge.server_name));
     }
     assert_withdrawn(&mut filling)?;
     assert!(
