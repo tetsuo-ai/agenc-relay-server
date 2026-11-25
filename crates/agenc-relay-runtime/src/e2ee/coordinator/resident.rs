@@ -55,7 +55,7 @@ impl Prepared {
         if required.get(&id).is_some_and(|expected| *expected != kind) {
             return Err(Code::InvalidFragment);
         }
-        if excluded == Some(id) || (is_payload(kind) && !required.contains_key(&id)) {
+        if excluded == Some(id) || (is_cold(kind) && !required.contains_key(&id)) {
             return Ok(());
         }
         if let Some(previous) = self.objects.get(&id).or_else(|| state.objects.get(&id)) {
@@ -118,10 +118,16 @@ pub(super) fn prepare(
     Ok(prepared)
 }
 
-fn is_payload(kind: Kind) -> bool {
+/// These objects can be read from durable storage on demand. Mailbox owners
+/// explicitly select the bytes they need, and a grant keeps typed metadata.
+pub(super) fn is_cold(kind: Kind) -> bool {
     matches!(
         kind,
-        Kind::ApplicationMls | Kind::WelcomeMls | Kind::StagedReinit | Kind::FederationEvent
+        Kind::ApplicationMls
+            | Kind::WelcomeMls
+            | Kind::StagedReinit
+            | Kind::FederationEvent
+            | Kind::Reservation
     )
 }
 

@@ -7,9 +7,9 @@
 //! route with its sequencer log, lifecycle, and per-conversation facts,
 //! followed by the scoped delivery streams and unfinished barriers.
 //!
-//! Not restored, by design or deferral: route reservations (short-lived and
-//! not reconstructible without the owner's Account ID), companion origins
-//! (edges re-declare them), and the context digest carried on `BIND`.
+//! Route grants preserve the owner's digest and the signed commitment to the
+//! concrete target. Edges re-declare companion origins and the optional
+//! context digest carried on `BIND` is transient.
 
 use std::collections::BTreeMap;
 
@@ -130,6 +130,7 @@ struct PolicyRow {
 pub(super) struct Restore {
     backing: Option<crate::budget::BackingReservationPort>,
     objects: objects::Restore,
+    reservations: super::reservations::Rows,
     gates: super::recovery_gates::Gates,
     routes: BTreeMap<[u8; 32], RouteRow>,
     records: BTreeMap<([u8; 32], u64), RecordRow>,
@@ -159,20 +160,34 @@ impl Restore {
     }
 
     /// Collects one row of an E2EE table.
-    pub(super) fn admit(&mut self, table: TableId, key: &StoredKey, value: &PersistentRecordValue) {
+    pub(super) fn admit(
+        &mut self,
+        table: TableId,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+        backing: Option<&crate::budget::BackingReservationPort>,
+    ) {
         match table {
             TableId::E2eeObject => self.admit_object(key, value),
-            TableId::E2eeState => self.admit_state(key, value),
+            TableId::E2eeState => self.admit_state(key, value, backing),
             _ => {}
         }
     }
 
     fn admit_object(&mut self, key: &StoredKey, value: &PersistentRecordValue) {
+        if self.reservations.object(key, value).is_err() {
+            self.objects.poison();
+        }
         self.objects.admit(key, value);
         self.owners.admit_object(key, value);
     }
 
-    fn admit_state(&mut self, key: &StoredKey, value: &PersistentRecordValue) {
+    fn admit_state(
+        &mut self,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+        backing: Option<&crate::budget::BackingReservationPort>,
+    ) {
         if self.objects.selected() {
             self.objects.poison();
             return;
@@ -181,6 +196,11 @@ impl Restore {
         let body = value.body();
         match value.record_kind() {
             agenc_relay_storage::e2ee_records::RECOVERY_GATE_KIND => self.objects.poison(),
+            agenc_relay_storage::e2ee_records::CLAIM_ROW_KIND => {
+                if self.reservations.admit(key, body, backing).is_err() {
+                    self.objects.poison();
+                }
+            }
             ROUTE_ROW_KIND => {
                 if let (Ok(id), Ok(row)) = (RouteRow::parse_key(key), RouteRow::decode(body)) {
                     self.routes.insert(id, row);
@@ -629,6 +649,7 @@ pub(super) fn rebuild(
         restore_route(state, &network_id, &index, &rows, conversation_id, &row);
     }
     restore_successors(state, &network_id, &index)?;
+    state.reservations = restore.reservations.finish(state, network_id)?;
     restore.gates.install(state)?;
     coordinator.owner_reconstruction = restore.owners.for_network(network_id).finish(state);
     state.object_expiry = restore.object_expiry.unwrap_or_default();

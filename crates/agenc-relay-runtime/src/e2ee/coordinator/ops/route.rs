@@ -266,6 +266,17 @@ fn reservation_tbs(
     })
 }
 
+/// Retry a collision with a retained grant without replacing its durable owner.
+fn fresh_grant_id(exec: &mut Exec<'_>) -> Result<[u8; 16], Fail> {
+    for _ in 0..4 {
+        let id = exec.random()?;
+        if !exec.coordinator.state.reservations.contains(&id) {
+            return Ok(id);
+        }
+    }
+    Err(E2eeReplyCode::RateLimited.into())
+}
+
 // agenc-review: focus owner=runtime reviewed=2026-09-03 reason=one handler validates the reservation, checks the lock slot, and stages the reservation and lock rows as one atomic set
 /// `reserve_channel` and `reserve_direct`.
 pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
@@ -273,7 +284,7 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         exec.opcode() == agenc_relay_e2ee::objects::federation::ArcFederationOpcode::ReserveChannel;
     let requester = exec.account_id()?;
     exec.attached_device()?;
-    let reservation_id: [u8; 16] = exec.random()?;
+    let reservation_id = fresh_grant_id(exec)?;
     let (kind, route_binding, instance, nonce, pair) = if channel {
         let (instance, name) = exec.params().read(|reader| {
             let instance = reader.fixed::<16>()?;
@@ -348,6 +359,23 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     // An existing route is not reserved here: a ReInit successor is
     // installed by its activation, never through a reservation (companion
     // 13.8).
+    let digest = exec.account_digest()?;
+    let leases = &exec.coordinator.state.reservations;
+    if leases.conflict(
+        &exec.coordinator.network_id,
+        &digest,
+        target,
+        exec.now,
+        None,
+    ) {
+        return Err(Fail::from(E2eeReplyCode::GroupConflict));
+    }
+    let expired = leases
+        .superseded(target, digest, exec.now)
+        .ok_or_else(|| Fail::from(E2eeReplyCode::RateLimited))?;
+    for id in &expired {
+        probe.remove_reservation(ReservationId(*id));
+    }
     let claim = match target {
         RouteTarget::Channel(instance) => {
             probe.reserve_channel(ReservationId(reservation_id), instance, owner, expires_at)
@@ -362,6 +390,16 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     };
     claim.map_err(|_| Fail::from(E2eeReplyCode::GroupConflict))?;
     let mut outcome = Outcome::scalar(ResultBody::Reserved(reservation_id, object_id));
+    let backing = super::super::reservations::Lease::reserve_backing(&exec.backing)
+        .map_err(|_| Fail::from(E2eeReplyCode::RateLimited))?;
+    let lease = super::super::reservations::Lease::new(&reservation, digest, Some(backing))
+        .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
+    for id in &expired {
+        outcome.writes.push(
+            super::super::reservations::delete(*id)
+                .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+        );
+    }
     outcome.snapshot_token = Some(exec.random()?);
     outcome.responses.push(ResponseObject {
         bytes: bytes.clone(),
@@ -372,7 +410,7 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .writes
         .push(CompanionCoordinator::object_write(&bytes)?);
     let row = ClaimRow::Reservation {
-        owner_account_digest: exec.account_digest()?,
+        owner_account_digest: digest,
         owner_device_id: exec.attached_device()?.0,
         kind: u16::from(kind.value()),
         lock_id: [0; 32],
@@ -389,6 +427,10 @@ pub fn reserve(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     )?);
     outcome.effects.push(Box::new(move |state| {
+        for id in expired {
+            state.reservations.remove(id);
+        }
+        state.reservations.insert(lease);
         state.routes = probe;
     }));
     Ok(outcome)
@@ -592,13 +634,14 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?;
     let locks = chained_locks(exec, &package, &verified, &conversation_id)?;
     let mut routes = exec.coordinator.state.routes.clone();
+    let summary = binding_summary(&verified, &exec.coordinator.network_id)?;
+    exec.coordinator
+        .state
+        .reservations
+        .prepare_bind(&mut routes, reservation_id, owner, exec, &summary)
+        .ok_or_else(|| Fail::with(E2eeReplyCode::BindingAuthInvalid, &conversation_id))?;
     let entry = routes
-        .bind(
-            ReservationId(reservation_id),
-            owner,
-            binding_summary(&verified, &exec.coordinator.network_id)?,
-            exec.now,
-        )
+        .bind(ReservationId(reservation_id), owner, summary, exec.now)
         .map_err(|conflict| match conflict {
             agenc_relay_domain::e2ee::RouteConflict::GroupConflict
             | agenc_relay_domain::e2ee::RouteConflict::ForkedLineage => {
@@ -637,6 +680,10 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
         binding_id: verified.binding_id,
         binding_object_id: state.binding_object_id,
     });
+    outcome.writes.push(
+        super::super::reservations::delete(reservation_id)
+            .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
+    );
     outcome.security_mutation = true;
     if let Some(instance) = verified.channel_instance_id {
         outcome.base_plan = (exec.plan_binding)(
@@ -710,6 +757,7 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     }
     let home = exec.home;
     outcome.effects.push(Box::new(move |companion| {
+        companion.reservations.remove(reservation_id);
         companion.routes = routes;
         companion.logs.insert(conversation_id, log);
         companion.lifecycles.insert(conversation_id, lifecycle);

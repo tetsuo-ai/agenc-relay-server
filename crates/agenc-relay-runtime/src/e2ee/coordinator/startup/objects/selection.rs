@@ -69,10 +69,7 @@ impl Selection {
         if kind == Kind::FederationResult {
             return Ok(self.results.contains(id));
         }
-        Ok(!matches!(
-            kind,
-            Kind::ApplicationMls | Kind::WelcomeMls | Kind::StagedReinit | Kind::FederationEvent
-        ))
+        Ok(!super::super::super::resident::is_cold(kind))
     }
     pub(super) fn reserve(&self, capacity: usize) -> Result<MemoryPermit, CompanionFault> {
         let bytes = capacity.checked_add(128).ok_or(CompanionFault::Ceiling)?;

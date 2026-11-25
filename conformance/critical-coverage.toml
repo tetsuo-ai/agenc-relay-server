@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1101
-reviewed_source_sha256 = "b3e90cd05c8807ecacd6a47fd0a65cfd28b1b6ac02ab435af76f956fc2d39cea"
+reviewed_source_files = 1103
+reviewed_source_sha256 = "0cef5638e2a33a787c60166f1b5dbd6befa911e25d8cb2979fb2d805dfa7c4d9"
 deferred = []
 
 [[region]]
@@ -276,9 +276,33 @@ id = "retained-route-account-membership"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/ops/route.rs"
 item = "member_route"
-source_sha256 = "93f694df2142b6f2a5bc40b352dff6e6e9f2cffd68b88530e2856dc965833e0b"
+source_sha256 = "107deefde2fa254def54bda5f80aad43cc6a68f97b6da62d2e8f4b6482df876f"
 start_line = 119
 end_line = 129
 span_sha256 = "6817aca6d024a6ca787fca7c66dca6a5f23fa00996827dcf8c71ad5a8f06ef78"
 metric = "branches"
 reason = "Channel membership and both sides of the fixed Direct pair govern participant reads."
+
+[[region]]
+id = "lease-owner-target-and-validity"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/reservations.rs"
+item = "prepare_bind"
+source_sha256 = "793498c857b4e03e1478cb6d52e76cb6f20235320c0015a208f19672769a7972"
+start_line = 230
+end_line = 236
+span_sha256 = "2972f139f30b233cc1af157c044c66132e8be749c1342024621b1700333fbc28"
+metric = "branches"
+reason = "A BIND must hold the one live grant for its owner and signed concrete target."
+
+[[region]]
+id = "consumed-route-grant-recovery"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/reservations.rs"
+item = "finish"
+source_sha256 = "793498c857b4e03e1478cb6d52e76cb6f20235320c0015a208f19672769a7972"
+start_line = 379
+end_line = 382
+span_sha256 = "f8e24b30769ae4b16c84664cf259869355ef1bd8077c2bbb77253b390435bd60"
+metric = "branches"
+reason = "An archived claim on a previously bound route retires immediately after recovery."

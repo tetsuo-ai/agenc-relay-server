@@ -183,6 +183,45 @@ fn reserve_channel(
         }))
 }
 
+#[cfg(test)]
+mod grant_restart;
+
+#[test]
+fn an_unused_channel_grant_can_be_renewed_at_its_signed_deadline() -> TestResult {
+    let mut harness = Harness::new()?;
+    harness.publish_identity_and_roster()?;
+    harness.attach()?;
+    let original = ok_reservation(reserve_channel(&mut harness, INSTANCE)?)?;
+    let expires = harness
+        .coordinator
+        .state
+        .routes
+        .reservations()
+        .find(|r| r.reservation_id.0 == original)
+        .ok_or("original channel reservation")?
+        .expires_at;
+    harness.now = expires - 1;
+    assert_eq!(
+        refusal(reserve_channel(&mut harness, INSTANCE)?),
+        Some(E2eeReplyCode::GroupConflict)
+    );
+    harness.now = expires;
+    let renewed = ok_reservation(reserve_channel(&mut harness, INSTANCE)?)?;
+    assert_ne!(original, renewed);
+    let grants: Vec<_> = harness
+        .coordinator
+        .state
+        .routes
+        .reservations()
+        .map(|r| r.reservation_id.0)
+        .collect();
+    assert_eq!(grants, [renewed]);
+    let original_key = agenc_relay_storage::e2ee_records::ClaimRow::reservation_key(&original)?;
+    assert!(!harness.writes.iter().any(|row| matches!(row,
+        crate::state_core::durable::AccountServiceDurableWrite::Put { key, .. } if key == &original_key)));
+    Ok(())
+}
+
 /// A direct reservation and the conversation nonce it names.
 type DirectReservation = ([u8; 16], [u8; 32]);
 

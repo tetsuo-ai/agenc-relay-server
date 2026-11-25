@@ -51,7 +51,7 @@ fn route_row() -> RouteRow {
 }
 
 fn admit_state(restore: &mut Restore, key: &StoredKey, kind: u16, body: Vec<u8>) -> TestResult {
-    restore.admit(TableId::E2eeState, key, &state_value(kind, body)?);
+    restore.admit(TableId::E2eeState, key, &state_value(kind, body)?, None);
     Ok(())
 }
 
@@ -75,7 +75,12 @@ fn route_row_is_collected_only_under_a_route_key() -> TestResult {
 fn rows_of_other_tables_are_not_collected() -> TestResult {
     let mut restore = Restore::default();
     let value = state_value(ROUTE_ROW_KIND, route_row().encode()?)?;
-    restore.admit(TableId::Account, &RouteRow::key(&CONVERSATION)?, &value);
+    restore.admit(
+        TableId::Account,
+        &RouteRow::key(&CONVERSATION)?,
+        &value,
+        None,
+    );
     assert!(restore.routes.is_empty());
     Ok(())
 }

@@ -3,14 +3,19 @@
 use super::*;
 use crate::state_core::fanout::FanoutRequest;
 use crate::test_support::StateCoreFixture;
-use agenc_relay_storage::{ReadPlan, StoredKey};
+use agenc_relay_storage::e2ee_records::{ClaimRow, ObjectOwnerRow};
+use agenc_relay_storage::{ReadPlan, RecordReference, StoredKey};
 
 fn copy_writes(writes: &[Write]) -> TestResult<Vec<Write>> {
     writes
         .iter()
-        .map(|write| {
-            let (table, key, bytes) = write.encoded_record().ok_or("put")?;
-            Ok(Write::put(table, key.clone(), bytes.to_vec())?)
+        .map(|write| match write {
+            Write::Put {
+                table,
+                key,
+                plaintext,
+            } => Ok(Write::put(*table, key.clone(), plaintext.to_vec())?),
+            Write::Delete { table, key } => Ok(Write::delete(*table, key.clone())?),
         })
         .collect()
 }
@@ -91,6 +96,25 @@ async fn normal_gate_and_route_share_a_receipt_and_reopen_after_a_lost_callback(
                 .await?
                 .is_none()
         );
+        let claim_key = ClaimRow::reservation_key(fixture.parameters[..16].try_into()?)?;
+        let claim = stored(&mut core, TableId::E2eeState, &claim_key)
+            .await?
+            .ok_or("reserved route claim")?;
+        let ClaimRow::Reservation {
+            reservation_object_id,
+            ..
+        } = ClaimRow::decode(claim.body())?
+        else {
+            return Err("route reservation expected".into());
+        };
+        let owner_key = ObjectOwnerRow::key(&reservation_object_id)?;
+        let claim_ref = RecordReference::new(TableId::E2eeState, claim_key.clone())?;
+        let owner = stored(&mut core, TableId::E2eeState, &owner_key)
+            .await?
+            .ok_or("reservation ownership before bind")?;
+        let mut remaining = owner.references().to_vec();
+        assert!(remaining.contains(&claim_ref));
+        remaining.retain(|reference| reference != &claim_ref);
         let mut outcome = ok(evaluate_request(
             &mut fixture.harness,
             Op::BindGroup,
@@ -99,6 +123,24 @@ async fn normal_gate_and_route_share_a_receipt_and_reopen_after_a_lost_callback(
         )?)?;
         let expected = written_gate(&outcome.writes, fixture.id)?.ok_or("gate")?;
         assert_eq!(expected.recovery_epoch(), core.identity.recovery_epoch);
+        // The durable batch includes the released reservation's ownership
+        // change even when the companion callback is lost after commit.
+        let revision = core
+            .context_mut()?
+            .domain()
+            .plan_account_service_checkpoint()?
+            .resulting_revision()
+            .get();
+        let owners = fixture
+            .harness
+            .coordinator
+            .stage_owners(
+                &mut outcome.writes,
+                fixture.harness.now,
+                outcome.security_mutation,
+                revision,
+            )
+            .map_err(|code| format!("binding owners: {code:?}"))?;
         let commit_before = core.context_mut()?.head().storage_commit_sequence;
         stage(&mut core, copy_writes(&outcome.writes)?)?;
         assert_eq!(
@@ -122,6 +164,7 @@ async fn normal_gate_and_route_share_a_receipt_and_reopen_after_a_lost_callback(
         // The callback is deliberately optional: restart must recover a committed batch
         // even when the process never installed its private companion effects.
         if apply_callback {
+            owners.apply(&mut fixture.harness.coordinator.state);
             for effect in outcome.effects.drain(..) {
                 effect(&mut fixture.harness.coordinator.state);
             }
@@ -140,6 +183,15 @@ async fn normal_gate_and_route_share_a_receipt_and_reopen_after_a_lost_callback(
         }
         drop(outcome);
         core.restart_registration_storage(vec![72; 65_536])?;
+        assert!(
+            stored(&mut core, TableId::E2eeState, &claim_key)
+                .await?
+                .is_none()
+        );
+        let owner = stored(&mut core, TableId::E2eeState, &owner_key)
+            .await?
+            .ok_or("reservation ownership after bind")?;
+        assert!(owner.references() == remaining.as_slice());
         let mut fresh = Harness::new()?;
         fresh.coordinator.delivery_identity = None;
         fresh.coordinator.configure_delivery_identity(

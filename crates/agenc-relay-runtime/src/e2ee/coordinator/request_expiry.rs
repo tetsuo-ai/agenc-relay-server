@@ -28,6 +28,7 @@ struct Change {
 
 pub(crate) struct Prepared {
     changes: Vec<Change>,
+    grants: Vec<super::reservations::Deadline>,
     next: Cursor,
     _backing: MemoryPermit,
 }
@@ -44,16 +45,21 @@ impl Prepared {
             .map_err(|_| CompanionFault::Ceiling)?;
         let mut prepared = Self {
             changes: Vec::with_capacity(MAX_EXPIRY_ENTRIES),
+            grants: executor
+                .state
+                .reservations
+                .expired(now, MAX_EXPIRY_ENTRIES / 2),
             next: cursor,
             _backing: metadata,
         };
         let start = cursor.0.map_or(Unbounded, Excluded);
         let mut scanned = 0;
+        let replay_limit = MAX_EXPIRY_ENTRIES - prepared.grants.len();
         for (key, row) in executor
             .state
             .replays
             .range((start, Unbounded))
-            .take(MAX_EXPIRY_ENTRIES)
+            .take(replay_limit)
         {
             scanned += 1;
             prepared.next = Cursor(Some(*key));
@@ -78,26 +84,31 @@ impl Prepared {
                 owner,
             });
         }
-        if scanned < MAX_EXPIRY_ENTRIES {
+        if scanned < replay_limit {
             prepared.next = Cursor::default();
         }
         Ok(prepared)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.changes.is_empty() && self.grants.is_empty()
     }
     pub(crate) fn next_cursor(&self) -> Cursor {
         self.next
     }
     pub(crate) fn completes_cycle(&self) -> bool {
-        self.next == Cursor::default()
+        self.next == Cursor::default() && self.grants.len() < MAX_EXPIRY_ENTRIES / 2
     }
 
     pub(crate) fn writes(&self, _revision: u64) -> Result<Vec<Write>, crate::RuntimeError> {
         self.changes
             .iter()
             .map(|change| Write::delete(TableId::E2eeState, ReplayRow::key(&change.key)?))
+            .chain(
+                self.grants
+                    .iter()
+                    .map(|(_, id)| super::reservations::delete(*id)),
+            )
             .collect()
     }
 
@@ -108,6 +119,20 @@ impl Prepared {
             .all(|change| change.matches(&executor.state))
         {
             return Err(CompanionFault::Storage);
+        }
+        if !self
+            .grants
+            .iter()
+            .all(|deadline| executor.state.reservations.has_deadline(deadline))
+        {
+            return Err(CompanionFault::Storage);
+        }
+        for (_, id) in &self.grants {
+            executor.state.reservations.remove(*id);
+            executor
+                .state
+                .routes
+                .remove_reservation(agenc_relay_domain::e2ee::ReservationId(*id));
         }
         for change in &self.changes {
             executor.state.replays.remove(&change.key);
