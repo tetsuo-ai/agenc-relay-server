@@ -1,10 +1,10 @@
-# CLAIM STATUS names the stored claim's target (SC-001, SC-002)
+# Stable KeyPackage claim results (SC-001 and SC-002)
 
-This record covers SC-001 and SC-002 of the SDK server program (2026-10-01,
-outside master #35). SC-001 changes how `EKEY CLAIM STATUS` names a claim's
-device; SC-002 is recorded as a disposition without a code change. No wire
-object, registry, profile hash, limit, persistent format or normative text
-changed.
+The coordinator retains a successful claim and an accepted no-stock claim under
+the claimant account and operation ID. A client can recover either result after
+restarting the coordinator or refilling the target device's stock. SC-001
+corrected the target device returned by `CLAIM STATUS`. SC-002 implements the
+stable mapping required by companion §11.6.
 
 ## SC-001: CLAIM STATUS returns the stored result
 
@@ -74,35 +74,82 @@ accessor only and passes either way. With the fix restored, all pass.
 target device in the `EKEY CLAIMED` line, the same line `EKEY CLAIM PACKAGE`
 returned. Nothing else changes.
 
-## SC-002: disposition only
+## SC-002 durable results and admission
 
-SC-002 asked whether an `EKEY EMPTY PACKAGE` claim result must survive a
-coordinator restart. The Section 11.6 paragraph that defines the claim mapping
-maps every claim result, and its retention sentence covers every mapping, not
-only a claimed package: "The mapping survives reconnect and is retained
-through at least the later of the claimed package lifetime and
-`KEY_PACKAGE_CLAIM_TIMEOUT`". Section 13.1 adds that
-`KEY_PACKAGE_CLAIM_TIMEOUT` bounds the claimant's stable operation mapping.
-An `EMPTY` mapping should therefore last at least `KEY_PACKAGE_CLAIM_TIMEOUT`
-(seven days). The paragraph uses no BCP 14 keyword, Section 12.5 gives an
-empty claim no completion event, and the SDK's readiness audit rated SC-002
-a hardening gap, not an interoperability defect.
+For an attached claimant and an active target device, the coordinator first
+looks up the operation under the authenticated claimant's account digest.
+Identical parameters replay the stored result. Changing the target account,
+target device or suite returns `E2EE_OPERATION_CONFLICT`. A new claim selects
+eligible stock under the normal minimum remaining lifetime rule. When the
+device has no eligible stock, an accepted operation writes a typed
+`KeyUnavailable` claim and returns `EKEY EMPTY PACKAGE`. The authenticated
+`claim/v1/<claimant-digest><operation-id>` row stores the target account digest,
+device, suite and seven-day cutoff with an empty KeyPackageRef and no object.
+A server upgraded from a version that kept empty results only in memory can
+recover every operation with a durable row. It starts retaining new empty
+results from upgrade onward. The actor publishes the new mapping and
+response after the storage receipt. An unknown operation also returns
+`EKEY EMPTY PACKAGE` to `CLAIM STATUS`. A retry against replenished stock and a
+changed-parameter conflict distinguish a retained result from an unknown one.
 
-The disposition is no change, and it leaves that gap open. An empty result
-stays recorded in memory under its operation, so an identical retry before a
-restart still answers `EMPTY PACKAGE`. It is never written to storage, so a
-coordinator restart drops it, and the same operation is then evaluated
-again, even when the restart comes well within `KEY_PACKAGE_CLAIM_TIMEOUT`
-of the first claim. The SDK rehearsal's patch 0004, which made empty
-results durable, is not adopted; the retention of claim records is the
-owner's decision.
+The coordinator admits up to **64 retained no-stock operations per claimant**
+and **4,096 across the coordinator**. Each takes an 8 KiB reservation from
+the shared process memory budget, including during reload. A fresh empty
+claim at either limit, or with insufficient process backing, returns
+`RATE_LIMITED` and leaves the claim operation available for retry. Existing
+mappings still replay or conflict and a fresh stocked claim can still
+succeed. Expired rows keep their slots until their deletes commit. A reload
+that cannot admit all retained rows fails before serving the directory. The loader
+checks the full claim or stock key and its typed row together. The v1 codec
+can represent `RateLimited`, but this server records overload as an admission
+refusal. It rejects such a stored row at startup.
 
-## Limitations
+The request-maintenance worker examines up to 128 claim rows and deletes at
+most one claim mapping per pass. It uses trusted time and permits deletion at
+the cutoff. An empty mapping releases its slot after that commit. For a
+successful claim, the row and the object's claim-owner reference change in
+the same transaction. Its retention floor is the later of the seven-day
+timeout and the signed package lifetime. Older successful rows may record
+only the seven-day cutoff, so the worker also checks the retained signed
+package. Missing lifetime evidence leaves the mapping in place. The object
+collector continues to own physical deletion.
 
-- The daemon evidence restarts the coordinator only, with the client
-  sessions kept on their edges; a restart of the claimant's edge, and a
-  claim between two devices of one account over the real wire, are covered at
-  the coordinator level only.
-- No critical-coverage region was added for `claim_status` or
-  `Directory::stored_claim`; whether the release inventory should gain one is
-  the owner's decision.
+Expired route reservations, replay results and the selected KeyPackage claim
+share one storage receipt. The worker reserves at most half of the 128
+primary deletion slots for route grants, one for a due KeyPackage claim and
+the remainder for completed request replays. The replay and KeyPackage scans
+keep independent cursors. A restart test captures an expired route lease
+and one of two due no-stock claims, confirms their exact durable deletions
+and reopening, and selects the remaining claim on the next pass.
+
+### Linux verification
+
+The coordinator tests exercise the production handler, its typed staged row,
+real package refill, same-account queries from a sibling device and production
+startup decoding. They check the precise cutoff with a controlled clock,
+dropped maintenance, committed deletion, old successful rows, unchanged
+object ownership, the per-account and aggregate ceilings, insufficient memory
+and the first new grant after a slot is released.
+
+The registered test starts one coordinator and two edges. Alice and Bob register, authenticate and
+attach their enrolled devices on separate edges. Alice gets a no-stock
+result, Bob publishes a signed mls-rs KeyPackage, and Alice can still replay
+her empty claim while a fresh claim receives those exact bytes. After
+restarting the coordinator, Bob publishes another signed package. Alice's
+status and identical retry still return empty, a changed suite conflicts, and
+a fresh operation takes the second package. The same run checks Alice's
+original successful status and bytes after restart. The daemon case keeps
+the edge processes running and uses real TLS and persistent storage. The
+seven-day cutoff and the two capacity limits are exercised in the coordinator
+tests.
+
+```sh
+cargo test --locked --offline --all-features -p agenc-relay-domain --lib
+cargo test --locked --offline --all-features -p agenc-relay-runtime --lib -- --test-threads=4
+cargo test --locked --offline --all-features -p agenc-relay-server --test stage_eight_e2ee claim_restart::a_claim_keeps_its_target_and_result_across_a_coordinator_restart -- --exact
+```
+
+On Linux with Rust 1.98.0, all ten focused coordinator claim tests and all
+268 domain tests passed. The registered restart case passed in 16.02 seconds with the
+exact labeled empty and conflict completions checked. The SDK's independent client qualification can repeat this
+exchange against the merged, pinned daemon.

@@ -177,6 +177,8 @@ pub(super) struct Restore {
     memberships: super::membership_restore::Rows,
     directory: Vec<(StoredKey, DirectoryRow)>,
     packages: Vec<(StoredKey, PackageRow)>,
+    empty_claims: super::empty_claims::Slots,
+    claim_fault: Option<super::CompanionFault>,
     attachments: Vec<(StoredKey, AttachRow)>,
     mailbox: Vec<(StoredKey, MailboxRow)>,
     mailbox_sequences: super::mailbox_restore::Restore,
@@ -229,6 +231,10 @@ impl Restore {
             self.objects.poison();
             return;
         }
+        if wrong_package_row_kind(key, value.record_kind()) {
+            self.claim_fault = Some(super::CompanionFault::Storage);
+            return;
+        }
         self.owners.admit_row(key, value);
         let body = value.body();
         match value.record_kind() {
@@ -245,7 +251,9 @@ impl Restore {
             }
             SEQUENCER_ROW_KIND => self.admit_sequencer(key, body),
             DIRECTORY_ROW_KIND => push(&mut self.directory, key, DirectoryRow::decode(body)),
-            PACKAGE_ROW_KIND => push(&mut self.packages, key, PackageRow::decode(body)),
+            PACKAGE_ROW_KIND if self.claim_fault.is_none() => {
+                self.claim_fault = self.admit_package(key, body, backing).err();
+            }
             ATTACH_ROW_KIND => push(&mut self.attachments, key, AttachRow::decode(body)),
             MAILBOX_ROW_KIND => {
                 if let Some(row) = self.mailbox_sequences.admit_mailbox(key, body) {
@@ -258,20 +266,7 @@ impl Restore {
             agenc_relay_storage::e2ee_records::EXPIRY_PROGRESS_ROW_KIND => {
                 self.admit_expiry_progress(body);
             }
-            REPLAY_ROW_KIND => {
-                if key
-                    .as_bytes()
-                    .starts_with(agenc_relay_storage::e2ee_records::prefix::ORIGIN_SEQUENCE)
-                {
-                    push(
-                        &mut self.origin_sequences,
-                        key,
-                        OriginSequenceRow::decode(body),
-                    );
-                } else {
-                    push(&mut self.replays, key, ReplayRow::decode(body));
-                }
-            }
+            REPLAY_ROW_KIND => self.admit_replay(key, body),
             DELIVERY_ROW_KIND => self.objects.poison(),
             agenc_relay_storage::e2ee_records::DELIVERY_RECOVERY_ROW_KIND => {
                 self.delivery.admit_owner(key, value);
@@ -303,6 +298,19 @@ impl Restore {
         }
     }
 
+    fn admit_replay(&mut self, key: &StoredKey, body: &[u8]) {
+        use agenc_relay_storage::e2ee_records::prefix;
+        if key.as_bytes().starts_with(prefix::ORIGIN_SEQUENCE) {
+            push(
+                &mut self.origin_sequences,
+                key,
+                OriginSequenceRow::decode(body),
+            );
+        } else {
+            push(&mut self.replays, key, ReplayRow::decode(body));
+        }
+    }
+
     /// The collector's durable continuation; a malformed row poisons the
     /// reload rather than restarting the sweep at an invented position.
     fn admit_expiry_progress(&mut self, body: &[u8]) {
@@ -311,6 +319,48 @@ impl Restore {
             Ok(row) => self.object_expiry = Some(super::object_expiry::Progress::from_row(row)),
             Err(_) => self.objects.poison(),
         }
+    }
+
+    fn admit_package(
+        &mut self,
+        key: &StoredKey,
+        body: &[u8],
+        backing: Option<&crate::budget::BackingReservationPort>,
+    ) -> Result<(), super::CompanionFault> {
+        let storage = |_| super::CompanionFault::Storage;
+        let row = PackageRow::decode(body).map_err(storage)?;
+        match &row {
+            PackageRow::Package { .. } => {
+                PackageRow::parse_package_key(key).map_err(storage)?;
+            }
+            PackageRow::Claim { outcome, .. } => {
+                let claim = PackageRow::parse_claim_key(key).map_err(storage)?;
+                self.restore_claim_slot(claim, *outcome, backing)?;
+            }
+        }
+        self.packages.push((key.clone(), row));
+        Ok(())
+    }
+
+    fn restore_claim_slot(
+        &mut self,
+        claim: super::empty_claims::Key,
+        outcome: agenc_relay_storage::e2ee_records::ClaimOutcome,
+        backing: Option<&crate::budget::BackingReservationPort>,
+    ) -> Result<(), super::CompanionFault> {
+        use agenc_relay_storage::e2ee_records::ClaimOutcome;
+        match outcome {
+            ClaimOutcome::Claimed => {}
+            ClaimOutcome::KeyUnavailable => {
+                let permit = self
+                    .empty_claims
+                    .reserve(claim, backing.ok_or(super::CompanionFault::Ceiling)?)?;
+                self.empty_claims.insert(claim, permit);
+            }
+            // Admission overload is never an accepted claim result.
+            ClaimOutcome::RateLimited => return Err(super::CompanionFault::Storage),
+        }
+        Ok(())
     }
 
     pub(super) fn admit_gate(
@@ -659,6 +709,9 @@ pub(super) fn rebuild(
     coordinator: &mut CompanionCoordinator,
     restore: Restore,
 ) -> Result<(), super::CompanionFault> {
+    if let Some(error) = restore.claim_fault {
+        return Err(error);
+    }
     restore.gates.validate(
         &restore.routes,
         coordinator
@@ -669,7 +722,8 @@ pub(super) fn rebuild(
     let state = &mut coordinator.state;
     restore.objects.apply(state)?;
     restore_directory(state, &network_id, restore.directory, restore.attachments);
-    restore_packages(state, restore.packages);
+    restore_packages(state, restore.packages)?;
+    state.empty_claims = restore.empty_claims;
     restore_mailboxes(state, restore.mailbox)?;
     restore.mailbox_sequences.apply(&mut state.mailboxes)?;
     restore_replays(state, restore.replays, restore.backing.as_ref())?;
@@ -1241,13 +1295,17 @@ fn restore_attachment(
 // ---------------------------------------------------------------------------
 // Packages, mailboxes, replays.
 
-fn restore_packages(state: &mut CompanionState, rows: Vec<(StoredKey, PackageRow)>) {
+fn restore_packages(
+    state: &mut CompanionState,
+    rows: Vec<(StoredKey, PackageRow)>,
+) -> Result<(), super::CompanionFault> {
     for (key, row) in rows {
         match row {
             PackageRow::Package { .. } => restore_package_row(state, &key, row),
-            PackageRow::Claim { .. } => restore_claim_row(state, &key, row),
+            PackageRow::Claim { .. } => restore_claim_row(state, &key, row)?,
         }
     }
+    Ok(())
 }
 
 fn restore_package_row(state: &mut CompanionState, key: &StoredKey, row: PackageRow) {
@@ -1278,28 +1336,36 @@ fn restore_package_row(state: &mut CompanionState, key: &StoredKey, row: Package
     );
 }
 
-fn restore_claim_row(state: &mut CompanionState, key: &StoredKey, row: PackageRow) {
+fn restore_claim_row(
+    state: &mut CompanionState,
+    key: &StoredKey,
+    row: PackageRow,
+) -> Result<(), super::CompanionFault> {
+    use agenc_relay_storage::e2ee_records::ClaimOutcome as Stored;
     let PackageRow::Claim {
         target_account_digest,
         target_device_id,
         suite,
+        outcome,
         key_package_ref,
         object_id,
         retain_until,
-        ..
     } = row
     else {
-        return;
+        return Err(super::CompanionFault::Storage);
     };
-    let Ok((claimant, operation)) = PackageRow::parse_claim_key(key) else {
-        return;
-    };
-    let outcome = object_id.map_or(ClaimOutcome::Unavailable, |object_id| {
-        ClaimOutcome::Claimed {
-            key_package_ref,
-            object_id,
+    let (claimant, operation) =
+        PackageRow::parse_claim_key(key).map_err(|_| super::CompanionFault::Storage)?;
+    let outcome = match (outcome, object_id) {
+        (Stored::Claimed, Some(object_id)) if !key_package_ref.is_empty() => {
+            ClaimOutcome::Claimed {
+                key_package_ref,
+                object_id,
+            }
         }
-    });
+        (Stored::KeyUnavailable, None) if key_package_ref.is_empty() => ClaimOutcome::Unavailable,
+        _ => return Err(super::CompanionFault::Storage),
+    };
     state.directory.restore_claim(
         claimant,
         operation,
@@ -1311,6 +1377,7 @@ fn restore_claim_row(state: &mut CompanionState, key: &StoredKey, row: PackageRo
         outcome,
         retain_until,
     );
+    Ok(())
 }
 
 const fn mailbox_kind(kind: RowMailboxKind) -> MailboxKind {
@@ -2608,4 +2675,11 @@ impl Restore {
     ) -> Result<(), super::CompanionFault> {
         self.objects.select(&self.mailbox, &self.replays, backing)
     }
+}
+
+fn wrong_package_row_kind(key: &StoredKey, kind: u16) -> bool {
+    use agenc_relay_storage::e2ee_records::prefix;
+    kind != PACKAGE_ROW_KIND
+        && (key.as_bytes().starts_with(prefix::CLAIM)
+            || key.as_bytes().starts_with(prefix::PACKAGE))
 }

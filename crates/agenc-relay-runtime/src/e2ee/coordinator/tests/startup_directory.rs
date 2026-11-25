@@ -690,7 +690,7 @@ fn only_published_packages_under_a_package_key_are_restocked() -> TestResult {
         ),
         (foreign_key()?, package_row(PackageState::Published)),
     ];
-    restore_packages(&mut state, rows);
+    restore_packages(&mut state, rows)?;
     assert_eq!(state.directory.stock(&[1; 32], &[2; 16]), 1);
     Ok(())
 }
@@ -724,9 +724,8 @@ fn claim_rows_restore_their_outcome_only_under_a_claim_key() -> TestResult {
             claim_row(Some([3; 32])),
         ),
         (PackageRow::claim_key(&[6; 32], &[2; 16])?, claim_row(None)),
-        (foreign_key()?, claim_row(None)),
     ];
-    restore_packages(&mut state, rows);
+    restore_packages(&mut state, rows)?;
     assert_eq!(
         state.directory.claim_status(&[6; 32], &[1; 16]),
         Some(&ClaimOutcome::Claimed {
@@ -749,11 +748,15 @@ fn package_restore_helpers_ignore_rows_of_the_other_arm() -> TestResult {
         &PackageRow::package_key(b"published")?,
         claim_row(None),
     );
-    restore_claim_row(
-        &mut state,
-        &PackageRow::claim_key(&[6; 32], &[1; 16])?,
-        package_row(PackageState::Published),
+    assert!(
+        restore_claim_row(
+            &mut state,
+            &PackageRow::claim_key(&[6; 32], &[1; 16])?,
+            package_row(PackageState::Published),
+        )
+        .is_err()
     );
+    assert!(restore_claim_row(&mut state, &foreign_key()?, claim_row(None)).is_err());
     assert_eq!(state.directory.stock(&[1; 32], &[2; 16]), 0);
     assert!(state.directory.claim_status(&[6; 32], &[1; 16]).is_none());
     Ok(())
