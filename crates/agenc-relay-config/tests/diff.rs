@@ -446,10 +446,11 @@ fn every_remaining_restart_only_field_is_detected_alone() -> TestResult {
             peer.server_name = name;
         }
     };
-    let edits: [fn(&mut PeerConfig); 4] = [
+    let edits: [fn(&mut PeerConfig); 5] = [
         rename,
         |peer| peer.role = NodeRole::Coordinator,
         |peer| peer.recovery_epoch = RecoveryEpoch::from_bytes([1; 16]),
+        |peer| peer.initial_root_profile = true,
         |peer| peer.certificate_spki_sha256 = [1; 32],
     ];
     for edit in edits {

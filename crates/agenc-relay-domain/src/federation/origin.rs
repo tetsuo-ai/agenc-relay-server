@@ -270,8 +270,8 @@ impl OriginTable {
 
     /// Rebuilds one durable origin row without protocol checks.
     ///
-    /// Startup reconstruction calls this for every stored row; the runtime
-    /// proved the rows authentic before handing them over.
+    /// Startup installs authenticated stored rows. A live writer installs a terminal
+    /// row only after validating the receipt for that exact durable transition.
     pub fn restore_origin(&mut self, key: OriginKey, entry: OriginEntry) {
         self.origins.insert(key, entry);
     }
@@ -490,15 +490,24 @@ impl OriginTable {
         generation: u64,
         next_sequence: u64,
     ) -> Result<(), OriginError> {
+        let projected = self.proposed_deletion(origin, generation, next_sequence)?;
+        self.origins.insert(origin, projected);
+        Ok(())
+    }
+
+    /// Validates the same deletion as `delete`, returning the exact row for a durable writer.
+    pub fn proposed_deletion(
+        &self,
+        origin: OriginKey,
+        generation: u64,
+        next_sequence: u64,
+    ) -> Result<OriginEntry, OriginError> {
         let phase = self.require_synchronizing(origin)?;
-        let entry = self
-            .origins
-            .get_mut(&origin)
-            .ok_or(OriginError::UnknownOrigin)?;
+        let mut entry = self.origin(&origin).ok_or(OriginError::UnknownOrigin)?;
         let replay = phase == EdgePhase::Resetting;
         if entry.status == OriginStatus::Deleted {
-            return if replay || repeats_deletion(entry, generation, next_sequence) {
-                Ok(())
+            return if replay || repeats_deletion(&entry, generation, next_sequence) {
+                Ok(entry)
             } else {
                 Err(OriginError::Conflict)
             };
@@ -519,7 +528,7 @@ impl OriginTable {
             };
             entry.deleted_after = Some(after);
             entry.status = OriginStatus::Deleted;
-            return Ok(());
+            return Ok(entry);
         }
         if entry.generation != generation || next_sequence < entry.next_sequence {
             return Err(OriginError::WrongGeneration);
@@ -528,7 +537,7 @@ impl OriginTable {
         // or queued; they keep executing up to the deleted sequence.
         entry.deleted_after = Some(next_sequence);
         entry.status = OriginStatus::Deleted;
-        Ok(())
+        Ok(entry)
     }
 
     /// Classifies one request against the origin and the retained record at

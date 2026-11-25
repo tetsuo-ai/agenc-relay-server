@@ -7,8 +7,8 @@ use crate::connection::ConnectionGeneration;
 use crate::federation::codec::results::ResultArm;
 use agenc_relay_federation_wire::RequestCorrelation;
 use agenc_relay_federation_wire::{
-    CanonicalEncode, FederationHash32, RequestHeader, ResultHeader, SchemaObject,
-    federation_object_id, result_kind_permitted,
+    FederationHash32, InitialRootOperation, RequestHeader, ResultHeader, SchemaObject,
+    federation_object_id,
 };
 use agenc_relay_storage::federation_records::{
     COORDINATOR_RESULT_KIND, CoordinatorResultRecord, request_result_key,
@@ -17,10 +17,13 @@ use agenc_relay_storage::{PersistentRecordValue, StoredKey, TableId};
 use agenc_relay_types::EventId;
 
 pub(crate) struct RemoteResultBinding {
+    extension: Option<InitialRootOperation>,
     header: RequestHeader,
     request_object_id: FederationHash32,
     origin: AccountServiceDurableWrite,
     prepared: Option<(u64, Vec<u8>)>,
+    protected_deadline: Option<u64>,
+    replay: Option<FederationHash32>,
 }
 
 pub(crate) struct CommittedRemoteResult {
@@ -34,16 +37,21 @@ impl StateCoreContext {
         &mut self,
         generation: ConnectionGeneration,
         header: RequestHeader,
+        extension: Option<InitialRootOperation>,
         request_object_id: FederationHash32,
         origin: AccountServiceDurableWrite,
+        protected_deadline: Option<u64>,
     ) {
         self.remote_account_results.insert(
             generation,
             RemoteResultBinding {
+                extension,
                 header,
                 request_object_id,
                 origin,
                 prepared: None,
+                replay: None,
+                protected_deadline,
             },
         );
     }
@@ -80,12 +88,20 @@ impl StateCoreContext {
             completion_event_id: completion_event_id.map(|id| *id.as_bytes()),
             resulting_state_generation: revision,
         };
-        let result = row(
+        let value = PersistentRecordValue::new(
             TableId::RequestResult,
-            request_result_key(binding.header.replay_key.to_bytes())?,
             COORDINATOR_RESULT_KIND,
             revision,
+            0,
+            binding.protected_deadline,
+            Vec::new(),
             record.encode()?,
+        )?
+        .encode()?;
+        let result = AccountServiceDurableWrite::put(
+            TableId::RequestResult,
+            request_result_key(binding.header.replay_key.to_bytes())?,
+            value,
         )?;
         let origin = binding.origin_at(revision)?;
         binding.prepared = Some((self.head.storage_commit_sequence, bytes));
@@ -115,14 +131,54 @@ impl StateCoreContext {
         let Some(binding) = self.remote_account_results.get(&generation) else {
             return Ok(());
         };
-        let (arm, replies) = crate::remote_accounts::sealed_result(
-            self.server_prefix(),
-            binding.header.opcode,
-            response,
-            semantic,
-        )?;
+        let (arm, replies) = if let Some(operation) = binding.extension {
+            if semantic.is_some() {
+                return Err(RuntimeError::InvalidValue);
+            }
+            (
+                ResultArm::InitialRoot(operation, response.into()),
+                Vec::new(),
+            )
+        } else {
+            crate::remote_accounts::sealed_result(
+                self.server_prefix(),
+                binding.header.opcode,
+                response,
+                semantic,
+            )?
+        };
         writes.extend(self.remote_account_result_writes(generation, revision, &arm, replies)?);
         Ok(())
+    }
+
+    /// An already-authenticated local replay can acquire a new outer sequence, without
+    /// producing another HPKE response or reapplying its account mutation.
+    pub(crate) fn bind_verified_root_replay(
+        &mut self,
+        generation: ConnectionGeneration,
+        response: &[u8],
+    ) {
+        if let Some(binding) = self.remote_account_results.get_mut(&generation)
+            && binding.extension == Some(InitialRootOperation::Claim)
+        {
+            binding.replay = Some(federation_object_id(response));
+        }
+    }
+
+    pub(crate) fn verified_root_replay(
+        &self,
+        generation: ConnectionGeneration,
+        arm: &ResultArm,
+    ) -> bool {
+        let ResultArm::InitialRoot(InitialRootOperation::Claim, response) = arm else {
+            return false;
+        };
+        self.remote_account_results
+            .get(&generation)
+            .is_some_and(|binding| {
+                binding.extension == Some(InitialRootOperation::Claim)
+                    && binding.replay == Some(federation_object_id(response))
+            })
     }
 
     pub(crate) fn take_remote_account_result(
@@ -130,10 +186,14 @@ impl StateCoreContext {
         generation: ConnectionGeneration,
     ) -> Option<CommittedRemoteResult> {
         let binding = self.remote_account_results.get(&generation)?;
-        let (staged_after, _) = binding.prepared.as_ref()?;
+        let (staged_after, bytes) = binding.prepared.as_ref()?;
         let key = request_result_key(binding.header.replay_key.to_bytes()).ok()?;
         if self.head.storage_commit_sequence <= *staged_after
             || !self.index.holds(TableId::RequestResult, &key)
+            || (binding.extension.is_some()
+                && !self
+                    .index
+                    .holds_federated_claim(&binding.header.replay_key.to_bytes(), bytes))
         {
             return None;
         }
@@ -145,11 +205,16 @@ impl StateCoreContext {
         })
     }
 
-    pub(crate) fn take_committed_remote_results(&mut self) -> Vec<CommittedRemoteResult> {
+    pub(crate) fn take_committed_remote_results(
+        &mut self,
+    ) -> Vec<(ConnectionGeneration, CommittedRemoteResult)> {
         let generations: Vec<_> = self.remote_account_results.keys().copied().collect();
         generations
             .into_iter()
-            .filter_map(|generation| self.take_remote_account_result(generation))
+            .filter_map(|generation| {
+                self.take_remote_account_result(generation)
+                    .map(|result| (generation, result))
+            })
             .collect()
     }
 
@@ -177,9 +242,6 @@ impl RemoteResultBinding {
         replies: Vec<SchemaObject>,
         completion_event_id: Option<EventId>,
     ) -> Result<Vec<u8>, RuntimeError> {
-        if !result_kind_permitted(self.header.opcode, arm.kind()) {
-            return Err(RuntimeError::InvalidValue);
-        }
         let header = ResultHeader {
             network_id: self.header.network_id,
             replay_key: self.header.replay_key,
@@ -188,15 +250,14 @@ impl RemoteResultBinding {
             completion_event_id,
             result_kind: arm.kind(),
         };
-        let object = arm
-            .to_object()
-            .and_then(|arm| header.build(&arm, replies))
-            .map_err(|_| RuntimeError::InvalidValue)?;
-        Ok(object
-            .encode_canonical()
-            .map_err(|_| RuntimeError::InvalidValue)?
-            .as_slice()
-            .to_vec())
+        crate::federation::codec::initial_root::encode_result(
+            &self.header,
+            self.extension,
+            &header,
+            arm,
+            replies,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)
     }
 
     fn origin_at(&self, revision: u64) -> Result<AccountServiceDurableWrite, RuntimeError> {

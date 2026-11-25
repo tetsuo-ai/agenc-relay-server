@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1117
-reviewed_source_sha256 = "11f4b2424dd037442bd14708642f9b1f586f1b3f34cf6631e77f57c0ec6871ca"
+reviewed_source_files = 1162
+reviewed_source_sha256 = "22cb0a023fdff8e84111fa0607dcf6cdcf0e568115baac84c4d832bbafd54fae"
 deferred = []
 
 [[region]]
@@ -48,7 +48,7 @@ id = "federation-field-kind-decode"
 category = "protocol-enum-arms"
 file = "crates/agenc-relay-federation-wire/src/codec.rs"
 item = "begin_decode_value"
-source_sha256 = "6b9592798f13d22229f922fb3ed5e14f5537decd1a6814c68459e71bab1fa45c"
+source_sha256 = "72a85a20ffee735facf11b0b3422dec772d3fa9a4631891bf26787d28aba16b9"
 start_line = 1363
 end_line = 1430
 span_sha256 = "f4ec0e1687d18b9787e626742092e25b372a1e9ef0c662d11421e880719aa10c"
@@ -60,9 +60,9 @@ id = "domain-state-invariant-checks"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-relay-domain/src/model.rs"
 item = "validate"
-source_sha256 = "bb46878d8d0055721dfd5f864adb03993e652ee4fa0f531e9118ff949b7809e1"
-start_line = 1971
-end_line = 2156
+source_sha256 = "a0efe74e335158a6df63de5d90c056e2c0a7ce03e16bf2e45eba0fefdae390b6"
+start_line = 1996
+end_line = 2181
 span_sha256 = "1678f0776eb9079e330bb50a96f1f818f39c5085ec1d3031c4cdb59dd54d765a"
 metric = "branches"
 reason = "Every current domain cross-index and authority-fence check must take both outcomes."
@@ -108,9 +108,9 @@ id = "registered-control-capability-admission"
 category = "authorization-decisions"
 file = "crates/agenc-relay-client-wire/src/registration.rs"
 item = "require_command_capabilities"
-source_sha256 = "2e3944a1407c1263bef872b2549742869b427871d91bd01e55ecb0a2fdef3267"
-start_line = 960
-end_line = 981
+source_sha256 = "9ffc1fd34b1107e3d1ef0c1389d614366f02ff71dcde053c818ca34a3242fcff"
+start_line = 1027
+end_line = 1048
 span_sha256 = "a7c797158ebfb75356075c060222c9a50c83dac91979096f5dde02a0064ac61e"
 metric = "branches"
 reason = "Control mutations and history cannot be admitted without their response capabilities."
@@ -228,7 +228,7 @@ id = "federated-mode-role-user-identity"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/federation/coordinator/convert.rs"
 item = "channel_mode_text"
-source_sha256 = "a7d4878168fd790663fa944716eb1cc28fe68fec050c53c728a18c051e105422"
+source_sha256 = "5bb62998ba223cf575455f2e722958aeb2369c0d5550c0ed411f2a12b08c28e4"
 start_line = 624
 end_line = 641
 span_sha256 = "d8861e2587a326fd5a7a8954d7f26d4b9a112ea0b4d7b56fcecd7d52af1a6ead"
@@ -240,9 +240,9 @@ id = "borrowed-storage-ciphertext-bounds"
 category = "persistence-recovery"
 file = "crates/agenc-relay-crypto/src/storage.rs"
 item = "from_slice"
-source_sha256 = "7a3ff3eb60360f468eb379a9b389f27b0daa51597d26e69d202f2d765db00b45"
-start_line = 248
-end_line = 253
+source_sha256 = "5ba1d52459e8b63daa5ddf8be184a8efce40b957c65f00c973d77f51107c08cd"
+start_line = 254
+end_line = 259
 span_sha256 = "a0e15eb072c6c5b13441301a514d2f9ea7f555399baa0753333fb6dd4038438b"
 metric = "branches"
 reason = "Borrowing ciphertext retains the exact authentication-tag minimum and maximum record bound before AEAD opening."
@@ -546,3 +546,87 @@ end_line = 277
 span_sha256 = "c14fd98352bc7b9affadf92591be333f1c3d2abc1d4ded1b98aafce728f22f4e"
 metric = "branches"
 reason = "The total device plan must fit the strictest signed policy before a binding can lock its semantic route."
+
+[[region]]
+id = "guarded-registered-claim-disposition"
+category = "authorization-decisions"
+file = "crates/agenc-relay-auth/src/wire/initial_root.rs"
+item = "resolve"
+source_sha256 = "43e1f498a64c7ee88b33b9e9342fec6d407271fa377f3d1e68c32d3ac4bc3204"
+start_line = 430
+end_line = 450
+span_sha256 = "8cb9d562d1b160d743cba9ccec87a91d80cf3119c57c03bba61bcc4fe95a7480"
+metric = "branches"
+reason = "A current registered claim may fix one Reserved fingerprint, repeat its own choice and privately recover an already fixed choice across epochs."
+
+[[region]]
+id = "guarded-exact-result-release"
+category = "persistence-recovery"
+file = "crates/agenc-relay-auth/src/wire/initial_root.rs"
+item = "into_committed"
+source_sha256 = "43e1f498a64c7ee88b33b9e9342fec6d407271fa377f3d1e68c32d3ac4bc3204"
+start_line = 364
+end_line = 379
+span_sha256 = "ba0342528283abdc193d3721f32acd75674360d62c7380f3f948a41939acc7a7"
+metric = "branches"
+reason = "The exact original request, durable ciphertext, committed response counter and authorized immutable owner govern release of each prepared reply."
+
+[[region]]
+id = "guarded-permanent-root-transition"
+category = "persistence-recovery"
+file = "crates/agenc-relay-storage/src/e2ee_records/initial_root.rs"
+item = "transition"
+source_sha256 = "625e8574c4c6b97bc97b7fb7c0b8a5b57c413004ffefd030d3e0760d48daaf8f"
+start_line = 85
+end_line = 104
+span_sha256 = "f3b448700650bd86c8aa4c35a002f9afa42fe77b1f87acecd69d17d68211ea8a"
+metric = "branches"
+reason = "The private slot advances only from Reserved to Chosen or from Chosen to Published with the same fingerprint."
+
+[[region]]
+id = "guarded-exact-result-deadline"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/account_service/initial_root.rs"
+item = "require_live_claim_result"
+source_sha256 = "864df6bc6925534ce9f878307246a4bc9637b8233f0c5c5f994caae31995a064"
+start_line = 472
+end_line = 480
+span_sha256 = "450697a46eb1568d26e34e9c9c264b310f9ebc2617ef62d4222244838b3f6d85"
+metric = "branches"
+reason = "Both first delivery and exact replay require a trusted observation strictly before the durable expiry."
+
+[[region]]
+id = "guarded-federation-link-consent"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/registration/initial_root.rs"
+item = "lost_initial_root_link"
+source_sha256 = "9cc4ffea1866774b91727554557b3913362b767fb63ac5fec2d7d606ab4580e3"
+start_line = 8
+end_line = 10
+span_sha256 = "5a29e605166da5fd8f18b92ba026c72160408feafea12232fed724a2f0864e93"
+metric = "branches"
+reason = "The explicit client capability expires when its exact authenticated coordinator link ceases to be active."
+
+[[region]]
+id = "guarded-origin-exact-reply-retention"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/state_core/durable/federated_claims.rs"
+item = "may_replay"
+source_sha256 = "af5d1b5e3e87ca0ead6f7af4ae38da129688d8d3b63bf3f6c96b110564b4c2e8"
+start_line = 40
+end_line = 42
+span_sha256 = "cb65a40a1b89d4a12fd8702e5d05a991dc168f48c4e09e7dc505c35e0155278d"
+metric = "branches"
+reason = "The original receipt survives for the live origin and throughout its exact protected closing interval."
+
+[[region]]
+id = "guarded-origin-result-capacity"
+category = "section-27-invariant-checkers"
+file = "crates/agenc-relay-runtime/src/state_core/durable/federated_claims.rs"
+item = "room"
+source_sha256 = "af5d1b5e3e87ca0ead6f7af4ae38da129688d8d3b63bf3f6c96b110564b4c2e8"
+start_line = 111
+end_line = 116
+span_sha256 = "7bb4ba1e8184a09671f390c6db49109d8bbe1a37a6ecd9e1a2803448a43a05b4"
+metric = "branches"
+reason = "The origin, federation peer and shared coordinator each impose an independent bound on exact results."

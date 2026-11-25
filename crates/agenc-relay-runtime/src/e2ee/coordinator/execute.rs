@@ -479,6 +479,7 @@ impl Fresh<'_> {
 
 // agenc-review: allow owner=runtime reviewed=2026-09-03 reason=the executor context carries every base fact one handler may consult
 #[allow(clippy::too_many_arguments)]
+// agenc-review: focus owner=runtime reviewed=2026-11-25 reason=all companion operation predicates borrow the same domain snapshot, directory gate, entropy and edge projection at dispatch
 fn execute(
     coordinator: &CompanionCoordinator,
     context: &StateCoreContext,
@@ -541,6 +542,24 @@ fn execute(
         channel_member: &channel_member,
         binding_channel: &binding_channel,
         plan_binding: &plan_binding,
+        plan_root: &|root, object| {
+            let account = agenc_relay_types::AccountId::parse_wire_bytes(&root.account_id)
+                .map_err(|_| E2eeReplyCode::AccountRequired)?;
+            let session = user_id
+                .and_then(|user| domain.session(user))
+                .filter(|session| {
+                    session.account_id() == Some(account) && session.home_server_id() == home
+                })
+                .ok_or(E2eeReplyCode::AccountRequired)?;
+            let generation = session.account_session_generation();
+            context.plan_signed_root(
+                account,
+                generation,
+                root.generation,
+                root.fingerprint,
+                object,
+            )
+        },
         state_generation,
         source_view,
     };

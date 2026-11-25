@@ -40,8 +40,8 @@ pub use registration_command::{
     AccountControlCommand, ChannelControlCommand, ChatHistoryCommand, LocalInformationCommand,
     MonitorCommand, POST_REGISTRATION_COMMANDS, PostRegistrationCommand,
     PostRegistrationCommandKind, RegistrationAccountCommand, RegistrationCapCommand,
-    RegistrationCommand, RegistrationGrammarError, parse_registration_command,
-    validate_post_registration_command,
+    RegistrationCommand, RegistrationGrammarError, parse_initial_root_command,
+    parse_registration_command, validate_post_registration_command,
 };
 pub use render::{
     BatchStack, LogicalReply, MAX_BATCH_NESTING, MAX_SEMANTIC_REPLIES, MAX_USER_MASK_BYTES,
@@ -68,9 +68,10 @@ pub use auth_transport::{
     ACCOUNT_IDLE_TIMEOUT_MILLIS, ACCOUNT_REQUEST_BYTES, ACCOUNT_REQUEST_CHARACTERS,
     ACCOUNT_RESPONSE_BYTES, ACCOUNT_RESPONSE_CHARACTERS, ACCOUNT_TOTAL_TIMEOUT_MILLIS,
     AUTH_CHUNK_CHARACTERS, AccountCarrierAction, AccountCarrierKind, AccountCarrierPhase,
-    AccountTransfer, AuthTransportError, SASL_REQUEST_CHARACTERS, SASL_RESPONSE_CHARACTERS,
-    SASL_TIMEOUT_MILLIS, SaslAction, SaslNumeric, SaslTransport, SecretText,
-    decode_account_payload, decode_sasl_payload, encode_account_payload, encode_sasl_payload,
+    AccountTransfer, AuthTransportError, InitialRootCarrier, SASL_REQUEST_CHARACTERS,
+    SASL_RESPONSE_CHARACTERS, SASL_TIMEOUT_MILLIS, SaslAction, SaslNumeric, SaslTransport,
+    SecretText, decode_account_payload, decode_sasl_payload, encode_account_payload,
+    encode_sasl_payload,
 };
 pub use capability::{
     CapError, CapLine, CapRequestReply, CapabilityChange, CapabilityProfile, CapabilitySpec,

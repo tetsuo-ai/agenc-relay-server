@@ -31,6 +31,7 @@ pub(crate) const FEDERATION_PEER_KEYS: &[&str] = &[
     "certificate_spki_sha256",
     "enabled",
     "endpoints",
+    "initial_root_profile",
     "recovery_epoch",
     "role",
     "server_id",
@@ -49,6 +50,8 @@ pub struct PeerConfig {
     pub role: NodeRole,
     /// Exact recovery epoch pin expected in FHELLO.
     pub recovery_epoch: RecoveryEpoch,
+    /// Require the pinned initial-root FHELLO profile on this link. Omission selects base v1.
+    pub initial_root_profile: bool,
     /// Dial endpoints: 1..8 on an edge's coordinator record, empty otherwise.
     pub endpoints: Vec<PeerEndpoint>,
     /// Exact certificate SPKI pin.
@@ -189,6 +192,10 @@ fn parse_peer(row: &Table, index: u16, sink: &mut IssueSink) -> Option<PeerConfi
         string(row, "recovery_epoch")
             .and_then(|text| RecoveryEpoch::parse(text).map_err(|_| ConfigError::InvalidValue)),
     );
+    let initial_root_profile = sink.field(
+        key("initial_root_profile"),
+        optional_boolean(row, "initial_root_profile").map(Option::unwrap_or_default),
+    );
     let endpoints = sink.field(key("endpoints"), parse_endpoints(row));
     let certificate_spki_sha256 = sink.field(
         key("certificate_spki_sha256"),
@@ -204,6 +211,7 @@ fn parse_peer(row: &Table, index: u16, sink: &mut IssueSink) -> Option<PeerConfi
         server_name: server_name?,
         role: role?,
         recovery_epoch: recovery_epoch?,
+        initial_root_profile: initial_root_profile?,
         endpoints: endpoints?,
         certificate_spki_sha256: certificate_spki_sha256?,
         signing_public_key: signing_public_key?,

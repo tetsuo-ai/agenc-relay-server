@@ -1,12 +1,16 @@
 //! Fixed account-service request and response codecs.
 
+pub mod claimed_creation;
+pub mod initial_root;
+mod padding;
+
 use agenc_relay_crypto::{
     ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES, ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES,
     ACCOUNT_HPKE_REQUEST_PLAINTEXT_BYTES, ACCOUNT_HPKE_RESPONSE_CIPHERTEXT_BYTES,
-    ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkeKeyId, AccountHpkePrivateKey,
-    AccountRequestBinding, AccountResponseOpenToken, AccountResponseSealToken,
-    OpenedAccountRequest as OpenedHpkeRequest, OpenedAccountResponse, SealedAccountRequest,
-    SealedAccountResponse, open_account_request,
+    ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkeExchange, AccountHpkeKeyId,
+    AccountHpkePrivateKey, AccountRequestBinding, AccountResponseOpenToken,
+    AccountResponseSealToken, InitialRootExchange, OpenedAccountRequest as OpenedHpkeRequest,
+    OpenedAccountResponse, SealedAccountRequest, SealedAccountResponse, open_account_request,
 };
 use agenc_relay_types::{
     AccountId, AccountServiceCompletionStatus, AccountServiceMessageKind,
@@ -32,10 +36,8 @@ const REQUEST_INNER_MIN_BYTES: usize = 72;
 const MIN_LOGIN_BYTES: usize = 3;
 const MAX_LOGIN_BYTES: usize = 64;
 const REQUEST_INNER_MAX_BYTES: usize = 265;
-const REQUEST_PADDING_BASE: usize = 4_586;
 const RESPONSE_PAYLOAD_MIN_BYTES: usize = 52;
 const RESPONSE_PAYLOAD_MAX_BYTES: usize = 372;
-const RESPONSE_PADDING_BASE: usize = 4_202;
 
 /// Exact encoded request-envelope length.
 pub const ACCOUNT_SERVICE_ENVELOPE_BYTES: usize = 4_726;
@@ -186,28 +188,33 @@ impl EncodedAccountResponsePlaintext {
     }
 }
 
+/// Fixed base account-service request.
+pub type AccountServiceEnvelope = ProfiledAccountEnvelope<AccountServiceMessageKind>;
+/// Negotiated initial-root request with independent tag and profile validation.
+pub type InitialRootServiceEnvelope = ProfiledAccountEnvelope<InitialRootExchange>;
+
 /// Canonical outer request that an edge may validate and forward unchanged.
-pub struct AccountServiceEnvelope {
+pub struct ProfiledAccountEnvelope<K: AccountHpkeExchange> {
     encoded: [u8; ACCOUNT_SERVICE_ENVELOPE_BYTES],
     network_id: NetworkId,
     recipient_key_id: AccountHpkeKeyId,
     client_request_id: RequestId,
-    message_kind: AccountServiceMessageKind,
+    message_kind: K,
     encapsulated_key: [u8; ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES],
     ciphertext: [u8; ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES],
 }
 
-impl AccountServiceEnvelope {
+impl<K: AccountHpkeExchange> ProfiledAccountEnvelope<K> {
     /// Encodes one freshly sealed request in its exact outer wrapper.
-    pub fn from_sealed(sealed: SealedAccountRequest) -> Result<Self, AuthError> {
+    pub fn from_sealed(sealed: SealedAccountRequest<K>) -> Result<Self, AuthError> {
         let binding = sealed.binding();
         let mut encoded = [0_u8; ACCOUNT_SERVICE_ENVELOPE_BYTES];
         let mut writer = Writer::new(&mut encoded);
-        writer.write(&PROFILE_VERSION.to_be_bytes())?;
+        writer.write(&K::VERSION.to_be_bytes())?;
         writer.write(binding.network_id().as_bytes())?;
         writer.write(binding.recipient_key_id().as_bytes())?;
         writer.write(binding.client_request_id().as_bytes())?;
-        writer.write(&binding.message_kind().wire_value().to_be_bytes())?;
+        writer.write(&binding.message_kind().request_tag().to_be_bytes())?;
         writer.write(sealed.encapsulated_key())?;
         writer.write(
             &u16::try_from(ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES)
@@ -221,14 +228,14 @@ impl AccountServiceEnvelope {
     /// Parses and fully consumes the exact fixed-width envelope.
     pub fn parse(encoded: [u8; ACCOUNT_SERVICE_ENVELOPE_BYTES]) -> Result<Self, AuthError> {
         let mut cursor = Cursor::new(&encoded);
-        if cursor.read_u16()? != PROFILE_VERSION {
+        if cursor.read_u16()? != K::VERSION {
             return Err(AuthError::InvalidEncoding);
         }
         let network_id = NetworkId::from_bytes(cursor.read_array()?);
         let recipient_key_id = AccountHpkeKeyId::from_bytes(cursor.read_array()?);
         let client_request_id = RequestId::from_bytes(cursor.read_array()?);
-        let message_kind = AccountServiceMessageKind::from_wire(cursor.read_u16()?)
-            .map_err(|_| AuthError::InvalidEncoding)?;
+        let message_kind =
+            K::request_from_tag(cursor.read_u16()?).ok_or(AuthError::InvalidEncoding)?;
         let encapsulated_key = cursor.read_array()?;
         if usize::from(cursor.read_u16()?) != ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES {
             return Err(AuthError::InvalidEncoding);
@@ -256,7 +263,7 @@ impl AccountServiceEnvelope {
 
     /// Returns the only operation detail visible to an edge.
     #[must_use]
-    pub const fn message_kind(&self) -> AccountServiceMessageKind {
+    pub const fn message_kind(&self) -> K {
         self.message_kind
     }
 
@@ -266,7 +273,7 @@ impl AccountServiceEnvelope {
         self.client_request_id
     }
 
-    fn binding(&self, recovery_epoch: RecoveryEpoch) -> AccountRequestBinding {
+    fn binding(&self, recovery_epoch: RecoveryEpoch) -> AccountRequestBinding<K> {
         AccountRequestBinding::new(
             self.network_id,
             recovery_epoch,
@@ -274,6 +281,24 @@ impl AccountServiceEnvelope {
             self.client_request_id,
             self.message_kind,
         )
+    }
+
+    fn open(
+        &self,
+        private_key: &AccountHpkePrivateKey,
+        epoch: RecoveryEpoch,
+        network: NetworkId,
+        expected: K,
+    ) -> Result<(OpenedHpkeRequest, AccountResponseSealToken<K>), AuthError> {
+        if self.network_id != network || self.message_kind != expected {
+            return Err(AuthError::ContextMismatch);
+        }
+        Ok(open_account_request(
+            private_key,
+            self.binding(epoch),
+            &self.encapsulated_key,
+            &self.ciphertext,
+        )?)
     }
 }
 
@@ -286,15 +311,12 @@ pub fn open_and_parse_request(
     expected_message_kind: AccountServiceMessageKind,
     envelope: &AccountServiceEnvelope,
 ) -> Result<OpenedAccountServiceRequest, AuthError> {
-    if envelope.network_id != expected_network || envelope.message_kind != expected_message_kind {
-        return Err(AuthError::ContextMismatch);
-    }
     let binding = envelope.binding(recovery_epoch);
-    let (plaintext, response_token) = open_account_request(
+    let (plaintext, response_token) = envelope.open(
         private_key,
-        binding,
-        &envelope.encapsulated_key,
-        &envelope.ciphertext,
+        recovery_epoch,
+        expected_network,
+        expected_message_kind,
     )?;
     let payload = parse_request_plaintext(&plaintext, envelope.message_kind, envelope.network_id)?;
     let lineage = AccountRequestLineage {
@@ -346,26 +368,10 @@ fn parse_request_plaintext(
     message_kind: AccountServiceMessageKind,
     expected_network: NetworkId,
 ) -> Result<AccountRequestPayload, AuthError> {
-    let mut cursor = Cursor::new(plaintext.expose_for_account_parser());
-    if cursor.read_u16()? != PADDING_VERSION {
-        return Err(AuthError::InvalidEncoding);
-    }
-    let inner_length = usize::from(cursor.read_u16()?);
-    if !(REQUEST_INNER_MIN_BYTES..=REQUEST_INNER_MAX_BYTES).contains(&inner_length) {
-        return Err(AuthError::InvalidEncoding);
-    }
-    let inner = cursor.read_slice(inner_length)?;
-    let padding_length = usize::from(cursor.read_u16()?);
-    let expected_padding = REQUEST_PADDING_BASE
-        .checked_sub(inner_length)
-        .ok_or(AuthError::InvalidEncoding)?;
-    if padding_length != expected_padding {
-        return Err(AuthError::InvalidEncoding);
-    }
-    let padding = cursor.read_slice(padding_length)?;
-    if !cursor.is_finished() || padding.iter().any(|byte| *byte != 0) {
-        return Err(AuthError::InvalidEncoding);
-    }
+    let inner = padding::decode(
+        plaintext.expose_for_account_parser(),
+        REQUEST_INNER_MIN_BYTES..=REQUEST_INNER_MAX_BYTES,
+    )?;
     parse_inner_request(message_kind, expected_network, inner)
 }
 
@@ -384,7 +390,7 @@ fn parse_inner_request(
     }
     let payload = match message_kind {
         AccountServiceMessageKind::AccountCreateStart => {
-            parse_creation_start(network_id, &mut cursor)?
+            AccountRequestPayload::CreationStart(parse_creation_start(network_id, &mut cursor)?)
         }
         AccountServiceMessageKind::AccountCreateFinish => {
             parse_creation_finish(network_id, &mut cursor)?
@@ -411,7 +417,7 @@ fn parse_inner_request(
 fn parse_creation_start(
     network_id: NetworkId,
     cursor: &mut Cursor<'_>,
-) -> Result<AccountRequestPayload, AuthError> {
+) -> Result<CreationStart, AuthError> {
     let login = parse_login(cursor.read_vector_u8(MIN_LOGIN_BYTES, MAX_LOGIN_BYTES)?)?;
     let registration_request = read_registration_request(cursor)?;
     let invitation = match cursor.read_vector_u8(0, ACCOUNT_CREATION_INVITE_BYTES)? {
@@ -423,12 +429,12 @@ fn parse_creation_start(
         }
         _ => return Err(AuthError::InvalidEncoding),
     };
-    Ok(AccountRequestPayload::CreationStart(CreationStart {
+    Ok(CreationStart {
         network_id,
         login,
         registration_request,
         invitation,
-    }))
+    })
 }
 
 fn parse_creation_finish(
@@ -574,24 +580,7 @@ pub fn encode_request_plaintext(
     payload: &AccountRequestPayload,
 ) -> Result<EncodedAccountRequestPlaintext, AuthError> {
     let inner = encode_inner_request(payload)?;
-    if !(REQUEST_INNER_MIN_BYTES..=REQUEST_INNER_MAX_BYTES).contains(&inner.len()) {
-        return Err(AuthError::InvalidEncoding);
-    }
-    let padding_length = REQUEST_PADDING_BASE
-        .checked_sub(inner.len())
-        .ok_or(AuthError::InvalidEncoding)?;
-    let inner_length = u16::try_from(inner.len()).map_err(|_| AuthError::Overflow)?;
-    let padding_length_u16 = u16::try_from(padding_length).map_err(|_| AuthError::Overflow)?;
-    let mut plaintext = Zeroizing::new([0_u8; ACCOUNT_HPKE_REQUEST_PLAINTEXT_BYTES]);
-    let mut writer = Writer::new(plaintext.as_mut());
-    writer.write(&PADDING_VERSION.to_be_bytes())?;
-    writer.write(&inner_length.to_be_bytes())?;
-    writer.write(&inner)?;
-    writer.write(&padding_length_u16.to_be_bytes())?;
-    writer.write_zeros(padding_length)?;
-    if !writer.is_finished() {
-        return Err(AuthError::InvalidEncoding);
-    }
+    let plaintext = padding::encode(&inner, REQUEST_INNER_MIN_BYTES..=REQUEST_INNER_MAX_BYTES)?;
     Ok(EncodedAccountRequestPlaintext(plaintext))
 }
 
@@ -603,13 +592,7 @@ fn encode_inner_request(payload: &AccountRequestPayload) -> Result<Zeroizing<Vec
     encoded.extend_from_slice(&PROFILE_VERSION.to_be_bytes());
     match payload {
         AccountRequestPayload::CreationStart(request) => {
-            encoded.extend_from_slice(request.network_id.as_bytes());
-            encode_vector_u8(&mut encoded, request.login.as_str().as_bytes())?;
-            encode_vector_u8(
-                &mut encoded,
-                request.registration_request.expose_for_account_request(),
-            )?;
-            encode_optional_invitation(&mut encoded, request.invitation.as_ref())?;
+            encode_creation_start(&mut encoded, request)?
         }
         AccountRequestPayload::CreationFinish(request) => {
             encoded.extend_from_slice(request.network_id.as_bytes());
@@ -654,6 +637,16 @@ fn encode_vector_u8(encoded: &mut Vec<u8>, value: &[u8]) -> Result<(), AuthError
     encoded.push(length);
     encoded.extend_from_slice(value);
     Ok(())
+}
+
+fn encode_creation_start(encoded: &mut Vec<u8>, request: &CreationStart) -> Result<(), AuthError> {
+    encoded.extend_from_slice(request.network_id.as_bytes());
+    encode_vector_u8(encoded, request.login.as_str().as_bytes())?;
+    encode_vector_u8(
+        encoded,
+        request.registration_request.expose_for_account_request(),
+    )?;
+    encode_optional_invitation(encoded, request.invitation.as_ref())
 }
 
 fn encode_optional_invitation(
@@ -894,24 +887,10 @@ pub fn encode_response_plaintext(
     payload: &AccountServiceResponsePayload,
 ) -> Result<EncodedAccountResponsePlaintext, AuthError> {
     let payload_bytes = encode_response_payload(payload)?;
-    if !(RESPONSE_PAYLOAD_MIN_BYTES..=RESPONSE_PAYLOAD_MAX_BYTES).contains(&payload_bytes.len()) {
-        return Err(AuthError::InvalidEncoding);
-    }
-    let padding_length = RESPONSE_PADDING_BASE
-        .checked_sub(payload_bytes.len())
-        .ok_or(AuthError::InvalidEncoding)?;
-    let payload_length = u16::try_from(payload_bytes.len()).map_err(|_| AuthError::Overflow)?;
-    let padding_length_u16 = u16::try_from(padding_length).map_err(|_| AuthError::Overflow)?;
-    let mut plaintext = Zeroizing::new([0_u8; ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES]);
-    let mut writer = Writer::new(plaintext.as_mut());
-    writer.write(&PADDING_VERSION.to_be_bytes())?;
-    writer.write(&payload_length.to_be_bytes())?;
-    writer.write(&payload_bytes)?;
-    writer.write(&padding_length_u16.to_be_bytes())?;
-    writer.write_zeros(padding_length)?;
-    if !writer.is_finished() {
-        return Err(AuthError::InvalidEncoding);
-    }
+    let plaintext = padding::encode(
+        &payload_bytes,
+        RESPONSE_PAYLOAD_MIN_BYTES..=RESPONSE_PAYLOAD_MAX_BYTES,
+    )?;
     Ok(EncodedAccountResponsePlaintext(plaintext))
 }
 
@@ -920,18 +899,7 @@ pub fn open_and_parse_response(
     token: AccountResponseOpenToken,
     response: &AccountServiceResponse,
 ) -> Result<AccountServiceResponsePayload, AuthError> {
-    let binding = token.request_binding();
-    if response.network_id != binding.network_id()
-        || response.recipient_key_id != binding.recipient_key_id()
-        || response.client_request_id != binding.client_request_id()
-    {
-        return Err(AuthError::ContextMismatch);
-    }
-    let plaintext = token.open_response(
-        response.response_kind,
-        &response.response_salt,
-        &response.ciphertext,
-    )?;
+    let plaintext = response.open(token)?;
     parse_response_plaintext(&plaintext, response.response_kind)
 }
 
@@ -939,26 +907,10 @@ fn parse_response_plaintext(
     plaintext: &OpenedAccountResponse,
     response_kind: AccountServiceResponseKind,
 ) -> Result<AccountServiceResponsePayload, AuthError> {
-    let mut cursor = Cursor::new(plaintext.expose_for_account_parser());
-    if cursor.read_u16()? != PADDING_VERSION {
-        return Err(AuthError::InvalidEncoding);
-    }
-    let payload_length = usize::from(cursor.read_u16()?);
-    if !(RESPONSE_PAYLOAD_MIN_BYTES..=RESPONSE_PAYLOAD_MAX_BYTES).contains(&payload_length) {
-        return Err(AuthError::InvalidEncoding);
-    }
-    let payload = cursor.read_slice(payload_length)?;
-    let padding_length = usize::from(cursor.read_u16()?);
-    let expected_padding = RESPONSE_PADDING_BASE
-        .checked_sub(payload_length)
-        .ok_or(AuthError::InvalidEncoding)?;
-    if padding_length != expected_padding {
-        return Err(AuthError::InvalidEncoding);
-    }
-    let padding = cursor.read_slice(padding_length)?;
-    if !cursor.is_finished() || padding.iter().any(|byte| *byte != 0) {
-        return Err(AuthError::InvalidEncoding);
-    }
+    let payload = padding::decode(
+        plaintext.expose_for_account_parser(),
+        RESPONSE_PAYLOAD_MIN_BYTES..=RESPONSE_PAYLOAD_MAX_BYTES,
+    )?;
     parse_response_payload(response_kind, payload)
 }
 
@@ -1178,28 +1130,44 @@ fn encode_completion(
     Ok(())
 }
 
+/// Fixed base account-service response.
+pub type AccountServiceResponse = ProfiledAccountResponse<AccountServiceMessageKind>;
+/// Negotiated initial-root response with independent tag and profile validation.
+pub type InitialRootServiceResponse = ProfiledAccountResponse<InitialRootExchange>;
+
 /// Canonical outer response stored and replayed byte-for-byte.
-pub struct AccountServiceResponse {
+pub struct ProfiledAccountResponse<K: AccountHpkeExchange> {
     encoded: [u8; ACCOUNT_SERVICE_RESPONSE_BYTES],
     network_id: NetworkId,
     recipient_key_id: AccountHpkeKeyId,
-    response_kind: AccountServiceResponseKind,
+    response_kind: K::Response,
     client_request_id: RequestId,
     response_salt: [u8; 32],
     ciphertext: [u8; ACCOUNT_HPKE_RESPONSE_CIPHERTEXT_BYTES],
 }
 
-impl AccountServiceResponse {
+impl<K: AccountHpkeExchange> ProfiledAccountResponse<K> {
+    fn open(&self, token: AccountResponseOpenToken<K>) -> Result<OpenedAccountResponse, AuthError> {
+        let binding = token.request_binding();
+        if self.network_id != binding.network_id()
+            || self.recipient_key_id != binding.recipient_key_id()
+            || self.client_request_id != binding.client_request_id()
+        {
+            return Err(AuthError::ContextMismatch);
+        }
+        Ok(token.open_response(self.response_kind, &self.response_salt, &self.ciphertext)?)
+    }
+
     /// Encodes a newly sealed response without resealing it.
-    pub fn from_sealed(sealed: SealedAccountResponse) -> Result<Self, AuthError> {
+    pub fn from_sealed(sealed: SealedAccountResponse<K>) -> Result<Self, AuthError> {
         let binding = sealed.request_binding();
         let mut encoded = [0_u8; ACCOUNT_SERVICE_RESPONSE_BYTES];
         let mut writer = Writer::new(&mut encoded);
-        writer.write(&PROFILE_VERSION.to_be_bytes())?;
+        writer.write(&K::VERSION.to_be_bytes())?;
         writer.write(binding.network_id().as_bytes())?;
         writer.write(binding.recipient_key_id().as_bytes())?;
         writer.write(binding.client_request_id().as_bytes())?;
-        writer.write(&sealed.response_kind().wire_value().to_be_bytes())?;
+        writer.write(&K::response_tag(sealed.response_kind()).to_be_bytes())?;
         writer.write(sealed.response_salt())?;
         writer.write(
             &u16::try_from(ACCOUNT_HPKE_RESPONSE_CIPHERTEXT_BYTES)
@@ -1213,14 +1181,14 @@ impl AccountServiceResponse {
     /// Parses an exact stored or forwarded response.
     pub fn parse(encoded: [u8; ACCOUNT_SERVICE_RESPONSE_BYTES]) -> Result<Self, AuthError> {
         let mut cursor = Cursor::new(&encoded);
-        if cursor.read_u16()? != PROFILE_VERSION {
+        if cursor.read_u16()? != K::VERSION {
             return Err(AuthError::InvalidEncoding);
         }
         let network_id = NetworkId::from_bytes(cursor.read_array()?);
         let recipient_key_id = AccountHpkeKeyId::from_bytes(cursor.read_array()?);
         let client_request_id = RequestId::from_bytes(cursor.read_array()?);
-        let response_kind = AccountServiceResponseKind::from_wire(cursor.read_u16()?)
-            .map_err(|_| AuthError::InvalidEncoding)?;
+        let response_kind =
+            K::response_from_tag(cursor.read_u16()?).ok_or(AuthError::InvalidEncoding)?;
         let response_salt = cursor.read_array()?;
         if usize::from(cursor.read_u16()?) != ACCOUNT_HPKE_RESPONSE_CIPHERTEXT_BYTES {
             return Err(AuthError::InvalidEncoding);
@@ -1248,7 +1216,7 @@ impl AccountServiceResponse {
 
     /// Returns the response kind visible to an edge.
     #[must_use]
-    pub const fn response_kind(&self) -> AccountServiceResponseKind {
+    pub const fn response_kind(&self) -> K::Response {
         self.response_kind
     }
 

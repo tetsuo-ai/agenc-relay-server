@@ -463,7 +463,8 @@ where
         peer_recovery_epoch: outcome.peer_recovery_epoch,
         transition: outcome.transition,
     };
-    let (handle, queue) = link_queue(shared.outbound_bytes);
+    let (mut handle, queue) = link_queue(shared.outbound_bytes);
+    handle.profile = outcome.profile;
     let budget = Arc::clone(&handle.ingress);
     let established = shared
         .inbound

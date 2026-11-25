@@ -59,7 +59,10 @@ fn commit_creation(
     let committed = count.saturating_add(1).saturating_sub(lag);
     let generation = live.generation;
     let (coordinator, context) = live.fixture.parts()?;
-    let reservation = coordinator.creation_reservation(&sealed)?;
+    let reservation = coordinator.creation_reservation(
+        sealed.creation_reservation_login_digest(),
+        sealed.creation_reservation_invitation().map(|(id, _)| id),
+    )?;
     if let Some(owner) = owner {
         let class = LiveTransactionClass::Creation;
         coordinator

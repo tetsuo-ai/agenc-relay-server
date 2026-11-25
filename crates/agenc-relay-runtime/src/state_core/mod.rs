@@ -18,6 +18,8 @@ pub(crate) mod edge_checkpoint;
 pub mod fanout;
 pub(crate) mod history;
 pub mod inbox;
+mod initial_root;
+pub(crate) use initial_root::InitialRootCut;
 pub(crate) mod local_join;
 mod pending;
 pub mod projector;
@@ -1235,7 +1237,7 @@ impl StateCoreContext {
     ) -> Result<StageAccepted, StageRefused> {
         let Ok(mut account_service_writes) = account_service_writes
             .into_iter()
-            .map(AccountServiceDurableWrite::revalidate)
+            .map(|write| self.revalidate_federated_write(write))
             .collect::<Result<Vec<_>, _>>()
         else {
             self.clear_projection_intent();
@@ -2282,7 +2284,10 @@ impl StateCore {
                 timers: TimerHeap::new(),
                 drift: DriftMonitor::new(now, wall),
                 pending: None,
-                index: inputs.reconstruction.index,
+                index: inputs
+                    .reconstruction
+                    .index
+                    .with_initial_root_budget(&inputs.budget),
                 keys: inputs.keys,
                 head: inputs.reconstruction.head,
                 ceilings: inputs.config.ceilings,

@@ -8,6 +8,7 @@
 
 pub(crate) mod events;
 pub(crate) mod history;
+pub(crate) mod initial_root;
 pub(crate) mod operations;
 pub(crate) mod projection;
 pub(crate) mod results;

@@ -12,6 +12,7 @@ mod directory;
 mod events;
 mod fence;
 mod history;
+pub(crate) mod initial_root;
 mod join_echo;
 mod journal;
 mod journal_retry;
@@ -297,6 +298,7 @@ pub struct EdgeFederation {
 /// One account carrier envelope held back behind the connection's origin update.
 pub(super) struct DeferredCarrier {
     pub(super) opcode: agenc_relay_types::FederationOpcode,
+    pub(super) root: Option<initial_root::OwnedCarrier>,
     pub(super) envelope: Vec<u8>,
     pub(super) finish: bool,
     pub(super) carrier_generation: u64,
@@ -901,6 +903,14 @@ impl EdgeFederation {
                 Vec::new()
             }
         }
+    }
+
+    /// The exact live authenticated coordinator connection available for opt-in discovery.
+    pub(crate) fn initial_root_link(&self) -> Option<LinkId> {
+        let live = self.live.as_ref()?;
+        (self.phase == Phase::Active
+            && live.handle.profile == agenc_relay_federation_wire::FederationProfile::InitialRoot)
+            .then_some(live.link)
     }
 
     fn link_is(&self, link: LinkId) -> bool {

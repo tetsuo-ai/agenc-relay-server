@@ -148,14 +148,16 @@ fn a_creation_seal_completing_behind_a_ready_stage_closes_its_carrier() -> TestR
     let count = context.head().account_service_response_count;
     coordinator.ready_stage = Some(ReadyStage::CreationStart {
         request: request_a,
-        sealed: start_a.seal(count)?,
+        sealed: super::super::SealedCreation::from(start_a.seal(count)?),
     });
     let job_id = CryptoJobId::new(78);
     coordinator.crypto.insert(
         job_id,
         PendingCrypto::CreationStartSeal { request: request_b },
     );
-    let output = CryptoJobOutput::CreationStartSealed(Box::new(Ok(start_b.seal(count)?)));
+    let output = CryptoJobOutput::CreationStartSealed(Box::new(Ok(
+        super::super::SealedCreation::from(start_b.seal(count)?),
+    )));
     let completions = coordinator.crypto_completed(
         context,
         CryptoCompletionMessage {

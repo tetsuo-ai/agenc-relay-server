@@ -220,6 +220,7 @@ fn batch(
         session_generation: Generation::new(1)?,
         revision: Revision::new(1)?,
         admin_suspension_expires_at: None,
+        genesis_policy: agenc_relay_domain::AccountGenesisPolicy::Legacy,
     };
     let value = PersistentRecordValue::new(
         TableId::Account,

@@ -1,8 +1,6 @@
 //! Fixed account-service HPKE recipient and response-exporter adapter.
 
-use agenc_relay_types::{
-    AccountServiceMessageKind, AccountServiceResponseKind, NetworkId, RecoveryEpoch, RequestId,
-};
+use agenc_relay_types::{AccountServiceMessageKind, NetworkId, RecoveryEpoch, RequestId};
 use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
 use chacha20poly1305::{ChaCha20Poly1305 as ResponseCipher, Nonce};
 use hpke::aead::{AeadCtxR, AeadCtxS, ChaCha20Poly1305 as HpkeChaCha20Poly1305};
@@ -25,7 +23,8 @@ struct ResponseMaterial {
     nonce: Zeroizing<[u8; 12]>,
 }
 
-const PROFILE_VERSION: u16 = 1;
+mod kind;
+pub use kind::{AccountHpkeExchange, InitialRootExchange};
 const REQUEST_INFO_LABEL: &[u8] = b"agenc-chat account service hpke request v1";
 const REQUEST_AAD_LABEL: &[u8] = b"agenc-chat account service request aad v1";
 const RESPONSE_KEY_LABEL: &[u8] = b"agenc-chat account service response key v1";
@@ -130,23 +129,23 @@ impl AccountHpkePrivateKey {
 
 /// Authenticated fields that bind one request and its one response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AccountRequestBinding {
+pub struct AccountRequestBinding<K: AccountHpkeExchange = AccountServiceMessageKind> {
     network_id: NetworkId,
     recovery_epoch: RecoveryEpoch,
     recipient_key_id: AccountHpkeKeyId,
     client_request_id: RequestId,
-    message_kind: AccountServiceMessageKind,
+    message_kind: K,
 }
 
-impl AccountRequestBinding {
-    /// Constructs the fixed version-one request binding.
+impl<K: AccountHpkeExchange> AccountRequestBinding<K> {
+    /// Constructs a request binding in the message kind's negotiated profile.
     #[must_use]
     pub const fn new(
         network_id: NetworkId,
         recovery_epoch: RecoveryEpoch,
         recipient_key_id: AccountHpkeKeyId,
         client_request_id: RequestId,
-        message_kind: AccountServiceMessageKind,
+        message_kind: K,
     ) -> Self {
         Self {
             network_id,
@@ -183,7 +182,7 @@ impl AccountRequestBinding {
 
     /// Returns the routed request kind.
     #[must_use]
-    pub const fn message_kind(self) -> AccountServiceMessageKind {
+    pub const fn message_kind(self) -> K {
         self.message_kind
     }
 }
@@ -200,16 +199,16 @@ impl OpenedAccountRequest {
 }
 
 /// One newly sealed fixed-size request and its encapsulated X25519 key.
-pub struct SealedAccountRequest {
-    binding: AccountRequestBinding,
+pub struct SealedAccountRequest<K: AccountHpkeExchange = AccountServiceMessageKind> {
+    binding: AccountRequestBinding<K>,
     encapsulated_key: [u8; ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES],
     ciphertext: [u8; ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES],
 }
 
-impl SealedAccountRequest {
+impl<K: AccountHpkeExchange> SealedAccountRequest<K> {
     /// Returns the authenticated request fields.
     #[must_use]
-    pub const fn binding(&self) -> AccountRequestBinding {
+    pub const fn binding(&self) -> AccountRequestBinding<K> {
         self.binding
     }
 
@@ -227,15 +226,15 @@ impl SealedAccountRequest {
 }
 
 /// One-use client authority for opening the response to a sealed request.
-pub struct AccountResponseOpenToken {
+pub struct AccountResponseOpenToken<K: AccountHpkeExchange = AccountServiceMessageKind> {
     context: RequestSenderContext,
-    binding: AccountRequestBinding,
+    binding: AccountRequestBinding<K>,
 }
 
-impl AccountResponseOpenToken {
+impl<K: AccountHpkeExchange> AccountResponseOpenToken<K> {
     /// Returns the authenticated request fields expected in the response header.
     #[must_use]
-    pub const fn request_binding(&self) -> AccountRequestBinding {
+    pub const fn request_binding(&self) -> AccountRequestBinding<K> {
         self.binding
     }
 }
@@ -252,9 +251,9 @@ impl OpenedAccountResponse {
 }
 
 /// One-use response authority retained from a successfully opened request.
-pub struct AccountResponseSealToken {
+pub struct AccountResponseSealToken<K: AccountHpkeExchange = AccountServiceMessageKind> {
     context: RequestReceiverContext,
-    binding: AccountRequestBinding,
+    binding: AccountRequestBinding<K>,
 }
 
 struct OneShotHpkeRng {
@@ -301,11 +300,11 @@ impl hpke::rand_core::TryRng for OneShotHpkeRng {
 impl hpke::rand_core::TryCryptoRng for OneShotHpkeRng {}
 
 /// Seals one request with a fresh HPKE sender context and retains its exporter.
-pub fn seal_account_request(
+pub fn seal_account_request<K: AccountHpkeExchange>(
     public_key: AccountHpkePublicKey,
-    binding: AccountRequestBinding,
+    binding: AccountRequestBinding<K>,
     plaintext: &[u8; ACCOUNT_HPKE_REQUEST_PLAINTEXT_BYTES],
-) -> Result<(SealedAccountRequest, AccountResponseOpenToken), CryptoError> {
+) -> Result<(SealedAccountRequest<K>, AccountResponseOpenToken<K>), CryptoError> {
     if public_key.key_id() != binding.recipient_key_id {
         return Err(CryptoError::AuthenticationFailed);
     }
@@ -344,24 +343,24 @@ pub fn seal_account_request(
 }
 
 /// A newly sealed fixed-size response and its authenticated header fields.
-pub struct SealedAccountResponse {
-    binding: AccountRequestBinding,
-    response_kind: AccountServiceResponseKind,
+pub struct SealedAccountResponse<K: AccountHpkeExchange = AccountServiceMessageKind> {
+    binding: AccountRequestBinding<K>,
+    response_kind: K::Response,
     response_salt: [u8; 32],
     ciphertext: [u8; ACCOUNT_HPKE_RESPONSE_CIPHERTEXT_BYTES],
     next_response_count: u64,
 }
 
-impl SealedAccountResponse {
+impl<K: AccountHpkeExchange> SealedAccountResponse<K> {
     /// Returns the originating request binding.
     #[must_use]
-    pub const fn request_binding(&self) -> AccountRequestBinding {
+    pub const fn request_binding(&self) -> AccountRequestBinding<K> {
         self.binding
     }
 
     /// Returns the registered response kind.
     #[must_use]
-    pub const fn response_kind(&self) -> AccountServiceResponseKind {
+    pub const fn response_kind(&self) -> K::Response {
         self.response_kind
     }
 
@@ -385,12 +384,12 @@ impl SealedAccountResponse {
 }
 
 /// Opens the fixed request and returns its one-use response authority.
-pub fn open_account_request(
+pub fn open_account_request<K: AccountHpkeExchange>(
     private_key: &AccountHpkePrivateKey,
-    binding: AccountRequestBinding,
+    binding: AccountRequestBinding<K>,
     encapsulated_key: &[u8; ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES],
     ciphertext: &[u8; ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES],
-) -> Result<(OpenedAccountRequest, AccountResponseSealToken), CryptoError> {
+) -> Result<(OpenedAccountRequest, AccountResponseSealToken<K>), CryptoError> {
     let expected_key_id = private_key.public_key()?.key_id();
     if expected_key_id != binding.recipient_key_id {
         return Err(CryptoError::AuthenticationFailed);
@@ -426,14 +425,14 @@ pub fn open_account_request(
     ))
 }
 
-impl AccountResponseSealToken {
+impl<K: AccountHpkeExchange> AccountResponseSealToken<K> {
     /// Seals exactly one matching response and returns the counter to commit.
     pub fn seal_response(
         self,
         current_response_count: u64,
-        response_kind: AccountServiceResponseKind,
+        response_kind: K::Response,
         plaintext: &[u8; ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES],
-    ) -> Result<SealedAccountResponse, CryptoError> {
+    ) -> Result<SealedAccountResponse<K>, CryptoError> {
         let mut response_salt = [0_u8; 32];
         OsEntropy::fill(&mut response_salt)?;
         self.seal_response_with_salt(
@@ -452,11 +451,11 @@ impl AccountResponseSealToken {
     pub fn seal_response_with_salt(
         self,
         current_response_count: u64,
-        response_kind: AccountServiceResponseKind,
+        response_kind: K::Response,
         response_salt: [u8; 32],
         plaintext: &[u8; ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES],
-    ) -> Result<SealedAccountResponse, CryptoError> {
-        if expected_response_kind(self.binding.message_kind) != response_kind {
+    ) -> Result<SealedAccountResponse<K>, CryptoError> {
+        if self.binding.message_kind.expected_response() != response_kind {
             return Err(CryptoError::KindMismatch);
         }
         let next_response_count = current_response_count
@@ -491,15 +490,15 @@ impl AccountResponseSealToken {
     }
 }
 
-impl AccountResponseOpenToken {
+impl<K: AccountHpkeExchange> AccountResponseOpenToken<K> {
     /// Opens exactly one matching response and consumes the exporter authority.
     pub fn open_response(
         self,
-        response_kind: AccountServiceResponseKind,
+        response_kind: K::Response,
         response_salt: &[u8; 32],
         ciphertext: &[u8; ACCOUNT_HPKE_RESPONSE_CIPHERTEXT_BYTES],
     ) -> Result<OpenedAccountResponse, CryptoError> {
-        if expected_response_kind(self.binding.message_kind) != response_kind {
+        if self.binding.message_kind.expected_response() != response_kind {
             return Err(CryptoError::KindMismatch);
         }
         let response_material =
@@ -529,30 +528,9 @@ impl AccountResponseOpenToken {
     }
 }
 
-fn expected_response_kind(kind: AccountServiceMessageKind) -> AccountServiceResponseKind {
-    match kind {
-        AccountServiceMessageKind::AccountCreateStart => {
-            AccountServiceResponseKind::AccountCreateChallenge
-        }
-        AccountServiceMessageKind::AccountCreateFinish => {
-            AccountServiceResponseKind::AccountCreateComplete
-        }
-        AccountServiceMessageKind::OpaqueAuthStart => {
-            AccountServiceResponseKind::OpaqueAuthChallenge
-        }
-        AccountServiceMessageKind::OpaqueAuthFinish => {
-            AccountServiceResponseKind::OpaqueAuthComplete
-        }
-        AccountServiceMessageKind::CredentialChangeStart => {
-            AccountServiceResponseKind::CredentialChangeChallenge
-        }
-        AccountServiceMessageKind::CredentialChangeFinish => {
-            AccountServiceResponseKind::CredentialChangeComplete
-        }
-    }
-}
-
-fn request_info(binding: AccountRequestBinding) -> Result<Vec<u8>, CryptoError> {
+fn request_info<K: AccountHpkeExchange>(
+    binding: AccountRequestBinding<K>,
+) -> Result<Vec<u8>, CryptoError> {
     let capacity = REQUEST_INFO_LABEL
         .len()
         .checked_add(100)
@@ -562,16 +540,16 @@ fn request_info(binding: AccountRequestBinding) -> Result<Vec<u8>, CryptoError> 
         .map_err(|_| CryptoError::AllocationFailed)?;
     info.extend_from_slice(REQUEST_INFO_LABEL);
     info.extend_from_slice(binding.recovery_epoch.as_bytes());
-    info.extend_from_slice(&PROFILE_VERSION.to_be_bytes());
+    info.extend_from_slice(&K::VERSION.to_be_bytes());
     info.extend_from_slice(binding.network_id.as_bytes());
     info.extend_from_slice(binding.recipient_key_id.as_bytes());
     info.extend_from_slice(binding.client_request_id.as_bytes());
-    info.extend_from_slice(&binding.message_kind.wire_value().to_be_bytes());
+    info.extend_from_slice(&binding.message_kind.request_tag().to_be_bytes());
     Ok(info)
 }
 
-fn request_aad(
-    binding: AccountRequestBinding,
+fn request_aad<K: AccountHpkeExchange>(
+    binding: AccountRequestBinding<K>,
     encapsulated_key: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     if encapsulated_key.len() != ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES {
@@ -586,17 +564,20 @@ fn request_aad(
     Ok(aad)
 }
 
-fn encode_request_header(output: &mut Vec<u8>, binding: AccountRequestBinding) {
-    output.extend_from_slice(&PROFILE_VERSION.to_be_bytes());
+fn encode_request_header<K: AccountHpkeExchange>(
+    output: &mut Vec<u8>,
+    binding: AccountRequestBinding<K>,
+) {
+    output.extend_from_slice(&K::VERSION.to_be_bytes());
     output.extend_from_slice(binding.network_id.as_bytes());
     output.extend_from_slice(binding.recipient_key_id.as_bytes());
     output.extend_from_slice(binding.client_request_id.as_bytes());
-    output.extend_from_slice(&binding.message_kind.wire_value().to_be_bytes());
+    output.extend_from_slice(&binding.message_kind.request_tag().to_be_bytes());
 }
 
-fn export_response_material(
+fn export_response_material<K: AccountHpkeExchange>(
     context: &RequestReceiverContext,
-    binding: AccountRequestBinding,
+    binding: AccountRequestBinding<K>,
     salt: &[u8; 32],
 ) -> Result<ResponseMaterial, CryptoError> {
     let key_context = response_export_context(RESPONSE_KEY_LABEL, binding, salt)?;
@@ -612,9 +593,9 @@ fn export_response_material(
     Ok(ResponseMaterial { key, nonce })
 }
 
-fn export_client_response_material(
+fn export_client_response_material<K: AccountHpkeExchange>(
     context: &RequestSenderContext,
-    binding: AccountRequestBinding,
+    binding: AccountRequestBinding<K>,
     salt: &[u8; 32],
 ) -> Result<ResponseMaterial, CryptoError> {
     let key_context = response_export_context(RESPONSE_KEY_LABEL, binding, salt)?;
@@ -630,9 +611,9 @@ fn export_client_response_material(
     Ok(ResponseMaterial { key, nonce })
 }
 
-fn response_export_context(
+fn response_export_context<K: AccountHpkeExchange>(
     label: &[u8],
-    binding: AccountRequestBinding,
+    binding: AccountRequestBinding<K>,
     salt: &[u8; 32],
 ) -> Result<Vec<u8>, CryptoError> {
     let capacity = label.len().checked_add(48).ok_or(CryptoError::Overflow)?;
@@ -646,20 +627,20 @@ fn response_export_context(
     Ok(context)
 }
 
-fn response_aad(
-    binding: AccountRequestBinding,
-    response_kind: AccountServiceResponseKind,
+fn response_aad<K: AccountHpkeExchange>(
+    binding: AccountRequestBinding<K>,
+    response_kind: K::Response,
     salt: &[u8; 32],
 ) -> Result<Vec<u8>, CryptoError> {
     let mut aad = Vec::new();
     aad.try_reserve_exact(RESPONSE_AAD_LABEL.len() + 116)
         .map_err(|_| CryptoError::AllocationFailed)?;
     aad.extend_from_slice(RESPONSE_AAD_LABEL);
-    aad.extend_from_slice(&PROFILE_VERSION.to_be_bytes());
+    aad.extend_from_slice(&K::VERSION.to_be_bytes());
     aad.extend_from_slice(binding.network_id.as_bytes());
     aad.extend_from_slice(binding.recipient_key_id.as_bytes());
     aad.extend_from_slice(binding.client_request_id.as_bytes());
-    aad.extend_from_slice(&response_kind.wire_value().to_be_bytes());
+    aad.extend_from_slice(&K::response_tag(response_kind).to_be_bytes());
     aad.extend_from_slice(salt);
     Ok(aad)
 }
@@ -730,6 +711,65 @@ mod tests {
             opened_response.expose_for_account_parser(),
             &response_plaintext
         );
+        Ok(())
+    }
+
+    #[test]
+    fn initial_root_exchanges_are_bound_to_their_negotiated_profile_and_kind()
+    -> Result<(), Box<dyn core::error::Error>> {
+        use super::{AccountHpkeExchange, InitialRootExchange};
+
+        let private_key = AccountHpkePrivateKey::generate()?;
+        let public_key = private_key.public_key()?;
+        let network = NetworkId::from_bytes([1; 32]);
+        let epoch = RecoveryEpoch::from_bytes([2; 16]);
+        let key = public_key.key_id();
+        let request_id = RequestId::from_bytes([3; 16]);
+        let request = [6; ACCOUNT_HPKE_REQUEST_PLAINTEXT_BYTES];
+        let response = [9; ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES];
+        for (kind, other) in [
+            (
+                InitialRootExchange::ClaimedCreateStart,
+                InitialRootExchange::Claim,
+            ),
+            (
+                InitialRootExchange::Claim,
+                InitialRootExchange::ClaimedCreateStart,
+            ),
+        ] {
+            let binding = AccountRequestBinding::new(network, epoch, key, request_id, kind);
+            let (sealed, client) = seal_account_request(public_key, binding, &request)?;
+            let enc = sealed.encapsulated_key();
+            let data = sealed.ciphertext();
+            let wrong = AccountRequestBinding::new(network, epoch, key, request_id, other);
+            let legacy = AccountRequestBinding::new(
+                network,
+                epoch,
+                key,
+                request_id,
+                AccountServiceMessageKind::AccountCreateStart,
+            );
+            assert!(open_account_request(&private_key, wrong, enc, data).is_err());
+            assert!(open_account_request(&private_key, legacy, enc, data).is_err());
+            assert_eq!(
+                InitialRootExchange::from_header(1, kind.request_tag()),
+                None
+            );
+            assert_eq!(
+                InitialRootExchange::from_header(2, kind.request_tag()),
+                Some(kind)
+            );
+            let (_, wrong_seal) = open_account_request(&private_key, binding, enc, data)?;
+            assert!(wrong_seal.seal_response(0, other, &response).is_err());
+            let (opened, server) = open_account_request(&private_key, binding, enc, data)?;
+            assert_eq!(opened.expose_for_account_parser(), &request);
+            let delivered = server.seal_response(5, kind, &response)?;
+            assert_eq!(delivered.next_response_count(), 6);
+            let opened =
+                client.open_response(kind, delivered.response_salt(), delivered.ciphertext())?;
+            assert_eq!(opened.expose_for_account_parser(), &response);
+        }
+        assert_eq!(InitialRootExchange::from_header(2, 1), None);
         Ok(())
     }
 

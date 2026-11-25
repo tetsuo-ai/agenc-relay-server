@@ -66,17 +66,24 @@ impl Retention {
         if !context.history_clock_safe() || result.records.len() > usize::from(PAGE_ROWS) {
             return Err(RuntimeError::InvalidValue);
         }
-        let now = context
-            .utc_now()
-            .map_err(|_| RuntimeError::InvalidValue)?
-            .get();
+        let wall = context.utc_now().map_err(|_| RuntimeError::InvalidValue)?;
+        if !context.drift().accepts_wall(context.now(), wall) {
+            return Err(RuntimeError::InvalidValue);
+        }
+        let now = wall.get();
         let mut cleanup = Cleanup {
             writes: Vec::new(),
             deleted: Vec::new(),
             deleted_available_channels: Vec::new(),
             next: None,
         };
+        let mut consumed = 0;
+        let mut protected_rows = 0;
         for row in &result.records {
+            if protected_rows == 32 {
+                break;
+            }
+            consumed += 1;
             let opened = context.open_storage_plaintext(
                 TableId::RequestResult,
                 &row.key,
@@ -86,6 +93,23 @@ impl Retention {
                 TableId::RequestResult,
                 opened.expose_for_storage_codec(),
             )?;
+            if kind == HISTORY_COORDINATOR_RESULT_KIND
+                && value.record_kind()
+                    == agenc_relay_storage::federation_records::COORDINATOR_RESULT_KIND
+                && let Ok(key) = <[u8; 64]>::try_from(row.key.as_bytes())
+                && let Some(held) = context.index().federated_claim(&key)
+            {
+                if let Some(write) =
+                    retirement_of_protected(&row.key, &value, held, terminal(&key), revision, now)?
+                {
+                    if held.closing {
+                        cleanup.deleted.push(key);
+                    }
+                    cleanup.writes.push(write);
+                    protected_rows += 1;
+                }
+                continue;
+            }
             if value.record_kind() != kind {
                 continue;
             }
@@ -128,10 +152,10 @@ impl Retention {
                 )?);
             }
         }
-        if result.truncated {
+        if result.truncated || consumed < result.records.len() {
             let mut last = result
                 .records
-                .last()
+                .get(consumed.checked_sub(1).ok_or(RuntimeError::InvalidValue)?)
                 .ok_or(RuntimeError::InvalidValue)?
                 .key
                 .as_bytes()
@@ -169,4 +193,60 @@ fn available_channel(
         (record.status == agenc_relay_storage::history_records::HistoryResultStatus::Available)
             .then(|| agenc_relay_types::ChannelInstanceId::from_bytes(record.page.channel_id)),
     )
+}
+
+fn retirement_of_protected(
+    key: &StoredKey,
+    value: &PersistentRecordValue,
+    held: crate::state_core::durable::federated_claims::Mapping,
+    terminal: bool,
+    revision: u64,
+    now: u64,
+) -> Result<Option<AccountServiceDurableWrite>, RuntimeError> {
+    if crate::state_core::durable::federated_claims::read(key, value)? != Some(held) {
+        return Err(RuntimeError::InvalidValue);
+    }
+    if held.closing {
+        return if !terminal || now < held.deadline {
+            Ok(None)
+        } else {
+            Ok(Some(AccountServiceDurableWrite::delete(
+                TableId::RequestResult,
+                key.clone(),
+            )?))
+        };
+    }
+    if held.observed && !terminal {
+        return Ok(None);
+    }
+    // The first authenticated disk read follows the mutation's actual commit, even after a
+    // delayed writer or restart. Start a full seven days there, and a full day at terminal origin.
+    let mut deadline = held.deadline;
+    if !held.observed {
+        deadline = deadline.max(
+            now.checked_add(crate::state_core::durable::federated_claims::WEEK)
+                .ok_or(RuntimeError::Overflow)?,
+        );
+    }
+    if terminal {
+        deadline = deadline.max(
+            now.checked_add(RETENTION_SECONDS)
+                .ok_or(RuntimeError::Overflow)?,
+        );
+    }
+    let updated = PersistentRecordValue::new(
+        TableId::RequestResult,
+        value.record_kind(),
+        revision,
+        if terminal { 1 } else { 2 },
+        Some(deadline),
+        Vec::new(),
+        value.body().to_vec(),
+    )?
+    .encode()?;
+    Ok(Some(AccountServiceDurableWrite::put(
+        TableId::RequestResult,
+        key.clone(),
+        updated,
+    )?))
 }

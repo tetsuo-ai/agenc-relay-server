@@ -59,7 +59,7 @@ use crate::registration::{AccountServiceRole, RegistrationRouter, RegistrationRo
 use crate::state_core::durable::{AccountingCeilings, KeyDeriver};
 use crate::state_core::fanout::FanoutRequest;
 use crate::state_core::inbox::{CloseReason, SourceAddressKey};
-use crate::state_core::reconstruct::reconstruct;
+use crate::state_core::reconstruct::reconstruct_with_budget;
 use crate::state_core::session::BoundSession;
 use crate::state_core::timers::SECRET_CHANNEL_FLOOR_MILLIS;
 use crate::state_core::{
@@ -312,6 +312,7 @@ fn open_test_storage(
 }
 
 /// Reconstructs the durable index and composes the core over the owner.
+// agenc-review: focus owner=runtime reviewed=2026-11-25 reason=a fixture opens storage, budgeted reconstruction, bridges and the scripted clocks in the same order as the runtime
 fn compose_test_state(
     owner: &mut StorageOwner,
     entropy: Vec<u8>,
@@ -327,13 +328,15 @@ fn compose_test_state(
     )?;
     // The fixture database is seeded like a coordinator's, fake OPAQUE
     // record included, so it reconstructs under the stricter role.
-    let reconstruction = reconstruct(
+    let budget = Arc::new(MemoryBudget::new(512 * 1_024 * 1_024));
+    let reconstruction = reconstruct_with_budget(
         &seed,
         &owner.port(),
         &keys,
         NodeRole::Coordinator,
         MonotonicTick::from_ticks(10),
         UtcSecond::from_unix_seconds(1_000),
+        &budget,
     )?;
     let (storage_bridge, storage_completions, storage_reads, storage_checkpoints) =
         StorageBridge::start(owner.port())?;
@@ -364,7 +367,7 @@ fn compose_test_state(
         keys,
         bridge: storage_bridge,
         crypto: crypto_bridge,
-        budget: Arc::new(MemoryBudget::new(512 * 1_024 * 1_024)),
+        budget,
         liveness: Arc::new(Liveness::new()),
         // The actor loop gathers durable batches against monotonic time, so a
         // frozen clock would never submit them; the synchronous fixture keeps
@@ -697,6 +700,25 @@ impl StateCoreFixture {
     /// Reconstructs the durable account-service state from the live owner and
     /// counts the stale transaction cleanups a restart would schedule.
     pub(crate) fn recovered_startup_cleanup_count(&self) -> TestResult<usize> {
+        self.recover_with_account_budget(&Arc::new(MemoryBudget::new(512 * 1_024 * 1_024)))
+    }
+
+    /// Attempts a separate startup reconstruction with exactly the supplied process budget.
+    pub(crate) fn recover_with_account_budget(
+        &self,
+        budget: &Arc<MemoryBudget>,
+    ) -> TestResult<usize> {
+        self.recover_with_directory_limit(
+            budget,
+            agenc_relay_e2ee::limits::MAX_DIRECTORY_BYTES_PER_ACCOUNT,
+        )
+    }
+
+    pub(crate) fn recover_with_directory_limit(
+        &self,
+        budget: &Arc<MemoryBudget>,
+        directory_limit: u64,
+    ) -> TestResult<usize> {
         let owner = self.owner.as_ref().ok_or("storage owner")?;
         let seed = StateCoreSeed::from_storage(owner)?;
         let storage = seed.storage();
@@ -705,14 +727,17 @@ impl StateCoreFixture {
             storage.database_binding(),
             storage.storage_key_generation(),
         )?;
-        let reconstruction = reconstruct(
-            &seed,
-            &owner.port(),
-            &keys,
-            NodeRole::Coordinator,
-            MonotonicTick::from_ticks(10),
-            UtcSecond::from_unix_seconds(1_000),
-        )?;
+        let reconstruction = crate::state_core::durable::DurableIndex::new()
+            .with_initial_root_budget(budget)
+            .with_guarded_directory_limit(directory_limit)
+            .reconstruct(
+                &seed,
+                &owner.port(),
+                &keys,
+                NodeRole::Coordinator,
+                MonotonicTick::from_ticks(10),
+                UtcSecond::from_unix_seconds(1_000),
+            )?;
         Ok(reconstruction
             .account_service
             .startup_transaction_cleanups()

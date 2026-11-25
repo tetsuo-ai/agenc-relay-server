@@ -237,9 +237,29 @@ pub(crate) enum AdminMutationAfterImage {
     Channel(DurableChannel),
 }
 
+pub(crate) mod claim_replays;
+pub(crate) mod federated_claims;
+pub(super) mod guarded_directory;
+mod initial_root;
+pub use initial_root::BackedRootClaim;
+
 /// One change the index applies after the batch it belongs to commits.
 #[derive(Clone, Eq, PartialEq)]
 pub enum IndexUpdate {
+    /// One exactly bound, process-budgeted private response was written.
+    RetainClaimReplay(std::sync::Arc<claim_replays::BackedClaimReplay>),
+    /// Charge the exact coordinator result of a protected remote operation.
+    RetainFederatedClaim(std::sync::Arc<federated_claims::BackedMapping>),
+    /// Release the owned remote operation after both retention floors.
+    RemoveFederatedClaim(federated_claims::Key),
+    /// The original private response reached its authenticated retention boundary.
+    RemoveClaimReplay(agenc_relay_types::RequestId),
+    /// Account-directory accounting and backed object ownership from this exact batch.
+    GuardedDirectory(std::sync::Arc<guarded_directory::Updates>),
+    /// An original, immutable guarded creation was committed.
+    InitialRootOwner(std::sync::Arc<BackedRootClaim>),
+    /// A guarded account was authoritatively deleted with its private owner.
+    RemoveInitialRootOwner(AccountId),
     /// The aggregate valid at this batch's committed cut.
     CompanionDisk(agenc_relay_storage::CompanionDiskAccounting),
     /// A row was written; its sealed identity must be read back.
@@ -291,7 +311,12 @@ pub enum IndexUpdate {
 /// Before-images and secondary-row ownership for every durable row.
 #[derive(Default)]
 pub struct DurableIndex {
+    claim_replays: claim_replays::Receipts,
+    federated_claims: federated_claims::Mappings,
+    pub(super) guarded_directory: guarded_directory::Directory,
     pub(super) companion_disk: Option<agenc_relay_storage::CompanionDiskAccounting>,
+    pub(super) initial_root_owners: BTreeMap<AccountId, std::sync::Arc<BackedRootClaim>>,
+    initial_root_backing: Option<crate::budget::BackingReservationPort>,
     rows: BTreeMap<(TableId, StoredKey), IndexedRow>,
     nicknames: BTreeMap<AccountId, BTreeMap<String, StoredKey>>,
     channel_names: BTreeMap<ChannelInstanceId, StoredKey>,
@@ -368,6 +393,18 @@ impl DurableIndex {
 
     fn apply_one(&mut self, update: &IndexUpdate) {
         match update {
+            IndexUpdate::GuardedDirectory(changes) => self.guarded_directory.apply(changes),
+            IndexUpdate::RetainFederatedClaim(held) => self.apply_federated(held),
+            IndexUpdate::RemoveFederatedClaim(key) => self.remove_federated(key),
+            IndexUpdate::RetainClaimReplay(held) => self.claim_replays.put(held),
+            IndexUpdate::RemoveClaimReplay(id) => self.claim_replays.remove(*id),
+            IndexUpdate::InitialRootOwner(owner) => {
+                self.initial_root_owners
+                    .insert(owner.row().account, owner.clone());
+            }
+            IndexUpdate::RemoveInitialRootOwner(account) => {
+                self.initial_root_owners.remove(account);
+            }
             IndexUpdate::CompanionDisk(value) => self.companion_disk = Some(*value),
             IndexUpdate::Put {
                 table,
@@ -1125,6 +1162,7 @@ pub(crate) fn project_admin_audit_retention(
 
 impl Projection<'_> {
     fn project_companion_disk(&mut self, revision: u64) -> Result<(), RuntimeError> {
+        self.project_guarded_directory(revision)?;
         let Some(current) = self.index.companion_disk else {
             return Ok(());
         };
@@ -1139,6 +1177,7 @@ impl Projection<'_> {
         Ok(())
     }
 
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the projected index edits must correspond to the same accepted record mutation or tombstone before durable admission
     fn project_account_service_write(
         &mut self,
         write: &AccountServiceDurableWrite,
@@ -1150,15 +1189,78 @@ impl Projection<'_> {
                 key,
                 plaintext,
             } => {
-                if !matches!(*table, TableId::LoginIndex | TableId::LoginIndexKeyState)
-                    && PersistentRecordValue::decode(*table, plaintext)?.revision() != revision
-                {
-                    return Err(RuntimeError::Storage(StorageError::StaleState));
+                if !matches!(*table, TableId::LoginIndex | TableId::LoginIndexKeyState) {
+                    let row = PersistentRecordValue::decode(*table, plaintext)?;
+                    if row.revision() != revision {
+                        return Err(RuntimeError::Storage(StorageError::StaleState));
+                    }
+                    if *table == TableId::RequestResult {
+                        self.project_claim_replay(key, &row)?;
+                        self.project_federated_claim(key, &row)?;
+                    }
+                }
+                if *table == TableId::E2eeState {
+                    self.project_initial_root_record(key, plaintext)?;
                 }
                 self.put_plaintext(*table, key.clone(), plaintext.as_slice().to_vec())
             }
-            AccountServiceDurableWrite::Delete { table, key } => self.delete(*table, key.clone()),
+            AccountServiceDurableWrite::Delete {
+                table: TableId::E2eeState,
+                key,
+            } if agenc_relay_storage::e2ee_records::initial_root::is_reserved_key(key) => {
+                Err(RuntimeError::Storage(StorageError::StaleState))
+            }
+            AccountServiceDurableWrite::Delete { table, key } => {
+                if *table == TableId::RequestResult {
+                    self.forget_claim_replay(key)?;
+                    self.forget_federated_claim(key)?;
+                }
+                self.delete(*table, key.clone())
+            }
         }
+    }
+
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=the immutable owner, authorized state transition and installation budget are checked against the same record before projecting it
+    fn project_initial_root_record(
+        &mut self,
+        key: &StoredKey,
+        bytes: &[u8],
+    ) -> Result<(), RuntimeError> {
+        use agenc_relay_storage::e2ee_records::initial_root::{FORMAT_KEY, InitialRootRow, PREFIX};
+        if key
+            .as_bytes()
+            .starts_with(agenc_relay_storage::e2ee_records::initial_root::directory::PREFIX)
+        {
+            return Err(RuntimeError::Storage(StorageError::StaleState));
+        }
+        if !key.as_bytes().starts_with(PREFIX) && key.as_bytes() != FORMAT_KEY {
+            return Ok(());
+        }
+        let value = PersistentRecordValue::decode(TableId::E2eeState, bytes)?;
+        match InitialRootRow::check_record(key, &value)? {
+            InitialRootRow::Format if !self.index.holds(TableId::E2eeState, key) => {}
+            InitialRootRow::Owner(owner) if owner.network == self.keys.binding().network_id() => {
+                match self.index.initial_root_owners.get(&owner.account) {
+                    Some(old) if old.row().transition(owner.state)? == owner => {}
+                    None if owner.state
+                        == agenc_relay_storage::e2ee_records::initial_root::RootClaimState::Reserved
+                        && !self.index.holds(TableId::E2eeState, key) => {}
+                    _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
+                }
+                let owner = self
+                    .index
+                    .back_root_owner(owner)
+                    .map_err(|error| match error {
+                        RuntimeError::MemoryExhausted => {
+                            RuntimeError::Storage(StorageError::LimitExceeded)
+                        }
+                        other => other,
+                    })?;
+                self.updates.push(IndexUpdate::InitialRootOwner(owner));
+            }
+            _ => return Err(RuntimeError::Storage(StorageError::StaleState)),
+        }
+        Ok(())
     }
 
     fn project_write(
@@ -1264,6 +1366,15 @@ impl Projection<'_> {
             Vec::new(),
         )?;
         self.put(TableId::Account, key, value)?;
+        if let Some(owner) = self.index.initial_root_owners.get(&account_id) {
+            let key = agenc_relay_storage::e2ee_records::initial_root::RootClaimOwner::key(
+                owner.row().network,
+                account_id,
+            )?;
+            self.delete(TableId::E2eeState, key)?;
+            self.updates
+                .push(IndexUpdate::RemoveInitialRootOwner(account_id));
+        }
         for (canonical, row_key) in self.index.nickname_rows(account_id) {
             self.delete(TableId::NicknameReservation, row_key)?;
             self.updates.push(IndexUpdate::NicknameReleased {

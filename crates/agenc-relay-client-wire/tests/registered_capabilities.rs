@@ -28,6 +28,118 @@ fn profile() -> TestResult<CapabilityProfile> {
     ])?)
 }
 
+#[test]
+fn only_an_explicit_current_root_profile_can_forward_its_transfer() -> TestResult {
+    use agenc_relay_client_wire::{
+        InitialRootCarrier as Family, RegistrationAuthCarrier as Carrier,
+    };
+    use agenc_relay_types::{INITIAL_ROOT_CAPABILITY, INITIAL_ROOT_PROFILE_TOKEN};
+
+    let value = format!("v1.{INITIAL_ROOT_PROFILE_TOKEN}");
+    for unsupported in [None, Some("v1"), Some("v1.other")] {
+        assert!(CapabilitySpec::new(INITIAL_ROOT_CAPABILITY, unsupported).is_err());
+    }
+    let baseline = CapabilityProfile::new(vec![CapabilitySpec::new(
+        "agenc.ag/account-create",
+        Some("v1"),
+    )?])?;
+    let offered = CapabilityProfile::new(vec![
+        CapabilitySpec::new("agenc.ag/account-create", Some("v1"))?,
+        CapabilitySpec::new(INITIAL_ROOT_CAPABILITY, Some(&value))?,
+    ])?;
+    let claim_only = CapabilityProfile::new(vec![CapabilitySpec::new(
+        INITIAL_ROOT_CAPABILITY,
+        Some(&value),
+    )?])?;
+    let begin = "ACCTCREATE CLAIMSTART 4726";
+    let mut create = RegistrationState::new(0, AccessTokenPolicy::IgnoreCompatibilityPass)?;
+    create.message(parsed("CAP LS 302")?, 1, &offered)?;
+    assert!(create.message(parsed(begin)?, 2, &offered).is_err());
+    create.message(parsed("CAP REQ :agenc.ag/initial-root")?, 3, &offered)?;
+    assert!(create.message(parsed(begin)?, 4, &offered).is_err());
+    create.message(parsed("CAP REQ :agenc.ag/account-create")?, 5, &offered)?;
+    for withdrawn in [&baseline, &claim_only] {
+        assert!(create.message(parsed(begin)?, 6, withdrawn).is_err());
+    }
+    let transfer = create.message(parsed(begin)?, 6, &offered)?;
+    let [
+        RegistrationAction::ForwardAuthCarrier {
+            generation,
+            carrier: Carrier::InitialRoot(Family::GuardedCreation),
+            ..
+        },
+    ] = transfer.as_slice()
+    else {
+        return Err("missing guarded START".into());
+    };
+    create.event(
+        RegistrationEvent::AuthCarrierFinished {
+            generation: *generation,
+        },
+        7,
+    )?;
+    // Leaving the initial transfer does not turn a pending guarded FINISH into a plain creation.
+    assert!(
+        create
+            .message(parsed("ACCTCREATE START 4726")?, 8, &offered)
+            .is_err()
+    );
+    assert!(
+        create
+            .message(parsed("CAP REQ :-agenc.ag/initial-root")?, 9, &offered)
+            .is_err()
+    );
+    for withdrawn in [&baseline, &claim_only] {
+        assert!(
+            create
+                .message(parsed("ACCTCREATE FINISH 4726")?, 10, withdrawn)
+                .is_err()
+        );
+    }
+    assert!(
+        create
+            .apply_capability_profile(&baseline)?
+            .iter()
+            .any(|a| matches!(a, RegistrationAction::CapabilityReconnectRequired(_)))
+    );
+    assert!(
+        create
+            .message(parsed("ACCTCREATE FINISH 4726")?, 10, &baseline)
+            .is_err()
+    );
+
+    let claim = "ACCTROOT CLAIM 4726";
+    let mut account = registered(&offered)?;
+    assert!(account.message(parsed(claim)?, 5, &offered).is_err());
+    account.message(parsed("CAP LS 302")?, 6, &offered)?;
+    account.message(parsed("CAP REQ :agenc.ag/initial-root")?, 7, &offered)?;
+    assert!(account.message(parsed(claim)?, 8, &baseline).is_err());
+    assert!(matches!(
+        account.message(parsed(claim)?, 8, &offered)?.as_slice(),
+        [RegistrationAction::ForwardAuthCarrier {
+            carrier: Carrier::InitialRoot(Family::Claim),
+            ..
+        }]
+    ));
+    assert!(
+        account
+            .message(parsed("ACCTROOT DATA AQ")?, 9, &baseline)
+            .is_err()
+    );
+    assert!(
+        account
+            .apply_capability_profile(&baseline)?
+            .iter()
+            .any(|a| matches!(a, RegistrationAction::CapabilityReconnectRequired(_)))
+    );
+    assert!(
+        account
+            .message(parsed("ACCTROOT DATA AQ")?, 9, &baseline)
+            .is_err()
+    );
+    Ok(())
+}
+
 fn registered(profile: &CapabilityProfile) -> TestResult<RegistrationState> {
     let mut state = RegistrationState::new(0, AccessTokenPolicy::IgnoreCompatibilityPass)?;
     let actions = state.message(parsed("NICK Alice")?, 1, profile)?;

@@ -238,20 +238,33 @@ impl ProtocolRecordBody {
         expected_kind: u16,
         encoded: &[u8],
     ) -> Result<Self, StorageError> {
+        let canonical = Self::borrow(expected_table, expected_kind, encoded)?;
+        Self::new(expected_table, expected_kind, 1, canonical.to_vec())
+    }
+
+    pub(crate) fn borrow(
+        expected_table: TableId,
+        expected_kind: u16,
+        encoded: &[u8],
+    ) -> Result<&[u8], StorageError> {
         let mut decoder = Decoder::new(encoded);
         if decoder.u16()? != PROTOCOL_BODY_VERSION {
             return Err(StorageError::UnsupportedVersion);
         }
         let table = TableId::from_u16(decoder.u16()?)?;
-        let record_kind = decoder.u16()?;
-        let profile_version = decoder.u16()?;
-        let maximum = protocol_body_limit(expected_table);
-        let canonical_object = decoder.vector_u32(maximum)?.to_vec();
+        let kind = decoder.u16()?;
+        let profile = decoder.u16()?;
+        let object = decoder.vector_u32(protocol_body_limit(expected_table))?;
         decoder.finish()?;
-        if table != expected_table || record_kind != expected_kind {
+        if table != expected_table
+            || kind != expected_kind
+            || !uses_protocol_body(table, kind)
+            || profile != 1
+            || object.is_empty()
+        {
             return Err(StorageError::InvalidEncoding);
         }
-        Self::new(table, record_kind, profile_version, canonical_object)
+        Ok(object)
     }
 
     /// Encodes the exact table- and arm-bound wrapper.
@@ -582,6 +595,28 @@ impl PersistentRecordValue {
         })
     }
 
+    /// Reads the expiry for the specified kind and generation without allocating the record
+    /// body. The full decoder validates every field before storage admission or publication.
+    pub fn generation_expiry(
+        encoded: &[u8],
+        kind: u16,
+        generation: u64,
+    ) -> Result<Option<u64>, StorageError> {
+        let mut decoder = Decoder::new(encoded);
+        if decoder.u16()? != DOMAIN_RECORD_VERSION {
+            return Err(StorageError::UnsupportedVersion);
+        }
+        let actual_kind = decoder.u16()?;
+        let _revision = decoder.u64()?;
+        let actual_generation = decoder.u64()?;
+        let expiry = decode_record_expiry(&mut decoder)?;
+        Ok(if (actual_kind, actual_generation) == (kind, generation) {
+            expiry
+        } else {
+            None
+        })
+    }
+
     /// Parses one full-consumption schema-one domain record.
     pub fn decode(table: TableId, encoded: &[u8]) -> Result<Self, StorageError> {
         let mut decoder = Decoder::new(encoded);
@@ -591,16 +626,7 @@ impl PersistentRecordValue {
         let record_kind = decoder.u16()?;
         let revision = decoder.u64()?;
         let generation = decoder.u64()?;
-        let expires_at = match decoder.u16()? {
-            0 => {
-                if decoder.u64()? != 0 {
-                    return Err(StorageError::InvalidEncoding);
-                }
-                None
-            }
-            1 => Some(decoder.u64()?),
-            _ => return Err(StorageError::UnsupportedVersion),
-        };
+        let expires_at = decode_record_expiry(&mut decoder)?;
         let reference_count =
             usize::try_from(decoder.u32()?).map_err(|_| StorageError::Overflow)?;
         if reference_count > MAX_RECORD_REFERENCES {
@@ -766,9 +792,16 @@ pub fn validate_record_plaintext(
 
 fn validate_companion_plaintext(key: &StoredKey, plaintext: &[u8]) -> Result<(), StorageError> {
     let value = PersistentRecordValue::decode(TableId::E2eeState, plaintext)?;
+    let root_owner = value.record_kind() == crate::e2ee_records::initial_root::KIND;
+    if root_owner != crate::e2ee_records::initial_root::is_reserved_key(key) {
+        return Err(StorageError::InvalidEncoding);
+    }
     match value.record_kind() {
         crate::companion_disk::accounting::KIND => {
             crate::CompanionDiskAccounting::check_record(key, &value)?;
+        }
+        crate::e2ee_records::initial_root::KIND => {
+            crate::e2ee_records::initial_root::InitialRootRow::check_record(key, &value)?;
         }
         crate::e2ee_records::direct_renewal::KIND => {
             crate::e2ee_records::direct_renewal::DirectRenewal::decode_keyed(key, value.body())?;
@@ -838,6 +871,16 @@ fn validate_fixed_length(plaintext: &[u8], expected: usize) -> Result<(), Storag
 
 fn compare_references(left: &RecordReference, right: &RecordReference) -> Ordering {
     (left.table, left.key.as_bytes()).cmp(&(right.table, right.key.as_bytes()))
+}
+
+fn decode_record_expiry(decoder: &mut Decoder<'_>) -> Result<Option<u64>, StorageError> {
+    let tag = decoder.u16()?;
+    match tag {
+        0 if decoder.u64()? == 0 => Ok(None),
+        0 => Err(StorageError::InvalidEncoding),
+        1 => Ok(Some(decoder.u64()?)),
+        _ => Err(StorageError::UnsupportedVersion),
+    }
 }
 
 fn validate_record_counters(
@@ -937,7 +980,7 @@ const fn record_kind_is_valid(table: TableId, kind: u16) -> bool {
         TableId::Audit => 2,
         TableId::AuditCheckpoint => 1,
         TableId::E2eeObject => 1,
-        TableId::E2eeState => crate::e2ee_records::direct_renewal::KIND,
+        TableId::E2eeState => crate::e2ee_records::initial_root::KIND,
         _ => 0,
     };
     kind != 0 && kind <= maximum

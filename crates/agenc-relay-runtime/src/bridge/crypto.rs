@@ -12,6 +12,11 @@
 //! This module keeps its tests in `tests/bridge_crypto.rs` so the file can be
 //! compiled unchanged for the schedule models.
 
+mod initial_root;
+pub use initial_root::{InitialRootOpenJob, InitialRootSealJob, OpenedInitialRoot};
+mod creation;
+pub use creation::{CreationInput, CreationPlan, SealedCreation};
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
@@ -388,13 +393,13 @@ impl OpaqueFinishSealJob {
 pub struct CreationStartJob {
     profile: Arc<OpaqueProfile>,
     login_index_key: Arc<LoginIndexKey>,
-    parameters: AccountCreationStartParameters,
+    parameters: AccountCreationStartParameters<CreationInput>,
 }
 
 /// One invitation verification preflight used only to derive the authenticated
 /// account-creation rate key.
 pub struct CreationPreflightJob {
-    request: AuthenticatedAccountRequest<CreationStart>,
+    request: CreationInput,
     authority: Ed25519PublicKey,
     network_id: NetworkId,
     now: UtcSecond,
@@ -404,13 +409,13 @@ impl CreationPreflightJob {
     /// Binds one opened request to the configured offline invitation authority.
     #[must_use]
     pub fn new(
-        request: AuthenticatedAccountRequest<CreationStart>,
+        request: impl Into<CreationInput>,
         authority: Ed25519PublicKey,
         network_id: NetworkId,
         now: UtcSecond,
     ) -> Self {
         Self {
-            request,
+            request: request.into(),
             authority,
             network_id,
             now,
@@ -439,7 +444,7 @@ impl CreationPreflightJob {
 /// The opened request and optional signature-verified invitation rate key.
 pub struct CreationPreflightOutput {
     /// The request retaining its one-use response authority.
-    pub request: AuthenticatedAccountRequest<CreationStart>,
+    pub request: CreationInput,
     /// The verified invitation identity; invalid or absent invitations have no key.
     pub verified_invite: Option<InviteId>,
 }
@@ -447,44 +452,47 @@ pub struct CreationPreflightOutput {
 impl CreationStartJob {
     /// Binds the shared coordinator keys to one creation start.
     #[must_use]
-    pub fn new(
+    pub fn new<R: Into<CreationInput>>(
         profile: Arc<OpaqueProfile>,
         login_index_key: Arc<LoginIndexKey>,
-        parameters: AccountCreationStartParameters,
+        parameters: AccountCreationStartParameters<R>,
     ) -> Self {
         Self {
             profile,
             login_index_key,
-            parameters,
+            parameters: AccountCreationStartParameters {
+                context: parameters.context,
+                request: parameters.request.into(),
+                admission: parameters.admission,
+                login_is_available: parameters.login_is_available,
+                invitation_is_available: parameters.invitation_is_available,
+            },
         }
     }
 
-    fn execute(self) -> Result<AccountStartOutcome<AccountCreationState>, AuthError> {
-        begin_account_creation(&self.profile, &self.login_index_key, self.parameters)
+    fn execute(self) -> Result<CreationPlan, AuthError> {
+        CreationPlan::prepare(&self.profile, &self.login_index_key, self.parameters)
     }
 }
 
 /// One account-creation START challenge seal after StateCore reserves the
 /// exact response-count successor.
 pub struct CreationStartSealJob {
-    outcome: AccountStartOutcome<AccountCreationState>,
+    outcome: CreationPlan,
     current_response_count: u64,
 }
 
 impl CreationStartSealJob {
     /// Moves the creation transaction lineage into its one-use seal job.
     #[must_use]
-    pub fn new(
-        outcome: AccountStartOutcome<AccountCreationState>,
-        current_response_count: u64,
-    ) -> Self {
+    pub fn new(outcome: CreationPlan, current_response_count: u64) -> Self {
         Self {
             outcome,
             current_response_count,
         }
     }
 
-    fn execute(self) -> Result<SealedAccountStart<AccountCreationState>, AuthError> {
+    fn execute(self) -> Result<SealedCreation, AuthError> {
         self.outcome.seal(self.current_response_count)
     }
 }
@@ -671,6 +679,10 @@ pub enum RuntimeCryptoJob {
     ChannelKeyConstruct(ChannelKeyConstructJob),
     /// One account-service request opening.
     AccountOpen(Box<AccountOpenJob>),
+    /// Opens a profile-two guarded creation or registered read/choice.
+    InitialRootOpen(Box<InitialRootOpenJob>),
+    /// Seals the private state against a checked registration and exact committed snapshot.
+    InitialRootSeal(Box<InitialRootSealJob>),
     /// One account-service response sealing.
     AccountSeal(Box<AccountSealJob>),
     /// One OPAQUE authentication start.
@@ -709,6 +721,10 @@ pub enum CryptoJobOutput {
     ChannelKeyConstruct(Result<ChannelKeyVerifierRecord, CryptoError>),
     /// A fully opened and parsed request retaining its one-use response authority.
     AccountOpen(Box<Result<OpenedAccountServiceRequest, AuthError>>),
+    /// Opened optional operation with its original response authority.
+    InitialRootOpen(Box<Result<OpenedInitialRoot, AuthError>>),
+    /// Exact protected response and optional choice for the ordered storage transition.
+    InitialRootSealed(Box<Result<agenc_relay_auth::initial_root::PreparedClaim, AuthError>>),
     /// A sealed response, or the closed failure.
     AccountSeal(Box<Result<SealedAccountResponse, CryptoError>>),
     /// An authentication start outcome.
@@ -720,11 +736,11 @@ pub enum CryptoJobOutput {
     /// An authentication FINISH with its checked completion sealed.
     OpaqueFinishSealed(Box<Result<SealedAccountFinishOutcome<AuthenticationGrant>, AuthError>>),
     /// A creation start outcome.
-    CreationStart(Box<Result<AccountStartOutcome<AccountCreationState>, AuthError>>),
+    CreationStart(Box<Result<CreationPlan, AuthError>>),
     /// An invitation verification preflight result.
     CreationPreflight(Box<CreationPreflightOutput>),
     /// A creation START with its one-use challenge sealed.
-    CreationStartSealed(Box<Result<SealedAccountStart<AccountCreationState>, AuthError>>),
+    CreationStartSealed(Box<Result<SealedCreation, AuthError>>),
     /// A creation finish outcome with its transaction.
     CreationFinish(Box<CreationFinishOutput>),
     /// A creation FINISH with its checked completion sealed.
@@ -748,6 +764,8 @@ impl CryptoJob for RuntimeCryptoJob {
         match self {
             Self::ChannelKeyVerify(_) | Self::ChannelKeyConstruct(_) => JobClass::Channel,
             Self::AccountOpen(_)
+            | Self::InitialRootOpen(_)
+            | Self::InitialRootSeal(_)
             | Self::AccountSeal(_)
             | Self::OpaqueStart(_)
             | Self::OpaqueStartSeal(_)
@@ -770,6 +788,10 @@ impl CryptoJob for RuntimeCryptoJob {
             Self::ChannelKeyVerify(job) => CryptoJobOutput::ChannelKey(job.execute()),
             Self::ChannelKeyConstruct(job) => CryptoJobOutput::ChannelKeyConstruct(job.execute()),
             Self::AccountOpen(job) => CryptoJobOutput::AccountOpen(Box::new(job.execute())),
+            Self::InitialRootOpen(job) => CryptoJobOutput::InitialRootOpen(Box::new(job.execute())),
+            Self::InitialRootSeal(job) => {
+                CryptoJobOutput::InitialRootSealed(Box::new(job.execute()))
+            }
             Self::AccountSeal(job) => CryptoJobOutput::AccountSeal(Box::new(job.execute())),
             Self::OpaqueStart(job) => CryptoJobOutput::OpaqueStart(Box::new(job.execute())),
             Self::OpaqueStartSeal(job) => {

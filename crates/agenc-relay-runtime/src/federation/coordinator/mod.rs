@@ -14,6 +14,7 @@ mod companion;
 mod convert;
 mod grace;
 mod history;
+mod initial_root_results;
 mod mailbox_expiry;
 mod maintenance;
 mod object_expiry;
@@ -35,8 +36,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use agenc_relay_domain::federation::{OperationKey, OriginKey, OriginTable, RetainedRequest};
 use agenc_relay_federation_wire::{
-    CanonicalEncode, EventDescriptor, FederationFrame, FederationHash32, FederationLineText,
-    OperationDescriptor, RequestHeader, SchemaObject, federation_object_id, split_fragments,
+    EventDescriptor, FederationFrame, FederationHash32, FederationLineText, OperationDescriptor,
+    RequestHeader, federation_object_id, split_fragments,
 };
 use agenc_relay_storage::federation_records::{
     DeliveryCursorRecord, FederationPeerRecord, PEER_RECORD_KIND, PeerPhase, peer_key,
@@ -182,6 +183,7 @@ enum PendingCommit {
         descriptor: OperationDescriptor,
         /// The request header, kept so a refused batch can still answer.
         header: RequestHeader,
+        extension: Option<agenc_relay_federation_wire::InitialRootOperation>,
         _charge: Option<IngressCharge>,
         query: Option<query::QueryReceipt>,
     },
@@ -196,6 +198,7 @@ enum PendingCommit {
         /// the origin and nothing is acknowledged.
         frame: Option<FederationFrame>,
         closed_carrier: Option<crate::connection::ConnectionGeneration>,
+        terminal: Option<origin::TerminalReceipt>,
         _charge: Option<IngressCharge>,
     },
     OriginExpired {
@@ -203,6 +206,7 @@ enum PendingCommit {
         link: LinkId,
         descriptor: OperationDescriptor,
         result: Vec<u8>,
+        terminal: origin::TerminalReceipt,
         _charge: Option<IngressCharge>,
     },
     Cleanup {
@@ -330,6 +334,7 @@ pub struct FederationCoordinator {
     replay_maintenance: replay_maintenance::Worker,
     mailbox_expiry: mailbox_expiry::Worker,
     request_expiry: request_expiry::Worker,
+    root_intakes: initial_root_results::Admissions,
     object_expiry: object_expiry::Worker,
     /// Open cross-profile barriers by target (spec 20.8): later events on
     /// either stream wait until both final acknowledgements arrive.
@@ -416,6 +421,7 @@ impl FederationCoordinator {
             replay_maintenance: replay_maintenance::Worker::default(),
             mailbox_expiry: mailbox_expiry::Worker::default(),
             request_expiry: request_expiry::Worker::default(),
+            root_intakes: initial_root_results::Admissions::default(),
             object_expiry: object_expiry::Worker::default(),
             barriers: BTreeMap::new(),
             remote_accounts: accounts::RemoteAccounts::default(),
@@ -1469,9 +1475,9 @@ impl FederationCoordinator {
     }
 
     fn settle_remote_results(&mut self, context: &mut StateCoreContext) {
-        for result in context.take_committed_remote_results() {
+        for (generation, result) in context.take_committed_remote_results() {
             let peer = result.header.replay_key.home_server_id;
-            if self.record_remote_result(result).is_err()
+            if self.settle_remote_result(generation, result).is_err()
                 && let Some(link) = self
                     .peers
                     .get(&peer)
@@ -1539,24 +1545,15 @@ impl FederationCoordinator {
                     return false;
                 }
             }
-            Some(PendingCommit::OriginAck {
-                peer,
-                link,
-                frame,
-                closed_carrier,
-                ..
-            }) => self.publish_origin_ack(context, peer, link, frame, closed_carrier),
+            Some(
+                pending @ (PendingCommit::OriginAck { .. } | PendingCommit::OriginExpired { .. }),
+            ) => {
+                if !self.publish_committed_origin(context, pending) {
+                    return false;
+                }
+            }
             Some(PendingCommit::OriginReady { peer, link }) => {
                 self.publish_origin_ready(context, peer, link)
-            }
-            Some(PendingCommit::OriginExpired {
-                peer,
-                link,
-                descriptor,
-                result,
-                ..
-            }) => {
-                self.send_result(context, link, peer, descriptor, &result);
             }
             Some(PendingCommit::AuthorityFence {
                 peer,
@@ -1597,6 +1594,43 @@ impl FederationCoordinator {
                 }
             }
             Some(PendingCommit::Acknowledged) | None => {}
+        }
+        true
+    }
+
+    fn publish_committed_origin(
+        &mut self,
+        context: &mut StateCoreContext,
+        pending: PendingCommit,
+    ) -> bool {
+        match pending {
+            PendingCommit::OriginAck {
+                peer,
+                link,
+                frame,
+                closed_carrier,
+                terminal,
+                ..
+            } => {
+                if terminal.is_some_and(|receipt| !receipt.published(self, context)) {
+                    return false;
+                }
+                self.publish_origin_ack(context, peer, link, frame, closed_carrier);
+            }
+            PendingCommit::OriginExpired {
+                peer,
+                link,
+                descriptor,
+                result,
+                terminal,
+                ..
+            } => {
+                if !terminal.published(self, context) {
+                    return false;
+                }
+                self.send_result(context, link, peer, descriptor, &result);
+            }
+            _ => return false,
         }
         true
     }
@@ -1857,6 +1891,7 @@ impl FederationCoordinator {
             request_object_id,
             descriptor,
             header,
+            extension,
             result,
             query,
             ..
@@ -1876,6 +1911,8 @@ impl FederationCoordinator {
             FreshRequest {
                 key,
                 header,
+                extension,
+                root_intake: None,
                 descriptor,
                 request_object_id,
                 bound: None,
@@ -2012,6 +2049,30 @@ impl FederationCoordinator {
         if live.link != link {
             return;
         }
+        let protected;
+        let encoded = if encoded.starts_with(&2u16.to_be_bytes()) {
+            if live.handle.profile != agenc_relay_federation_wire::FederationProfile::InitialRoot {
+                return;
+            }
+            match initial_root_results::authorized_output(
+                context,
+                self.config.network_id,
+                peer,
+                &descriptor,
+                encoded,
+            ) {
+                Ok(checked) => {
+                    protected = checked;
+                    protected.as_ref()
+                }
+                Err(error) => {
+                    self.fail_link(context, link, peer, error);
+                    return;
+                }
+            }
+        } else {
+            encoded
+        };
         let descriptor = OperationDescriptor {
             object_id: federation_object_id(encoded),
             ..descriptor
@@ -2128,12 +2189,4 @@ fn send_object(
         handle.try_send(line)?;
     }
     Ok(())
-}
-
-/// Encodes one schema object to its canonical bytes.
-fn encode_object(object: &SchemaObject) -> Result<Vec<u8>, RuntimeError> {
-    object
-        .encode_canonical()
-        .map(|bytes| bytes.as_slice().to_vec())
-        .map_err(|_| RuntimeError::InvalidValue)
 }

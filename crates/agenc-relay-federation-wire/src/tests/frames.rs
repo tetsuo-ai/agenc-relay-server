@@ -36,6 +36,35 @@ fn hello() -> FederationHello {
     }
 }
 
+#[test]
+fn initial_root_hello_uses_only_its_exact_version_and_pinned_hash() -> TestResult {
+    use crate::FederationProfile::{Base, InitialRoot};
+    let mut hello = hello();
+    hello.tbs.profile_hash = InitialRoot.hash();
+    let base = Base.encode_hello(&hello)?;
+    let enhanced = InitialRoot.encode_hello(&hello)?;
+    assert_eq!(base.get(..2), Some(1_u16.to_be_bytes().as_slice()));
+    assert_eq!(enhanced.get(..2), Some(2_u16.to_be_bytes().as_slice()));
+    assert_eq!(base.get(2..), enhanced.get(2..));
+    assert_eq!(
+        enhanced.get(..196),
+        Some(InitialRoot.hello_tbs(&hello.tbs)?.as_slice())
+    );
+    assert_eq!(enhanced.get(196..), Some(hello.signature.as_slice()));
+    assert_eq!(InitialRoot.decode_hello(enhanced)?, hello);
+    assert!(Base.decode_hello(enhanced).is_err());
+    assert!(InitialRoot.decode_hello(base).is_err());
+    hello.tbs.profile_hash = Base.hash();
+    assert!(InitialRoot.encode_hello(&hello).is_err());
+    let mut wrong_hash = Base.encode_hello(&hello)?;
+    wrong_hash
+        .get_mut(..2)
+        .ok_or("missing version")?
+        .copy_from_slice(&2_u16.to_be_bytes());
+    assert!(InitialRoot.decode_hello(wrong_hash).is_err());
+    Ok(())
+}
+
 fn max_fragment() -> Result<FederationFragment, Box<dyn Error>> {
     Ok(FederationFragment::new(
         FederationHash32::from_bytes([0xff; 32]),

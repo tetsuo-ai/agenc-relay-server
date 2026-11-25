@@ -114,7 +114,7 @@ use crate::state_core::inbox::{
     lifecycle_channel,
 };
 use crate::state_core::projector::FederationProjector;
-use crate::state_core::reconstruct::{Reconstruction, reconstruct};
+use crate::state_core::reconstruct::Reconstruction;
 use crate::state_core::{
     StateCore, StateCoreClocks, StateCoreConfig, StateCoreExit, StateCoreInputs, admin_core_channel,
 };
@@ -488,6 +488,7 @@ fn harden_process(config: &Config) -> Result<HardeningOutcome, DaemonError> {
 }
 
 struct LiveStorage {
+    budget: Arc<MemoryBudget>,
     companion_spool: Option<(
         agenc_relay_storage::CompanionDisk,
         Arc<agenc_relay_storage::CompanionSpoolDirectory>,
@@ -537,15 +538,21 @@ impl LiveStorage {
         let reconstruction_utc = SystemWallClock
             .utc_now()
             .map_err(|_| DaemonError::Runtime(RuntimeError::InvalidValue))?;
-        let mut reconstruction = reconstruct(
-            &seed,
-            &owner.port(),
-            &keys,
-            config.network.role,
-            process_clock.now(),
-            reconstruction_utc,
-        )
-        .map_err(|error| DaemonError::Reconstruction(ReconstructionSurface::DurableState, error))?;
+        let budget = memory_budget(config)?;
+        let mut reconstruction = crate::state_core::durable::DurableIndex::new()
+            .with_initial_root_budget(&budget)
+            .with_guarded_directory_limit(config.e2ee.directory_bytes_per_account)
+            .reconstruct(
+                &seed,
+                &owner.port(),
+                &keys,
+                config.network.role,
+                process_clock.now(),
+                reconstruction_utc,
+            )
+            .map_err(|error| {
+                DaemonError::Reconstruction(ReconstructionSurface::DurableState, error)
+            })?;
         reconcile_recovered_sessions(
             &owner.port(),
             &mut reconstruction,
@@ -589,6 +596,7 @@ impl LiveStorage {
             &config.storage.backup_trust_manifest_file,
         )?)?;
         Ok(Self {
+            budget,
             companion_spool,
             owner,
             limit_writer,
@@ -772,6 +780,7 @@ fn build_live_state(
         }
     };
     let LiveStorage {
+        budget: _,
         companion_spool: _,
         owner,
         limit_writer,
@@ -1582,7 +1591,7 @@ fn attach_edge_role(
     Ok(router.with_edge(edge).with_e2ee_edge(e2ee_edge)?)
 }
 
-fn memory_budget(config: &Config) -> Result<Arc<MemoryBudget>, DaemonError> {
+pub(crate) fn memory_budget(config: &Config) -> Result<Arc<MemoryBudget>, DaemonError> {
     let purposes = enabled_runtime_purposes(config)?;
     let parsed_arena = config.limits.values.get(LimitKey::ParsedArenaBytes);
     let pool = startup_arithmetic(
@@ -2462,14 +2471,7 @@ async fn run(inputs: DaemonRunInputs) -> Result<DaemonExit, DaemonError> {
         parts,
     ));
     let runtime_config = RuntimeConfigHandle::new(Arc::clone(&snapshot));
-    let budget = match memory_budget(&config) {
-        Ok(budget) => budget,
-        Err(error) => {
-            return Err(
-                unwind_live_storage_and_log(storage, log_owner, startup_deadline, error).await,
-            );
-        }
-    };
+    let budget = Arc::clone(&storage.budget);
     let rates = snapshot.rates();
     let admission = match TransportAdmission::new(
         rates,

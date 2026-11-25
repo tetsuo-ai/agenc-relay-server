@@ -29,6 +29,7 @@ use crate::codec::{Decoder, Encoder};
 const DOMAIN_BODY_VERSION: u16 = 1;
 /// Account bodies gained durable administrative suspension state in version two.
 const ACCOUNT_BODY_VERSION: u16 = 2;
+const GUARDED_ACCOUNT_BODY_VERSION: u16 = 3;
 /// Channel bodies gained complete membership and invite state in version four.
 const COMPLETE_CHANNEL_BODY_VERSION: u16 = 4;
 /// Record kind of a live (non-tombstone) domain row.
@@ -147,7 +148,10 @@ impl AccountRecordBody {
             return Err(StorageError::LimitExceeded);
         }
         let mut encoder = Encoder::with_capacity(0, MAX_ACCOUNT_RECORD_BODY_BYTES)?;
-        encoder.put_u16(ACCOUNT_BODY_VERSION)?;
+        encoder.put_u16(match account.genesis_policy {
+            agenc_relay_domain::AccountGenesisPolicy::Legacy => ACCOUNT_BODY_VERSION,
+            agenc_relay_domain::AccountGenesisPolicy::Guarded => GUARDED_ACCOUNT_BODY_VERSION,
+        })?;
         encoder.put_fixed(account.account_id.random().as_bytes())?;
         put_optional_text(
             &mut encoder,
@@ -179,9 +183,11 @@ impl AccountRecordBody {
         }
         let mut decoder = Decoder::new(encoded);
         let version = decoder.u16()?;
-        if version != ACCOUNT_BODY_VERSION {
-            return Err(StorageError::UnsupportedVersion);
-        }
+        let genesis_policy = match version {
+            ACCOUNT_BODY_VERSION => agenc_relay_domain::AccountGenesisPolicy::Legacy,
+            GUARDED_ACCOUNT_BODY_VERSION => agenc_relay_domain::AccountGenesisPolicy::Guarded,
+            _ => return Err(StorageError::UnsupportedVersion),
+        };
         let account_id = read_account_id(&mut decoder)?;
         let label = optional_text(&mut decoder, MAX_LABEL_BYTES)?
             .map(|text| AccountLabelValue::parse(text).map_err(|_| StorageError::InvalidEncoding))
@@ -225,6 +231,7 @@ impl AccountRecordBody {
             session_generation,
             revision,
             admin_suspension_expires_at,
+            genesis_policy,
         })
     }
 }
@@ -1308,6 +1315,7 @@ pub(crate) mod fixtures {
             session_generation,
             revision,
             admin_suspension_expires_at: None,
+            genesis_policy: agenc_relay_domain::AccountGenesisPolicy::Legacy,
         })
     }
 

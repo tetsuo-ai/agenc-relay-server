@@ -19,6 +19,7 @@ pub mod profile;
 mod service;
 mod transaction;
 mod wire;
+pub use wire::{claimed_creation, initial_root};
 
 pub use channel_key::{
     CHANNEL_KEY_HASH_BYTES, CHANNEL_KEY_ITERATIONS, CHANNEL_KEY_LANES, CHANNEL_KEY_MEMORY_KIB,
@@ -44,13 +45,15 @@ pub use service::{
     AuthenticationGrant, AuthenticationGrantRecord, AuthenticationGrantRestartMetadata,
     AuthenticationLookup, AuthenticationStartParameters, AuthenticationTransactionRecord,
     CREATION_TRANSACTION_RECORD_BYTES, CREDENTIAL_CHANGE_TRANSACTION_RECORD_BYTES,
-    CreateAccountIntent, CreationAdmission, CreationTransactionRecord,
+    CreateAccountIntent, CreatedRootClaim, CreationAdmission, CreationTransactionRecord,
     CreationTransactionRestartMetadata, CredentialChangeStartParameters, CredentialChangeState,
     CredentialChangeTransactionRecord, CredentialChangeTransactionRestartMetadata,
     CredentialReplacementIntent, DestructiveAccountSnapshot, FreshAuthenticationProof,
+    GuardedAccountStart, GuardedCreationChallenge, GuardedCreationTransactionRecord,
     SealedAccountFinishOutcome, SealedAccountStart, authentication_completion,
     begin_account_creation, begin_account_deletion, begin_authentication, begin_credential_change,
-    finish_account_authentication, finish_account_creation, finish_credential_change,
+    begin_guarded_account_creation, finish_account_authentication, finish_account_creation,
+    finish_credential_change, prepare_guarded_account_creation,
 };
 pub use transaction::{
     ACCOUNT_CREATION_TIMEOUT_TICKS, AUTHENTICATION_GRANT_TIMEOUT_SECONDS,
@@ -63,7 +66,7 @@ pub use wire::{
     AccountServiceEnvelope, AccountServiceResponse, AccountServiceResponsePayload,
     AuthenticatedAccountRequest, AuthenticationFinish, AuthenticationStart, Completion,
     CreationFinish, CreationStart, CredentialChangeFinish, CredentialChangeStart,
-    EncodedAccountRequestPlaintext, EncodedAccountResponsePlaintext, OpenedAccountServiceRequest,
-    encode_request_plaintext, encode_response_plaintext, open_and_parse_request,
-    open_and_parse_response,
+    EncodedAccountRequestPlaintext, EncodedAccountResponsePlaintext, InitialRootServiceEnvelope,
+    InitialRootServiceResponse, OpenedAccountServiceRequest, encode_request_plaintext,
+    encode_response_plaintext, open_and_parse_request, open_and_parse_response,
 };

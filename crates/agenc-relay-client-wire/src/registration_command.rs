@@ -286,6 +286,8 @@ pub enum RegistrationCommand {
     AccountCreate(RegistrationAccountCommand),
     /// One ACCTCRED carrier production. Registration state still gates its use.
     AccountCredentials(RegistrationAccountCommand),
+    /// A transfer on a connection that negotiated the prospective initial-root profile.
+    InitialRoot(crate::InitialRootCarrier, RegistrationAccountCommand),
     /// One syntactically valid nickname.
     Nick,
     /// The exact four-parameter USER production.
@@ -1409,6 +1411,30 @@ fn is_canonical_configured_pass(token: &str) -> bool {
 fn parse_account_carrier(
     message: &ParsedMessage,
 ) -> Result<RegistrationAccountCommand, RegistrationGrammarError> {
+    account_carrier_production(message, "START", Some("FINISH"))
+}
+
+/// Validates the original transfer productions under one already negotiated
+/// initial-root command family. Ordinary registration keeps its closed v1 grammar.
+pub fn parse_initial_root_command(
+    message: &ParsedMessage,
+    carrier: crate::InitialRootCarrier,
+) -> Result<RegistrationAccountCommand, RegistrationGrammarError> {
+    if message.command() != carrier.command() {
+        return Err(RegistrationGrammarError::UnknownCommand);
+    }
+    let (start, finish) = match carrier {
+        crate::InitialRootCarrier::GuardedCreation => ("CLAIMSTART", Some("FINISH")),
+        crate::InitialRootCarrier::Claim => ("CLAIM", None),
+    };
+    account_carrier_production(message, start, finish)
+}
+
+fn account_carrier_production(
+    message: &ParsedMessage,
+    start: &str,
+    finish: Option<&str>,
+) -> Result<RegistrationAccountCommand, RegistrationGrammarError> {
     if !message.tags().is_empty() {
         return Err(RegistrationGrammarError::InvalidArgument);
     }
@@ -1416,8 +1442,12 @@ fn parse_account_carrier(
         return Err(RegistrationGrammarError::NeedMoreParameters);
     };
     match subcommand {
-        "START" => validate_account_length(message).map(|()| RegistrationAccountCommand::Start),
-        "FINISH" => validate_account_length(message).map(|()| RegistrationAccountCommand::Finish),
+        command if command == start => {
+            validate_account_length(message).map(|()| RegistrationAccountCommand::Start)
+        }
+        command if Some(command) == finish => {
+            validate_account_length(message).map(|()| RegistrationAccountCommand::Finish)
+        }
         "DATA" => validate_account_data(message).map(|()| RegistrationAccountCommand::Data),
         "END" if message.middle().len() == 1 && message.trailing().is_none() => {
             Ok(RegistrationAccountCommand::End)

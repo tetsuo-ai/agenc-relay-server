@@ -14,6 +14,7 @@
 //! | --- | ---: | --- | --- |
 //! | `recovery/v1/` | 1 | conversation ID | [`crate::E2eeRecoveryGate`] |
 //! | `route/v1/` | 2 | conversation ID | [`RouteRow`] |
+//! | `initial-root-owner/v1/`, `initial-root-format/v1` | 26 | network+account or singleton | [`initial_root::InitialRootRow`] |
 //! | `direct-binding-renewal/v1/` | 25 | conversation ID | [`direct_renewal::DirectRenewal`] |
 //! | `binding-admission/v1/` | 24 | conversation ID, binding generation | [`binding_admission::BindingAdmissionRow`] |
 //! | `lock/v1/` | 3 | semantic route lock ID | [`ClaimRow::Lock`] |
@@ -52,6 +53,7 @@ pub mod binding_admission;
 pub mod delivery_recovery;
 pub mod direct_renewal;
 pub mod expiry;
+pub mod initial_root;
 pub use expiry::{EXPIRY_PROGRESS_ROW_KIND, ObjectExpiryProgressRow};
 pub mod mailbox_sequence;
 pub use mailbox_sequence::{MAILBOX_SEQUENCE_ROW_KIND, MailboxSequenceRow};
@@ -191,7 +193,7 @@ pub mod prefix {
 }
 
 /// Every `(prefix, record kind)` pair, used by the key classifier.
-const PREFIX_KINDS: [(&[u8], u16); 45] = [
+const PREFIX_KINDS: [(&[u8], u16); 48] = [
     (direct_renewal::PREFIX, direct_renewal::KIND),
     (binding_admission::PREFIX, binding_admission::KIND),
     (prefix::RECOVERY_SUBMISSION, RECOVERY_SUBMISSION_ROW_KIND),
@@ -255,6 +257,9 @@ const PREFIX_KINDS: [(&[u8], u16); 45] = [
         DELIVERY_RECOVERY_ROW_KIND,
     ),
     (mailbox_sequence::PREFIX, MAILBOX_SEQUENCE_ROW_KIND),
+    (initial_root::PREFIX, initial_root::KIND),
+    (initial_root::directory::PREFIX, initial_root::KIND),
+    (initial_root::FORMAT_KEY, initial_root::KIND),
 ];
 
 /// The record kind a table-23 key must carry, from its prefix. `ack/v1/`
@@ -1511,8 +1516,7 @@ impl DirectoryRow {
                 object_id,
                 ..
             } => {
-                chain_object_ids.len()
-                    == usize::try_from(*root_generation).unwrap_or(usize::MAX) + 1
+                usize::try_from(*root_generation).ok() == chain_object_ids.len().checked_sub(1)
                     && chain_object_ids.last() == Some(object_id)
             }
             Self::Roster { active_devices, .. } => active_devices
@@ -2909,6 +2913,7 @@ impl WitnessRow {
 pub fn validate_state_body(record_kind: u16, body: &[u8]) -> Result<(), StorageError> {
     match record_kind {
         ROUTE_ROW_KIND => RouteRow::decode(body).map(|_| ()),
+        initial_root::KIND => initial_root::InitialRootRow::decode(body).map(|_| ()),
         binding_admission::KIND => binding_admission::BindingAdmissionRow::decode(body).map(|_| ()),
         direct_renewal::KIND => direct_renewal::DirectRenewal::decode(body).map(|_| ()),
         CLAIM_ROW_KIND => ClaimRow::decode(body).map(|_| ()),

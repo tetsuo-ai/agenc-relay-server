@@ -3,13 +3,14 @@
 use std::error::Error;
 use std::fmt;
 
-use agenc_relay_types::{CAPABILITIES, Nickname};
+use agenc_relay_types::{INITIAL_ROOT_CAPABILITY, Nickname};
 use zeroize::Zeroize as _;
 
 use crate::{
-    CapError, CapRequestReply, CapabilityProfile, CapabilityState, ParsedMessage,
-    PostRegistrationCommandKind, RegistrationCapCommand, RegistrationCommand,
-    RegistrationGrammarError, TextCarrierError, parse_registration_command,
+    CapError, CapRequestReply, CapabilityProfile, CapabilityState, InitialRootCarrier,
+    ParsedMessage, PostRegistrationCommandKind, RegistrationCapCommand, RegistrationCommand,
+    RegistrationGrammarError, TextCarrierError, parse_initial_root_command,
+    parse_registration_command,
 };
 
 /// Registration deadline after TLS completion, in monotonic milliseconds.
@@ -107,6 +108,8 @@ pub enum RegistrationAuthCarrier {
     AccountCreate,
     /// Registered-session `ACCTCRED` transfer.
     AccountCredentials,
+    /// A negotiated guarded creation or private registered initial-root exchange.
+    InitialRoot(InitialRootCarrier),
 }
 
 /// The registered-session command class admitted at the wire boundary.
@@ -528,6 +531,7 @@ pub struct RegistrationState {
     token_generation: Option<u64>,
     commit_generation: Option<u64>,
     active_auth: Option<ActiveAuthCarrier>,
+    guarded_creation: bool,
     pass_seen: bool,
     access_token_accepted: bool,
     user_seen: bool,
@@ -558,6 +562,7 @@ impl RegistrationState {
             token_generation: None,
             commit_generation: None,
             active_auth: None,
+            guarded_creation: false,
             pass_seen: false,
             access_token_accepted: access_policy == AccessTokenPolicy::IgnoreCompatibilityPass,
             user_seen: false,
@@ -602,6 +607,7 @@ impl RegistrationState {
     /// NEW and DEL actions are observable only when `cap-notify` was enabled
     /// before the transition. Reconnect-only security changes are always
     /// returned to the connection owner.
+    // agenc-review: focus owner=client-wire reviewed=2026-11-25 reason=preserving the prior notification and guarded-transfer state across the same profile diff determines all withdrawal and reconnect actions
     pub fn apply_capability_profile(
         &mut self,
         current: &CapabilityProfile,
@@ -614,7 +620,14 @@ impl RegistrationState {
         }
         // Both profiles are duplicate-free subsets of the same closed registry,
         // so each registry name can produce at most one diff action.
-        let mut actions = action_buffer(CAPABILITIES.len())?;
+        let interrupted_creation =
+            self.guarded_creation && !current.contains("agenc.ag/account-create");
+        let uses_initial_root = self.guarded_creation
+            || self.active_auth.is_some_and(|active| {
+                matches!(active.carrier, RegistrationAuthCarrier::InitialRoot(_))
+            });
+        let interrupted_root = uses_initial_root && !current.contains(INITIAL_ROOT_CAPABILITY);
+        let mut actions = action_buffer(crate::capability::MAX_CAPABILITIES + 1)?;
         let cap_notify_enabled = self.cap.enabled("cap-notify");
         for change in self.cap.apply_profile(current)? {
             match change {
@@ -629,6 +642,11 @@ impl RegistrationState {
                 }
                 crate::CapabilityChange::New(_) | crate::CapabilityChange::Del(_) => {}
             }
+        }
+        if interrupted_creation || interrupted_root {
+            actions.push(RegistrationAction::CapabilityReconnectRequired(
+                copy_string(INITIAL_ROOT_CAPABILITY)?,
+            ));
         }
         Ok(actions)
     }
@@ -656,7 +674,7 @@ impl RegistrationState {
             let actions = one_action(RegistrationAction::NotRegistered)?;
             return Ok(actions);
         }
-        let command = parse_registration_command(&message, self.access_policy)?;
+        let command = self.registration_command_for_profile(&message, advertised)?;
         if command == RegistrationCommand::Quit {
             return self.begin_close(quit_reason(&message)?);
         }
@@ -664,6 +682,44 @@ impl RegistrationState {
             return self.registered_message(message, command, advertised);
         }
         self.negotiating_message(message, command, advertised)
+    }
+
+    // agenc-review: focus owner=client-wire reviewed=2026-11-25 reason=both the live offer and the acknowledged capability must match the same parsed carrier family before invoking its grammar
+    fn registration_command_for_profile(
+        &self,
+        message: &ParsedMessage,
+        advertised: &CapabilityProfile,
+    ) -> Result<RegistrationCommand, RegistrationError> {
+        let negotiated = self.cap.enabled(INITIAL_ROOT_CAPABILITY);
+        let initial_root = match message.command() {
+            "ACCTCREATE"
+                if self.guarded_creation
+                    || (negotiated
+                        && message.middle().first().is_some_and(|v| v == "CLAIMSTART")) =>
+            {
+                Some(InitialRootCarrier::GuardedCreation)
+            }
+            "ACCTROOT" if negotiated => Some(InitialRootCarrier::Claim),
+            _ => None,
+        };
+        match initial_root {
+            Some(carrier) => {
+                let current = |name| advertised.contains(name) && self.cap.enabled(name);
+                if !self.cap.supports_multiline()
+                    || !current(INITIAL_ROOT_CAPABILITY)
+                    || (carrier == InitialRootCarrier::GuardedCreation
+                        && !current("agenc.ag/account-create"))
+                {
+                    return Err(RegistrationError::AuthenticationUnavailable);
+                }
+                Ok(RegistrationCommand::InitialRoot(
+                    carrier,
+                    parse_initial_root_command(message, carrier)?,
+                ))
+            }
+            None => parse_registration_command(message, self.access_policy)
+                .map_err(RegistrationError::from),
+        }
     }
 
     fn defer_input(
@@ -911,7 +967,14 @@ impl RegistrationState {
             RegistrationCommand::AccountCreate(_) => {
                 self.auth_message(RegistrationAuthCarrier::AccountCreate, message)
             }
-            RegistrationCommand::AccountCredentials(_)
+            RegistrationCommand::InitialRoot(carrier @ InitialRootCarrier::GuardedCreation, _) => {
+                let actions =
+                    self.auth_message(RegistrationAuthCarrier::InitialRoot(carrier), message)?;
+                self.guarded_creation = true;
+                Ok(actions)
+            }
+            RegistrationCommand::InitialRoot(InitialRootCarrier::Claim, _)
+            | RegistrationCommand::AccountCredentials(_)
             | RegistrationCommand::PostRegistration(_) => {
                 one_action(RegistrationAction::NotRegistered)
             }
@@ -943,7 +1006,11 @@ impl RegistrationState {
             RegistrationCommand::AccountCredentials(_) => {
                 self.auth_message(RegistrationAuthCarrier::AccountCredentials, message)
             }
-            RegistrationCommand::AccountCreate(_) => Err(RegistrationError::InvalidCommand),
+            RegistrationCommand::InitialRoot(carrier @ InitialRootCarrier::Claim, _) => {
+                self.auth_message(RegistrationAuthCarrier::InitialRoot(carrier), message)
+            }
+            RegistrationCommand::InitialRoot(InitialRootCarrier::GuardedCreation, _)
+            | RegistrationCommand::AccountCreate(_) => Err(RegistrationError::InvalidCommand),
             RegistrationCommand::Nick => one_action(RegistrationAction::ForwardRegisteredCommand(
                 RegisteredCommandHandoff::new(RegisteredCommandKind::Nickname, message),
             )),
@@ -1020,8 +1087,11 @@ impl RegistrationState {
             RegistrationAuthCarrier::Sasl => "sasl",
             RegistrationAuthCarrier::AccountCreate => "agenc.ag/account-create",
             RegistrationAuthCarrier::AccountCredentials => "agenc.ag/account-credentials",
+            RegistrationAuthCarrier::InitialRoot(_) => INITIAL_ROOT_CAPABILITY,
         };
-        if !self.cap.enabled(required_capability)
+        if carrier == RegistrationAuthCarrier::InitialRoot(InitialRootCarrier::GuardedCreation)
+            && !self.cap.enabled("agenc.ag/account-create")
+            || !self.cap.enabled(required_capability)
             || (self.phase == RegistrationPhase::Negotiating && !self.cap.blocks_registration())
         {
             return Err(RegistrationError::AuthenticationUnavailable);
@@ -1081,9 +1151,14 @@ impl RegistrationState {
         let request = message
             .trailing()
             .ok_or(RegistrationError::InvalidCommand)?;
-        if self
-            .active_auth
-            .is_some_and(|active| request_disables_carrier(request, active.carrier))
+        if self.guarded_creation
+            && request_disables_carrier(
+                request,
+                RegistrationAuthCarrier::InitialRoot(InitialRootCarrier::GuardedCreation),
+            )
+            || self
+                .active_auth
+                .is_some_and(|active| request_disables_carrier(request, active.carrier))
         {
             return Err(RegistrationError::AuthenticationInProgress);
         }
@@ -1429,10 +1504,14 @@ fn request_disables_carrier(request: &str, carrier: RegistrationAuthCarrier) -> 
         RegistrationAuthCarrier::Sasl => "sasl",
         RegistrationAuthCarrier::AccountCreate => "agenc.ag/account-create",
         RegistrationAuthCarrier::AccountCredentials => "agenc.ag/account-credentials",
+        RegistrationAuthCarrier::InitialRoot(_) => INITIAL_ROOT_CAPABILITY,
     };
-    request
-        .split_ascii_whitespace()
-        .any(|token| token.strip_prefix('-') == Some(capability))
+    request.split_ascii_whitespace().any(|token| {
+        token.strip_prefix('-') == Some(capability)
+            || (carrier
+                == RegistrationAuthCarrier::InitialRoot(InitialRootCarrier::GuardedCreation)
+                && token == "-agenc.ag/account-create")
+    })
 }
 
 fn copy_string(value: &str) -> Result<String, RegistrationError> {

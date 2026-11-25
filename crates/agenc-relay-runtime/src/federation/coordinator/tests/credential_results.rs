@@ -202,7 +202,14 @@ fn prepare(fixture: &mut StateCoreFixture) -> TestResult<(RequestHeader, u64)> {
     let revision = plan.resulting_revision().get();
     let origin = super::super::origin::origin_row(&coordinator, fresh.key.origin, 1, revision)
         .map_err(|error| format!("origin: {error:?}"))?;
-    context.bind_remote_account_result(OWNER, fresh.header, fresh.request_object_id, origin);
+    context.bind_remote_account_result(
+        OWNER,
+        fresh.header,
+        fresh.extension,
+        fresh.request_object_id,
+        origin,
+        None,
+    );
     let writes = context.remote_account_result_writes(
         OWNER,
         revision,

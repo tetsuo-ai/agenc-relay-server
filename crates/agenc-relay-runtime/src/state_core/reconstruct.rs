@@ -7,10 +7,12 @@
 //! blocking reads and belongs on a blocking thread, never a Tokio worker
 //! (spec line 4242).
 
+mod initial_root;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use agenc_relay_auth::{
-    AuthenticationGrantRecord, AuthenticationTransactionRecord, CreationTransactionRecord,
+    AuthenticationGrantRecord, AuthenticationTransactionRecord, CreationTransactionRestartMetadata,
     CredentialChangeTransactionRecord, OPAQUE_REGISTRATION_RECORD_BYTES, OpaqueRegistrationRecord,
 };
 use agenc_relay_config::NodeRole;
@@ -417,6 +419,7 @@ fn recover_creation_invitation(
 #[derive(Default)]
 struct Scan {
     index: DurableIndex,
+    directory_totals: BTreeMap<[u8; 32], u64>,
     accounts: BTreeMap<AccountId, DurableAccount>,
     account_keys: BTreeMap<StoredKey, AccountId>,
     sessions: BTreeMap<SessionId, DurableSession>,
@@ -430,7 +433,9 @@ struct Scan {
 
 /// Reads every reconstructed table and restores the domain state. `role` is
 /// the configured node role; it decides which account-service rows the
-/// database must hold.
+/// database must hold. This entry point preserves the pre-guarded format's
+/// behavior. Use [`reconstruct_with_budget`] for a database that may contain
+/// guarded accounts. Their retained state requires a real process reservation.
 pub fn reconstruct(
     seed: &StateCoreSeed,
     port: &StoragePort,
@@ -439,34 +444,71 @@ pub fn reconstruct(
     monotonic_now: MonotonicTick,
     utc_now: UtcSecond,
 ) -> Result<Reconstruction, RuntimeError> {
-    let mut scan = Scan::default();
-    scan.index.companion_disk = seed.storage().companion_disk_accounting();
-    for table in RECONSTRUCTED_TABLES {
-        scan_table(port, table, |key, sealed| {
-            scan.admit(keys, table, key, &sealed)
-        })?;
+    DurableIndex::new().reconstruct(seed, port, keys, role, monotonic_now, utc_now)
+}
+
+/// Reconstructs all supported account formats against the caller's shared process
+/// budget. The resulting index retains one reservation per live guarded account;
+/// insufficient capacity refuses reconstruction before a listener can open.
+pub fn reconstruct_with_budget(
+    seed: &StateCoreSeed,
+    port: &StoragePort,
+    keys: &KeyDeriver,
+    role: NodeRole,
+    monotonic_now: MonotonicTick,
+    utc_now: UtcSecond,
+    budget: &crate::sync::Arc<crate::budget::MemoryBudget>,
+) -> Result<Reconstruction, RuntimeError> {
+    DurableIndex::new()
+        .with_initial_root_budget(budget)
+        .reconstruct(seed, port, keys, role, monotonic_now, utc_now)
+}
+
+impl DurableIndex {
+    /// Restores using the index's configured retained-resource backing.
+    pub(crate) fn reconstruct(
+        self,
+        seed: &StateCoreSeed,
+        port: &StoragePort,
+        keys: &KeyDeriver,
+        role: NodeRole,
+        monotonic_now: MonotonicTick,
+        utc_now: UtcSecond,
+    ) -> Result<Reconstruction, RuntimeError> {
+        let mut scan = Scan {
+            index: self,
+            ..Scan::default()
+        };
+        scan.index.companion_disk = seed.storage().companion_disk_accounting();
+        for table in RECONSTRUCTED_TABLES {
+            scan_table(port, table, |key, sealed| {
+                scan.admit(keys, table, key, &sealed)
+            })?;
+        }
+        scan.check_initial_roots(keys, port)?;
+        scan.check_guarded_directory(keys, port)?;
+        scan.bind_nicknames(keys)?;
+        scan.bind_channel_names(keys)?;
+        let account_service = scan.account_service.finish(role)?;
+        let revision = Revision::new(seed.storage().state_generation())
+            .map_err(|_| RuntimeError::InvalidValue)?;
+        let domain = DomainState::restore_authoritative(
+            revision,
+            scan.accounts.into_values().collect(),
+            scan.sessions.into_values().collect(),
+            scan.channels.into_values().collect(),
+            scan.sanctions,
+            monotonic_now,
+            utc_now,
+        )
+        .map_err(|_| RuntimeError::Storage(StorageError::StaleState))?;
+        Ok(Reconstruction {
+            domain,
+            index: scan.index,
+            head: HeadCounters::from_recovered(seed.storage()),
+            account_service,
+        })
     }
-    scan.bind_nicknames(keys)?;
-    scan.bind_channel_names(keys)?;
-    let account_service = scan.account_service.finish(role)?;
-    let revision =
-        Revision::new(seed.storage().state_generation()).map_err(|_| RuntimeError::InvalidValue)?;
-    let domain = DomainState::restore_authoritative(
-        revision,
-        scan.accounts.into_values().collect(),
-        scan.sessions.into_values().collect(),
-        scan.channels.into_values().collect(),
-        scan.sanctions,
-        monotonic_now,
-        utc_now,
-    )
-    .map_err(|_| RuntimeError::Storage(StorageError::StaleState))?;
-    Ok(Reconstruction {
-        domain,
-        index: scan.index,
-        head: HeadCounters::from_recovered(seed.storage()),
-        account_service,
-    })
 }
 
 /// Visits every row of one table in key order through bounded pages.
@@ -539,6 +581,7 @@ fn validate_creation_transaction_reference(
 
 impl Scan {
     /// Records one row's identity and decodes its live body.
+    // agenc-review: focus owner=runtime reviewed=2026-11-25 reason=role and table-specific startup checks must complete before exposing one authenticated row to the reconstructed index
     fn admit(
         &mut self,
         keys: &KeyDeriver,
@@ -575,11 +618,26 @@ impl Scan {
         }
         let value = PersistentRecordValue::decode(table, opened.expose_for_storage_codec())?;
         self.index.record_known(table, key.clone(), existing);
+        if table == TableId::E2eeState {
+            self.admit_initial_root_row(keys, &key, &value)?;
+            self.index.restore_directory_row(
+                &key,
+                &value,
+                sealed.len(),
+                &mut self.directory_totals,
+            )?;
+        }
+        if table == TableId::RequestResult {
+            self.index.restore_claim_replay(&key, &value)?;
+            self.index.restore_federated_claim(&key, &value)?;
+        }
         match (table, value.record_kind()) {
             (TableId::Account, TOMBSTONE_RECORD_KIND) => self.admit_account_tombstone(&key, &value),
             (TableId::Session, TOMBSTONE_RECORD_KIND) => self.admit_session_tombstone(&key, &value),
             (TableId::Channel, TOMBSTONE_RECORD_KIND) => self.admit_channel_tombstone(&key, &value),
-            (TableId::Account, LIVE_RECORD_KIND) => self.admit_account(key, &value),
+            (TableId::Account, LIVE_RECORD_KIND) => {
+                self.admit_account(keys.binding().network_id(), key, &value)
+            }
             (TableId::Session, LIVE_RECORD_KIND) => self.admit_session(key, &value),
             (TableId::Channel, LIVE_RECORD_KIND) => self.admit_channel(key, &value),
             (TableId::NicknameReservation, LIVE_RECORD_KIND) => {
@@ -616,6 +674,34 @@ impl Scan {
             ) => Ok(()),
             _ => Err(RuntimeError::Storage(StorageError::InvalidEncoding)),
         }
+    }
+
+    fn admit_initial_root_row(
+        &mut self,
+        keys: &KeyDeriver,
+        key: &StoredKey,
+        value: &PersistentRecordValue,
+    ) -> Result<(), RuntimeError> {
+        use agenc_relay_storage::e2ee_records::initial_root::{
+            InitialRootRow, KIND, is_reserved_key,
+        };
+        if !is_reserved_key(key) && value.record_kind() != KIND {
+            return Ok(());
+        }
+        if let InitialRootRow::Owner(owner) = InitialRootRow::check_record(key, value)? {
+            if owner.network != keys.binding().network_id()
+                || !self.accounts.get(&owner.account).is_some_and(|a| {
+                    a.genesis_policy == agenc_relay_domain::AccountGenesisPolicy::Guarded
+                })
+                || self.index.initial_root_owners.contains_key(&owner.account)
+            {
+                return Err(RuntimeError::Storage(StorageError::StaleState));
+            }
+            self.index
+                .initial_root_owners
+                .insert(owner.account, self.index.back_root_owner(owner)?);
+        }
+        Ok(())
     }
 
     fn admit_channel_tombstone(
@@ -804,8 +890,7 @@ impl Scan {
         value: &PersistentRecordValue,
         keyed_transaction: TransactionId,
     ) -> Result<RecoveredTransaction, RuntimeError> {
-        let metadata = CreationTransactionRecord::parse(value.body())
-            .and_then(CreationTransactionRecord::into_restart_cleanup_metadata)
+        let metadata = CreationTransactionRestartMetadata::parse(value.body())
             .map_err(|_| invalid_account_service_record())?;
         if metadata.transaction_id() != keyed_transaction
             || value.expires_at() != Some(metadata.durable_expires_at_utc().get())
@@ -997,10 +1082,15 @@ impl Scan {
 
     fn admit_account(
         &mut self,
+        network: agenc_relay_types::NetworkId,
         key: StoredKey,
         value: &PersistentRecordValue,
     ) -> Result<(), RuntimeError> {
         let account = AccountRecordBody::decode(value.body())?;
+        if account.genesis_policy == agenc_relay_domain::AccountGenesisPolicy::Guarded {
+            self.index
+                .restore_guarded_account(network, account.account_id)?;
+        }
         if KeyDeriver::account_key(account.account_id)? != key
             || account.session_generation.get() != value.generation()
             || account.revision.get() != value.revision()
@@ -1564,6 +1654,7 @@ mod tests {
             session_generation: Generation::new(1).map_err(|_| RuntimeError::InvalidValue)?,
             revision: Revision::new(1).map_err(|_| RuntimeError::InvalidValue)?,
             admin_suspension_expires_at: None,
+            genesis_policy: agenc_relay_domain::AccountGenesisPolicy::Legacy,
         })
     }
 

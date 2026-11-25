@@ -10,6 +10,11 @@ impl PendingCommit {
     pub(super) fn staged_after(&self) -> Option<u64> {
         match self {
             Self::Request { staged_after, .. } => Some(*staged_after),
+            Self::OriginExpired { terminal, .. }
+            | Self::OriginAck {
+                terminal: Some(terminal),
+                ..
+            } => Some(terminal.staged_after),
             Self::ResumeAcknowledged(receipt) => Some(receipt.staged_after),
             Self::CompanionRestore(receipt) => Some(receipt.staged_after),
             Self::CompanionReplayMaintenance(receipt) => Some(receipt.staged_after),

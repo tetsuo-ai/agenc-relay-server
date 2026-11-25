@@ -1,5 +1,13 @@
 //! Complete coordinator-side account protocol state machines.
 
+mod guarded_creation;
+use guarded_creation::CreationOrigin;
+pub use guarded_creation::{
+    CreatedRootClaim, GuardedAccountStart, GuardedCreationChallenge,
+    GuardedCreationTransactionRecord, begin_guarded_account_creation,
+    prepare_guarded_account_creation,
+};
+
 use agenc_relay_crypto::{
     AccountHpkeKeyId, AccountRequestBinding, Ed25519PublicKey, LoginIndexDigest, LoginIndexKey,
     OpaqueFakeCredentialKey, OsEntropy, derive_fake_credential_id, derive_login_index,
@@ -422,7 +430,7 @@ impl StartDisposition {
 ///
 /// This state is not a storage reservation or account-creation authority.
 pub struct AccountCreationState {
-    start_request_binding: AccountRequestBinding,
+    origin: CreationOrigin,
     disposition: StartDisposition,
     login_digest: LoginIndexDigest,
     credential_id: OpaqueCredentialId,
@@ -438,11 +446,11 @@ struct ValidatedInvitation {
 }
 
 /// Complete coordinator inputs for one account-creation START.
-pub struct AccountCreationStartParameters {
+pub struct AccountCreationStartParameters<R = AuthenticatedAccountRequest<CreationStart>> {
     /// Complete route identity and clock binding.
     pub context: AccountOperationContext,
     /// Fully opened creation request with its authenticated response authority.
-    pub request: AuthenticatedAccountRequest<CreationStart>,
+    pub request: R,
     /// Deployment invitation decision and proof.
     pub admission: CreationAdmission,
     /// Storage result proving no live, reserved, or tombstoned login conflict.
@@ -459,9 +467,16 @@ pub struct CreateAccountIntent {
     credential_id: OpaqueCredentialId,
     record: OpaqueRegistrationRecord,
     invitation: Option<ValidatedInvitation>,
+    initial_root_claim: Option<CreatedRootClaim>,
 }
 
 impl CreateAccountIntent {
+    /// The permanent prospective reservation to insert atomically with this new account, when opted in.
+    #[must_use]
+    pub const fn initial_root_claim(&self) -> Option<&CreatedRootClaim> {
+        self.initial_root_claim.as_ref()
+    }
+
     /// Returns the new immutable account authority.
     #[must_use]
     pub const fn account_id(&self) -> AccountId {
@@ -539,8 +554,55 @@ fn begin_account_creation_with_entropy(
         login_is_available,
         invitation_is_available,
     } = parameters;
-    let (request, response_lineage) = request.into_parts();
-    let start_request_binding = response_lineage.binding();
+    let (request, lineage) = request.into_parts();
+    let inputs = AccountCreationStartParameters {
+        context,
+        request,
+        admission,
+        login_is_available,
+        invitation_is_available,
+    };
+    let (transaction, credential_id, response) = prepare_creation(
+        profile,
+        login_index_key,
+        inputs,
+        CreationOrigin::Legacy(lineage.binding()),
+        entropy,
+    )?;
+    let transaction_id = transaction.binding().transaction_id();
+    let response = AccountResponsePlan::new(
+        lineage,
+        transaction_id,
+        AccountServiceResponsePayload::CreationChallenge {
+            transaction_id,
+            credential_id,
+            response,
+        },
+    )?;
+    AccountStartOutcome::new(transaction, response)
+}
+
+fn prepare_creation(
+    profile: &OpaqueProfile,
+    login_index_key: &LoginIndexKey,
+    parameters: AccountCreationStartParameters<CreationStart>,
+    origin: CreationOrigin,
+    entropy: &mut impl EntropySource,
+) -> Result<
+    (
+        AccountTransaction<AccountCreationState>,
+        OpaqueCredentialId,
+        crate::OpaqueRegistrationResponse,
+    ),
+    AuthError,
+> {
+    let AccountCreationStartParameters {
+        context,
+        request,
+        admission,
+        login_is_available,
+        invitation_is_available,
+    } = parameters;
     if request.network_id != context.network_id {
         return Err(AuthError::ContextMismatch);
     }
@@ -560,25 +622,21 @@ fn begin_account_creation_with_entropy(
     let transaction_id = fresh_transaction_id(entropy)?;
     let credential_id = fresh_opaque_credential_id(entropy)?;
     let response = profile.registration_start(&credential_id, &request.registration_request)?;
-    let challenge_credential = duplicate_credential_id(&credential_id);
+
     let binding = context.binding(transaction_id, TransactionClass::AccountCreation)?;
+    let challenge_credential = duplicate_credential_id(&credential_id);
     let state = AccountCreationState {
-        start_request_binding,
+        origin,
         disposition,
         login_digest,
         credential_id,
         invitation,
     };
-    let response = AccountResponsePlan::new(
-        response_lineage,
-        transaction_id,
-        AccountServiceResponsePayload::CreationChallenge {
-            transaction_id,
-            credential_id: challenge_credential,
-            response,
-        },
-    )?;
-    AccountStartOutcome::new(AccountTransaction::new(binding, state), response)
+    Ok((
+        AccountTransaction::new(binding, state),
+        challenge_credential,
+        response,
+    ))
 }
 
 fn evaluate_creation_admission(
@@ -671,7 +729,7 @@ fn finish_account_creation_with_entropy(
     };
     if finish.network_id != context.network_id
         || finish.transaction_id != expected_transaction
-        || validate_finish_lineage(state.start_request_binding, finish_request_binding).is_err()
+        || !state.origin.accepts(finish_request_binding)
     {
         let response = rejected_creation_response(response_lineage, claimed_transaction)?;
         return Ok(AccountFinishOutcome::rejected(
@@ -705,6 +763,7 @@ fn finish_account_creation_with_entropy(
         credential_id: state.credential_id,
         record: finish.registration_record,
         invitation: state.invitation,
+        initial_root_claim: state.origin.complete(account_id),
     };
     let response = AccountResponsePlan::new(
         response_lineage,
@@ -987,6 +1046,20 @@ pub struct CreationTransactionRestartMetadata {
 }
 
 impl CreationTransactionRestartMetadata {
+    /// Reads the authenticated transaction version and returns only cleanup facts.
+    /// A previous connection cannot regain its live START or its account-creation authority.
+    pub fn parse(bytes: &[u8]) -> Result<Self, AuthError> {
+        match bytes.get(..2) {
+            Some([0, 1]) => {
+                CreationTransactionRecord::parse(bytes)?.into_restart_cleanup_metadata()
+            }
+            Some([0, 2]) => {
+                GuardedCreationTransactionRecord::parse(bytes)?.into_restart_cleanup_metadata()
+            }
+            _ => Err(AuthError::InvalidEncoding),
+        }
+    }
+
     /// Returns the connection-bound transaction that owns the durable row.
     #[must_use]
     pub const fn transaction_id(&self) -> TransactionId {
@@ -1032,7 +1105,10 @@ impl CreationTransactionRecord {
             CREATION_TRANSACTION_CLASS,
             durable_expires_at,
         )?;
-        put_request_binding(&mut writer, state.start_request_binding)?;
+        let CreationOrigin::Legacy(start) = &state.origin else {
+            return Err(AuthError::ContextMismatch);
+        };
+        put_request_binding(&mut writer, *start)?;
         put_start_disposition(&mut writer, state.disposition)?;
         writer.put(state.login_digest.expose_for_storage_key())?;
         writer.put(state.credential_id.expose_for_account_service())?;
@@ -1128,7 +1204,7 @@ impl CreationTransactionRecord {
         Ok(AccountTransaction::new(
             binding,
             AccountCreationState {
-                start_request_binding,
+                origin: CreationOrigin::Legacy(start_request_binding),
                 disposition,
                 login_digest,
                 credential_id,
@@ -1551,26 +1627,31 @@ fn read_route(
     ))
 }
 
-fn put_request_binding(
+fn put_request_binding<K: agenc_relay_crypto::AccountHpkeExchange>(
     writer: &mut AuthenticationRecordWriter<'_>,
-    binding: AccountRequestBinding,
+    binding: AccountRequestBinding<K>,
 ) -> Result<(), AuthError> {
     writer.put(binding.network_id().as_bytes())?;
     writer.put(binding.recovery_epoch().as_bytes())?;
     writer.put(binding.recipient_key_id().as_bytes())?;
     writer.put(binding.client_request_id().as_bytes())?;
-    writer.put_u16(binding.message_kind().wire_value())
+    writer.put_u16(binding.message_kind().request_tag())
 }
 
 fn read_request_binding(
     reader: &mut AuthenticationRecordReader<'_>,
 ) -> Result<AccountRequestBinding, AuthError> {
+    read_request_binding_profile(reader)
+}
+
+fn read_request_binding_profile<K: agenc_relay_crypto::AccountHpkeExchange>(
+    reader: &mut AuthenticationRecordReader<'_>,
+) -> Result<AccountRequestBinding<K>, AuthError> {
     let network_id = NetworkId::from_bytes(reader.read_array()?);
     let recovery_epoch = RecoveryEpoch::from_bytes(reader.read_array()?);
     let recipient_key_id = AccountHpkeKeyId::from_bytes(reader.read_array()?);
     let client_request_id = RequestId::from_bytes(reader.read_array()?);
-    let message_kind = AccountServiceMessageKind::from_wire(reader.read_u16()?)
-        .map_err(|_| AuthError::InvalidEncoding)?;
+    let message_kind = K::request_from_tag(reader.read_u16()?).ok_or(AuthError::InvalidEncoding)?;
     Ok(AccountRequestBinding::new(
         network_id,
         recovery_epoch,
@@ -2905,6 +2986,7 @@ mod tests {
         UtcSecond,
     };
 
+    use super::CreationOrigin;
     use super::{
         AUTHENTICATION_GRANT_RECORD_BYTES, AUTHENTICATION_TRANSACTION_RECORD_BYTES,
         AccountAuthenticationState, AccountCreationStartParameters, AccountCreationState,
@@ -3776,7 +3858,7 @@ mod tests {
         let transaction = AccountTransaction::new(
             binding,
             AccountCreationState {
-                start_request_binding,
+                origin: CreationOrigin::Legacy(start_request_binding),
                 disposition: StartDisposition::RejectAtFinish(AuthError::InvitationRejected),
                 login_digest: LoginIndexDigest::from_storage_key(login_digest),
                 credential_id: OpaqueCredentialId::from_bytes(credential_id),
@@ -3826,7 +3908,9 @@ mod tests {
             MonotonicTick::from_ticks(60_000)
         );
         let state = restored.state_ref().ok_or(AuthError::Consumed)?;
-        assert_eq!(state.start_request_binding, start_request_binding);
+        assert!(
+            matches!(&state.origin, CreationOrigin::Legacy(binding) if *binding == start_request_binding)
+        );
         assert!(matches!(
             state.disposition,
             StartDisposition::RejectAtFinish(AuthError::InvitationRejected)
@@ -3977,13 +4061,13 @@ mod tests {
         let transaction = AccountTransaction::new(
             binding,
             AccountCreationState {
-                start_request_binding: AccountRequestBinding::new(
+                origin: CreationOrigin::Legacy(AccountRequestBinding::new(
                     operation.network_id,
                     TEST_RECOVERY_EPOCH,
                     private_key.public_key()?.key_id(),
                     RequestId::from_bytes([82_u8; 16]),
                     AccountServiceMessageKind::AccountCreateStart,
-                ),
+                )),
                 disposition: StartDisposition::SuccessCandidate,
                 login_digest: LoginIndexDigest::from_storage_key([83_u8; 32]),
                 credential_id: OpaqueCredentialId::from_bytes([84_u8; 32]),

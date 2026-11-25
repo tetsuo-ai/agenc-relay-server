@@ -27,7 +27,8 @@ use agenc_relay_config::{NodeRole, PeerConfig};
 use agenc_relay_crypto::{Ed25519PublicKey, Ed25519SecretKey};
 use agenc_relay_federation_wire::{
     AssembledObject, AssemblyError, EpochTransition, EventDescriptor, FederationFrame,
-    FederationFrameKind, FederationHash32, OperationDescriptor, OriginDescriptor,
+    FederationFrameKind, FederationHash32, FederationProfile, OperationDescriptor,
+    OriginDescriptor,
 };
 use agenc_relay_types::{
     FederationRole, NetworkId, RecoveryEpoch, ServerId, ServerIncarnation, ServerName,
@@ -196,6 +197,7 @@ pub struct PeerIdentity {
     server_name: String,
     role: FederationRole,
     recovery_epoch_pin: RecoveryEpoch,
+    profile: FederationProfile,
     signing_key: Ed25519PublicKey,
     certificate_spki_sha256: [u8; 32],
 }
@@ -212,6 +214,11 @@ impl PeerIdentity {
             server_name: peer.server_name.as_str().to_owned(),
             role,
             recovery_epoch_pin: peer.recovery_epoch,
+            profile: if peer.initial_root_profile {
+                FederationProfile::InitialRoot
+            } else {
+                FederationProfile::Base
+            },
             signing_key: Ed25519PublicKey::from_bytes(peer.signing_public_key)
                 .map_err(|_| RuntimeError::InvalidValue)?,
             certificate_spki_sha256: peer.certificate_spki_sha256,
@@ -233,9 +240,23 @@ impl PeerIdentity {
             server_name: server_name.to_owned(),
             role,
             recovery_epoch_pin,
+            profile: FederationProfile::Base,
             signing_key,
             certificate_spki_sha256,
         }
+    }
+
+    /// Explicitly selects the single authenticated grammar required from this peer.
+    #[must_use]
+    pub fn with_profile(mut self, profile: FederationProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// Returns the profile required before accepting this peer's origin traffic.
+    #[must_use]
+    pub const fn profile(&self) -> FederationProfile {
+        self.profile
     }
 
     /// Returns the peer Server ID.

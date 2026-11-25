@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use agenc_relay_crypto::{Ed25519Signature, SignatureDomain, sign_canonical, verify_canonical};
 use agenc_relay_federation_wire::{
-    BASE_FEDERATION_PROFILE_SHA256, EpochRejection, EpochTransition, FederationFrame,
-    FederationHello, HelloExpectation, HelloRejection, HelloTbs, PeerContinuity,
-    classify_epoch_transition, verify_hello_tuple,
+    EpochRejection, EpochTransition, FederationFrame, FederationHello, FederationProfile,
+    HelloExpectation, HelloRejection, HelloTbs, PeerContinuity, classify_epoch_transition,
+    verify_hello_tuple,
 };
 use agenc_relay_types::{EntropySource, FHELLO_TIMEOUT_SECONDS, RecoveryEpoch, ServerIncarnation};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -81,6 +81,8 @@ impl From<ReadFailure> for HelloFailure {
 /// The authenticated facts learned from a completed exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HelloOutcome {
+    /// The link profile authenticated by both peers before origin admission.
+    pub profile: FederationProfile,
     /// The peer's incarnation.
     pub peer_incarnation: ServerIncarnation,
     /// The peer's recovery epoch.
@@ -117,10 +119,13 @@ pub fn build_hello(
         recovery_epoch: local.recovery_epoch(),
         role: local.role(),
         hello_nonce: nonce,
-        profile_hash: BASE_FEDERATION_PROFILE_SHA256,
+        profile_hash: peer.profile().hash(),
         tls_exporter: exporter,
     };
-    let encoded = tbs.encode().map_err(|_| HelloFailure::Local)?;
+    let encoded = peer
+        .profile()
+        .hello_tbs(&tbs)
+        .map_err(|_| HelloFailure::Local)?;
     let signature = sign_canonical(
         local.signing_key(),
         SignatureDomain::FederationHello,
@@ -141,7 +146,10 @@ pub fn verify_hello(
     exporter: [u8; 32],
     history: PeerHistory<'_>,
 ) -> Result<EpochTransition, HelloFailure> {
-    let encoded = hello.tbs.encode().map_err(|_| HelloFailure::Local)?;
+    let encoded = peer
+        .profile()
+        .hello_tbs(&hello.tbs)
+        .map_err(|_| HelloFailure::Local)?;
     verify_canonical(
         peer.signing_key(),
         SignatureDomain::FederationHello,
@@ -156,7 +164,7 @@ pub fn verify_hello(
         peer_server_id: peer.server_id(),
         pinned_recovery_epoch: peer.recovery_epoch_pin(),
         tls_exporter: exporter,
-        profile_hash: BASE_FEDERATION_PROFILE_SHA256,
+        profile_hash: peer.profile().hash(),
     };
     verify_hello_tuple(&hello.tbs, &expectation, true).map_err(HelloFailure::Tuple)?;
     classify_epoch_transition(
@@ -180,6 +188,7 @@ pub async fn exchange_hello<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    reader.select_profile(peer.profile());
     let mut local_nonce = [0_u8; 32];
     entropy
         .fill_exact(&mut local_nonce)
@@ -189,7 +198,7 @@ where
         peer_server_id: peer.server_id(),
         hello,
     }
-    .render(local.server_name())
+    .render_for_profile(local.server_name(), peer.profile())
     .map_err(|_| HelloFailure::Local)?;
     write_line(reader.stream_mut(), &line)
         .await
@@ -222,6 +231,7 @@ where
                     .await
                     .map_err(|_| HelloFailure::Transport)?;
                 let outcome = HelloOutcome {
+                    profile: peer.profile(),
                     peer_incarnation: hello.tbs.server_incarnation,
                     peer_recovery_epoch: hello.tbs.recovery_epoch,
                     transition,

@@ -23,6 +23,26 @@ fn failed_code(harness: &mut Harness) -> TestResult<String> {
     let mut fixture = crate::test_support::StateCoreFixture::new(vec![0; 65_536])?;
     let context = fixture.context_mut()?;
     context.set_wall_for_test(super::super::NOW);
+    let account = agenc_relay_types::AccountId::parse_wire_bytes(
+        harness.principal.root.tbs.account_id.as_slice(),
+    )?;
+    let generation = agenc_relay_types::Generation::new(1)?;
+    let account_plan =
+        context
+            .domain()
+            .plan_account_created(agenc_relay_domain::AccountState::new(
+                account,
+                generation,
+                context.domain().revision(),
+            ))?;
+    crate::test_support::apply_live_plan(context, account_plan)?;
+    let mut registered =
+        crate::test_support::remote_session_seed(context, ServerId::from_bytes(HOME), "publisher")?;
+    registered.account_id = Some(account);
+    registered.account_session_generation = generation;
+    let user = registered.user_id;
+    let session_plan = context.domain().plan_session_opened(registered)?;
+    crate::test_support::apply_live_plan(context, session_plan)?;
     let view = BaseView {
         context,
         peers: vec![ServerId::from_bytes(HOME)],
@@ -34,7 +54,9 @@ fn failed_code(harness: &mut Harness) -> TestResult<String> {
         LinkId::new(1),
         ServerId::from_bytes(HOME),
         complete,
-        &|_| OriginFacts::default(),
+        &|_| OriginFacts {
+            user_id: Some(user),
+        },
     )
     .map_err(|code| format!("the request was not answered: {code:?}"))?;
     assert!(matches!(staged, Staged::Batch));
