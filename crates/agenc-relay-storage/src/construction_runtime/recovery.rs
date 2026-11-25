@@ -50,7 +50,7 @@ pub(super) fn decode_e2ee_restore(
     check_state_key(key, state.record_kind())?;
     match state.record_kind() {
         crate::e2ee_records::initial_root::KIND => {
-            crate::e2ee_records::initial_root::InitialRootRow::decode_keyed(key, state.body())?;
+            crate::e2ee_records::initial_root::InitialRootRow::check_record(key, &state)?;
         }
         ROUTE_ROW_KIND => validate_route_key(key, state.body())?,
         RECOVERY_GATE_KIND => {

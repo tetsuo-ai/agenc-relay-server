@@ -327,14 +327,17 @@ fn compose_test_state(
     )?;
     // The fixture database is seeded like a coordinator's, fake OPAQUE
     // record included, so it reconstructs under the stricter role.
-    let reconstruction = reconstruct(
-        &seed,
-        &owner.port(),
-        &keys,
-        NodeRole::Coordinator,
-        MonotonicTick::from_ticks(10),
-        UtcSecond::from_unix_seconds(1_000),
-    )?;
+    let budget = Arc::new(MemoryBudget::new(512 * 1_024 * 1_024));
+    let reconstruction = crate::state_core::durable::DurableIndex::new()
+        .with_initial_root_budget(&budget)
+        .reconstruct(
+            &seed,
+            &owner.port(),
+            &keys,
+            NodeRole::Coordinator,
+            MonotonicTick::from_ticks(10),
+            UtcSecond::from_unix_seconds(1_000),
+        )?;
     let (storage_bridge, storage_completions, storage_reads, storage_checkpoints) =
         StorageBridge::start(owner.port())?;
     let (crypto_bridge, crypto_completions) =
@@ -364,7 +367,7 @@ fn compose_test_state(
         keys,
         bridge: storage_bridge,
         crypto: crypto_bridge,
-        budget: Arc::new(MemoryBudget::new(512 * 1_024 * 1_024)),
+        budget,
         liveness: Arc::new(Liveness::new()),
         // The actor loop gathers durable batches against monotonic time, so a
         // frozen clock would never submit them; the synchronous fixture keeps

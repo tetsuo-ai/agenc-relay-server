@@ -88,7 +88,21 @@ fn initial_root_format_rejects_unclassified_rows_and_unauthorized_field_combinat
     )?;
     let generated =
         PersistentRecordValue::new(TableId::E2eeState, KIND, 3, 1, None, Vec::new(), body)?;
-    for invalid in [expires, generated] {
+    let reference = crate::RecordReference::new(
+        TableId::Account,
+        StoredKey::new(row.account.to_text().into_bytes())?,
+    )?;
+    let referenced = PersistentRecordValue::new(
+        TableId::E2eeState,
+        KIND,
+        3,
+        0,
+        None,
+        vec![reference],
+        row.encode()?,
+    )?;
+    for invalid in [expires, generated, referenced] {
+        assert!(InitialRootRow::check_record(&key, &invalid).is_err());
         assert!(
             validate_record_plaintext(TableId::E2eeState, &key, 1, &invalid.encode()?).is_err()
         );

@@ -32,10 +32,10 @@ impl StateCoreContext {
         let binding = claim.binding();
         if binding.network_id() != self.keys.binding().network_id()
             || binding.recovery_epoch() != epoch
-            || self
-                .index
-                .initial_root_owners
-                .contains_key(&claim.account())
+            || self.index.holds(
+                TableId::Account,
+                &super::durable::KeyDeriver::account_key(claim.account())?,
+            )
         {
             return Err(inconsistent());
         }
@@ -69,7 +69,12 @@ impl StateCoreContext {
             .domain
             .account(account)
             .map(agenc_relay_domain::AccountState::genesis_policy);
-        match (class, self.index.initial_root_owners.get(&account)) {
+        let row = self
+            .index
+            .initial_root_owners
+            .get(&account)
+            .map(|held| held.row());
+        match (class, row) {
             (None | Some(AccountGenesisPolicy::Legacy), None) => Ok(None),
             (Some(AccountGenesisPolicy::Guarded), Some(row))
                 if row.network == self.keys.binding().network_id() =>
@@ -169,6 +174,9 @@ impl StateCoreContext {
         fingerprint: [u8; 32],
         object_id: [u8; 32],
     ) -> Result<Option<AccountServiceDurableWrite>, E2eeReplyCode> {
+        if self.pending_len() != 0 {
+            return Err(E2eeReplyCode::RateLimited);
+        }
         self.current_root_account(account, generation)
             .map_err(|_| E2eeReplyCode::AccountRequired)?;
         let Some(row) = self

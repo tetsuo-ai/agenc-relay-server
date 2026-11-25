@@ -45,7 +45,7 @@ impl Scan {
             if !marked {
                 return Err(stale());
             }
-            self.check_initial_directory(keys, port, account.account_id, claim.state)?;
+            self.check_initial_directory(keys, port, account.account_id, claim.row().state)?;
         }
         Ok(())
     }
@@ -59,7 +59,7 @@ impl Scan {
     ) -> Result<(), RuntimeError> {
         let network = keys.binding().network_id();
         let id = account.to_text();
-        let id = id.as_bytes().try_into().map_err(|_| stale())?;
+        let id = id.as_bytes();
         let digest = account_id_digest(network.as_bytes(), id).map_err(|_| stale())?;
         let key = DirectoryRow::identity_key(&digest)?;
         let RootClaimState::Published {

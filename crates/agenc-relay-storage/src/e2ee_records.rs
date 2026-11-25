@@ -1515,8 +1515,7 @@ impl DirectoryRow {
                 object_id,
                 ..
             } => {
-                chain_object_ids.len()
-                    == usize::try_from(*root_generation).unwrap_or(usize::MAX) + 1
+                usize::try_from(*root_generation).ok() == chain_object_ids.len().checked_sub(1)
                     && chain_object_ids.last() == Some(object_id)
             }
             Self::Roster { active_devices, .. } => active_devices

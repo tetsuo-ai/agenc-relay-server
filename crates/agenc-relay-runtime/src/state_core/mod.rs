@@ -2283,7 +2283,10 @@ impl StateCore {
                 timers: TimerHeap::new(),
                 drift: DriftMonitor::new(now, wall),
                 pending: None,
-                index: inputs.reconstruction.index,
+                index: inputs
+                    .reconstruction
+                    .index
+                    .with_initial_root_budget(&inputs.budget),
                 keys: inputs.keys,
                 head: inputs.reconstruction.head,
                 ceilings: inputs.config.ceilings,
