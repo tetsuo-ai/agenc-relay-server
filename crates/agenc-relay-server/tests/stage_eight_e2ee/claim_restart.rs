@@ -18,6 +18,7 @@ use super::*;
 const CLAIMED: [u8; 16] = [0xC1; 16];
 const EMPTY: [u8; 16] = [0xC2; 16];
 const FRESH: [u8; 16] = [0xC3; 16];
+const AFTER_RESTART: [u8; 16] = [0xC4; 16];
 
 /// Sends `command` under a fresh label and returns the reply. A refusal
 /// while the edge's route state is still syncing changes nothing and is
@@ -117,6 +118,55 @@ fn require_empty(reply: &[String]) -> TestResult {
     Ok(())
 }
 
+fn require_publication_refused(
+    client: &mut ArcClient,
+    owner: &mut Principal,
+    package: &[u8],
+    expires_at: u64,
+    code: e2ee::wire::reply::E2eeReplyCode,
+) -> TestResult {
+    let object = raw_object(ArcWireObjectKind::KeyPackageMls, package.to_vec())?;
+    let command = format!(
+        "EKEY PUBLISH PACKAGE {} {SUITE} NORMAL {expires_at}",
+        owner.device_token()
+    );
+    let expected = code.render_fail("EKEY", None);
+    settle("registered KeyPackage publication refusal", || {
+        let label = owner.label();
+        send_object(client, &label, &command, &object)?;
+        let lines = labeled_reply(client, &label)?;
+        let result = result_words(completion_line(&lines)?)
+            .ok_or_else(|| failure("missing publish refusal"))?;
+        let actual = result.join(" ");
+        if actual != expected {
+            return Err(failure(format!("expected {expected}, received {actual}")));
+        }
+        Ok(())
+    })
+}
+
+/// Alice observes the committed publication independently while Bob's reply
+/// remains unread. An accepted EMPTY keeps its own operation ID.
+fn claim_pending_publication(
+    client: &mut ArcClient,
+    claimant: &mut Principal,
+    target: &Principal,
+) -> TestResult<([u8; 16], Vec<String>)> {
+    for probe in 0..16 {
+        let mut operation = CLAIMED;
+        operation[0] = probe;
+        let reply = claim(client, claimant, target, SUITE, operation)?;
+        if real_clients::claimed_words(&reply).is_ok() {
+            return Ok((operation, reply));
+        }
+        require_empty(&reply)?;
+        thread::sleep(Duration::from_millis(200));
+    }
+    Err(failure(
+        "the attached publisher's KeyPackage did not reach stock",
+    ))
+}
+
 fn claims_across_a_restart(
     network: &Network,
     coordinator: &mut DaemonProcess,
@@ -147,12 +197,28 @@ fn claims_across_a_restart(
     let interval = (now - 60, now - 60 + LEAF_LIFETIME);
     let joiner = real_clients::mls_rs_client(&bob_keys, interval)?;
     let package = key_package(&joiner, interval)?;
-    settle("bob's package", || {
-        real_clients::publish_package(&mut bob, &mut bob_keys, &package, interval.1)
-    })?;
+    require_publication_refused(
+        &mut bob,
+        &mut bob_keys,
+        &package,
+        interval.1 + 1,
+        e2ee::wire::reply::E2eeReplyCode::BindingAuthInvalid,
+    )?;
+    let command = format!(
+        "EKEY PUBLISH PACKAGE {} {SUITE} NORMAL {}",
+        bob_keys.device_token(),
+        interval.1
+    );
+    send_object(
+        &mut bob,
+        &bob_keys.label(),
+        &command,
+        &raw_object(ArcWireObjectKind::KeyPackageMls, package.clone())?,
+    )?;
     let retry = claim(&mut alice, &mut alice_keys, &bob_keys, SUITE, EMPTY)?;
     require_empty(&retry)?;
-    let claimed = claim(&mut alice, &mut alice_keys, &bob_keys, SUITE, CLAIMED)?;
+    let (claimed_operation, claimed) =
+        claim_pending_publication(&mut alice, &mut alice_keys, &bob_keys)?;
     let words = real_clients::claimed_words(&claimed)?;
     assert_eq!(words.get(3), Some(&bob_keys.device_token()), "{claimed:?}");
     let object = batch_object(&claimed)?;
@@ -160,6 +226,18 @@ fn claims_across_a_restart(
         real_clients::mls_body(&object, ArcWireObjectKind::KeyPackageMls)?,
         package
     );
+    // Lose the original publication completion at the connection boundary.
+    drop(bob);
+    let mut bob =
+        authenticated_session(&network.edge_b, "bob-again", "bob-account", 91, bob_account)?;
+    attach_when_active(&mut bob, &mut bob_keys)?;
+    require_publication_refused(
+        &mut bob,
+        &mut bob_keys,
+        &package,
+        interval.1,
+        e2ee::wire::reply::E2eeReplyCode::OperationConflict,
+    )?;
 
     step(
         "coordinator restart",
@@ -173,8 +251,14 @@ fn claims_across_a_restart(
 
     // alice lost the reply: STATUS and the identical retry both return the
     // stored claim, naming bob's device rather than alice's own.
-    let asked = status(&mut alice, &mut alice_keys, CLAIMED)?;
-    let retried = claim(&mut alice, &mut alice_keys, &bob_keys, SUITE, CLAIMED)?;
+    let asked = status(&mut alice, &mut alice_keys, claimed_operation)?;
+    let retried = claim(
+        &mut alice,
+        &mut alice_keys,
+        &bob_keys,
+        SUITE,
+        claimed_operation,
+    )?;
     for (what, reply) in [("status", &asked), ("identical retry", &retried)] {
         assert_eq!(
             real_clients::claimed_words(reply)?,
@@ -183,6 +267,20 @@ fn claims_across_a_restart(
         );
         assert_eq!(batch_object(reply)?, object, "{what}: {reply:?}");
     }
+    require_publication_refused(
+        &mut bob,
+        &mut bob_keys,
+        &package,
+        interval.1,
+        e2ee::wire::reply::E2eeReplyCode::OperationConflict,
+    )?;
+    require_empty(&claim(
+        &mut alice,
+        &mut alice_keys,
+        &bob_keys,
+        SUITE,
+        AFTER_RESTART,
+    )?)?;
     let next = key_package(&joiner, interval)?;
     assert_ne!(next, package);
     settle("bob refills his stock", || {

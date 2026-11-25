@@ -178,6 +178,7 @@ pub(super) struct Restore {
     directory: Vec<(StoredKey, DirectoryRow)>,
     packages: Vec<(StoredKey, PackageRow)>,
     empty_claims: super::empty_claims::Slots,
+    spent_package_rows: BTreeMap<StoredKey, crate::budget::MemoryPermit>,
     claim_fault: Option<super::CompanionFault>,
     attachments: Vec<(StoredKey, AttachRow)>,
     mailbox: Vec<(StoredKey, MailboxRow)>,
@@ -335,7 +336,7 @@ impl Restore {
             }
             PackageRow::Claim { outcome, .. } => {
                 let claim = PackageRow::parse_claim_key(key).map_err(storage)?;
-                self.restore_claim_slot(claim, *outcome, backing)?;
+                self.restore_claim_slot(key, claim, *outcome, backing)?;
             }
         }
         self.packages.push((key.clone(), row));
@@ -344,13 +345,21 @@ impl Restore {
 
     fn restore_claim_slot(
         &mut self,
+        key: &StoredKey,
         claim: super::empty_claims::Key,
         outcome: agenc_relay_storage::e2ee_records::ClaimOutcome,
         backing: Option<&crate::budget::BackingReservationPort>,
     ) -> Result<(), super::CompanionFault> {
         use agenc_relay_storage::e2ee_records::ClaimOutcome;
+        if self.spent_package_rows.contains_key(key) || self.empty_claims.contains(&claim) {
+            return Err(super::CompanionFault::Storage);
+        }
         match outcome {
-            ClaimOutcome::Claimed => {}
+            ClaimOutcome::Claimed => {
+                let permit =
+                    reserve_package_backing(backing, super::resident::SPENT_PACKAGE_ROW_BACKING)?;
+                self.spent_package_rows.insert(key.clone(), permit);
+            }
             ClaimOutcome::KeyUnavailable => {
                 let permit = self
                     .empty_claims
@@ -721,8 +730,13 @@ pub(super) fn rebuild(
     let network_id = coordinator.network_id;
     let state = &mut coordinator.state;
     restore.objects.apply(state)?;
+    restore_packages(
+        state,
+        restore.packages,
+        restore.spent_package_rows,
+        restore.backing.as_ref(),
+    )?;
     restore_directory(state, &network_id, restore.directory, restore.attachments);
-    restore_packages(state, restore.packages)?;
     state.empty_claims = restore.empty_claims;
     restore_mailboxes(state, restore.mailbox)?;
     restore.mailbox_sequences.apply(&mut state.mailboxes)?;
@@ -1295,49 +1309,108 @@ fn restore_attachment(
 // ---------------------------------------------------------------------------
 // Packages, mailboxes, replays.
 
+struct RestoredPackages {
+    directory: agenc_relay_domain::e2ee::directory::Directory,
+    spent: BTreeMap<StoredKey, crate::budget::MemoryPermit>,
+}
+
 fn restore_packages(
     state: &mut CompanionState,
     rows: Vec<(StoredKey, PackageRow)>,
+    spent: BTreeMap<StoredKey, crate::budget::MemoryPermit>,
+    backing: Option<&crate::budget::BackingReservationPort>,
 ) -> Result<(), super::CompanionFault> {
+    let mut restored = RestoredPackages {
+        directory: Default::default(),
+        spent,
+    };
     for (key, row) in rows {
         match row {
-            PackageRow::Package { .. } => restore_package_row(state, &key, row),
-            PackageRow::Claim { .. } => restore_claim_row(state, &key, row)?,
+            PackageRow::Package { .. } => {
+                restore_package_row(&mut restored, &state.objects, key, row, backing)?
+            }
+            PackageRow::Claim { .. } => restore_claim_row(&mut restored, &key, row)?,
         }
     }
+    state.directory.replace_package_rows(restored.directory);
+    state.spent_package_rows = restored.spent;
     Ok(())
 }
 
-fn restore_package_row(state: &mut CompanionState, key: &StoredKey, row: PackageRow) {
+fn reserve_package_backing(
+    backing: Option<&crate::budget::BackingReservationPort>,
+    capacity: usize,
+) -> Result<crate::budget::MemoryPermit, super::CompanionFault> {
+    backing
+        .ok_or(super::CompanionFault::Ceiling)?
+        .reserve(capacity)
+        .map_err(|_| super::CompanionFault::Ceiling)
+}
+
+fn restore_package_row(
+    restored: &mut RestoredPackages,
+    objects: &BTreeMap<[u8; 32], Vec<u8>>,
+    key: StoredKey,
+    row: PackageRow,
+    backing: Option<&crate::budget::BackingReservationPort>,
+) -> Result<(), super::CompanionFault> {
     let PackageRow::Package {
         account_digest,
         device_id,
         suite,
         expires_at,
         object_id,
-        state: PackageState::Published,
+        state: package_state,
         ..
     } = row
     else {
-        return;
+        return Ok(());
     };
-    let Ok(reference) = PackageRow::parse_package_key(key) else {
-        return;
+    let Ok(reference) = PackageRow::parse_package_key(&key) else {
+        return Ok(());
     };
-    state.directory.restore_package(
+    let withhold = |restored: &mut RestoredPackages, reference| {
+        if restored.spent.contains_key(&key) {
+            return Err(super::CompanionFault::Storage);
+        }
+        let permit = reserve_package_backing(backing, super::resident::SPENT_PACKAGE_ROW_BACKING)?;
+        restored.spent.insert(key, permit);
+        restored.directory.withhold_package(reference);
+        Ok(())
+    };
+    let Some(bytes) = objects.get(&object_id) else {
+        return withhold(restored, reference);
+    };
+    let _decode = reserve_package_backing(backing, super::resident::PACKAGE_DECODE_BACKING)?;
+    let Some(package) = super::ops::directory::retained_key_package(bytes)
+        .filter(|package| reference == package.key_package_ref)
+    else {
+        return withhold(restored, reference);
+    };
+    // An earlier publisher could declare a later cutoff than the signed leaf.
+    // Such a row must never resurrect a consumed package after its last claim expires.
+    if package_state != PackageState::Published
+        || suite != package.cipher_suite
+        || expires_at != package.leaf_node.lifetime.not_after
+    {
+        return withhold(restored, reference);
+    }
+    restored.directory.restore_package(
         reference,
         Package {
             account_digest,
             device_id,
             suite,
+            not_before: package.leaf_node.lifetime.not_before,
             expires_at,
             object_id,
         },
     );
+    Ok(())
 }
 
 fn restore_claim_row(
-    state: &mut CompanionState,
+    restored: &mut RestoredPackages,
     key: &StoredKey,
     row: PackageRow,
 ) -> Result<(), super::CompanionFault> {
@@ -1357,7 +1430,9 @@ fn restore_claim_row(
     let (claimant, operation) =
         PackageRow::parse_claim_key(key).map_err(|_| super::CompanionFault::Storage)?;
     let outcome = match (outcome, object_id) {
-        (Stored::Claimed, Some(object_id)) if !key_package_ref.is_empty() => {
+        (Stored::Claimed, Some(object_id))
+            if !key_package_ref.is_empty() && restored.spent.contains_key(key) =>
+        {
             ClaimOutcome::Claimed {
                 key_package_ref,
                 object_id,
@@ -1366,7 +1441,7 @@ fn restore_claim_row(
         (Stored::KeyUnavailable, None) if key_package_ref.is_empty() => ClaimOutcome::Unavailable,
         _ => return Err(super::CompanionFault::Storage),
     };
-    state.directory.restore_claim(
+    restored.directory.restore_claim(
         claimant,
         operation,
         ClaimParameters {

@@ -116,8 +116,9 @@ collector continues to own physical deletion.
 
 Expired route reservations, replay results and the selected KeyPackage claim
 share one storage receipt. The worker reserves at most half of the 128
-primary deletion slots for route grants, one for a due KeyPackage claim and
-the remainder for completed request replays. The replay and KeyPackage scans
+primary deletion slots for route grants. A due KeyPackage claim occupies
+one slot, plus a second when the stored claim still owns a redundant legacy
+stock row. The remaining slots serve completed request replays. The scans
 keep independent cursors. A restart test captures an expired route lease
 and one of two due no-stock claims, confirms their exact durable deletions
 and reopening, and selects the remaining claim on the next pass.
@@ -153,3 +154,39 @@ On Linux with Rust 1.98.0, all ten focused coordinator claim tests and all
 268 domain tests passed. The registered restart case passed in 16.02 seconds with the
 exact labeled empty and conflict completions checked. The SDK's independent client qualification can repeat this
 exchange against the merged, pinned daemon.
+
+### One-use publication and storage upgrades
+
+Publication checks the attached device, signed MLS KeyPackage and credential
+bundle, exact declared expiry, and current signed lifetime. The directory
+withholds a dispensed reference for every retained successful operation that
+names it. Replaying the claimant's original operation returns its original
+package. Republishing those same bytes under a fresh request returns
+`E2EE_OPERATION_CONFLICT`. A fresh claimant sees `EMPTY PACKAGE` until the
+publisher supplies a different signed package.
+
+Reopening restores only published stock with the original object's reference,
+suite and signed expiry. A legacy store can contain both a successful claim
+and a redundant published row. The claim withholds the reference in either
+load order. After the claim timeout and signed lifetime pass, maintenance
+deletes the redundant owner with the claim in one durable batch. A terminal
+package row without a claim mapping also remains unavailable. Its original
+immutable object identifies the earlier publication. A row whose body is
+missing or inconsistent with its key conservatively withholds the recorded
+reference. Each retained successful claim and each excluded legacy stock row
+owns a separate resident permit. Recovery reserves temporary memory before
+decoding signed MLS fields and installs the security indexes together only
+when every required reservation succeeds. A committed deletion releases
+the corresponding permits. These cases use the existing durable formats.
+
+The registered Linux case sends Bob's publication without reading its
+completion. Alice claims the exact signed package on the other edge. Bob
+disconnects, logs in again, reattaches and receives the exact publication
+refusal before and after the coordinator restarts. Alice recovers her
+original claim and a fresh operation receives a newly generated package.
+The coordinator cases also cover older terminal rows, a falsely extended
+publication expiry and the combined maintenance cursor with two primary
+deletions for one successful claim. The commands above exercise the three
+owners. On Linux the domain suite passed 269 tests, the runtime suite passed
+3,063 with one unrelated test ignored, and the registered restart case
+passed in 22.03 seconds.

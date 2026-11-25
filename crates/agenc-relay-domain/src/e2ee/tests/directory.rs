@@ -28,6 +28,7 @@ fn package(device: Id16, seed: u8, expires_at: u64) -> Package {
         account_digest: ACCOUNT,
         device_id: device,
         suite: 1,
+        not_before: 0,
         expires_at,
         object_id: [seed; 32],
     }
@@ -282,6 +283,53 @@ fn attachment_is_a_compare_and_swap_on_the_session_generation() -> Result<(), Di
 }
 
 #[test]
+fn restored_claims_fence_duplicate_stock_regardless_of_row_order() -> Result<(), DirectoryError> {
+    let reference = vec![9; 32];
+    let stock = package(DEVICE_A, 9, 20_000);
+    let parameters = ClaimParameters {
+        target_account_digest: ACCOUNT,
+        target_device_id: DEVICE_A,
+        suite: stock.suite,
+    };
+    let claimed = ClaimOutcome::Claimed {
+        key_package_ref: reference.clone(),
+        object_id: stock.object_id,
+    };
+    for stock_first in [false, true] {
+        let mut directory = provisioned()?;
+        if stock_first {
+            directory.restore_package(reference.clone(), stock);
+        }
+        // Old stores may have answered two prior operations with the same package.
+        for operation in [[1; 16], [2; 16]] {
+            directory.restore_claim(ACCOUNT, operation, parameters, claimed.clone(), 30_000);
+        }
+        if !stock_first {
+            directory.restore_package(reference.clone(), stock);
+        }
+        directory.forget_claim(&ACCOUNT, &[1; 16]);
+        assert_eq!(directory.stock(&ACCOUNT, &DEVICE_A), 0);
+        assert_eq!(directory.claim_status(&ACCOUNT, &[2; 16]), Some(&claimed));
+        assert_eq!(
+            directory.publish_package(reference.clone(), stock, 1_000),
+            Err(DirectoryError::DuplicatePackage)
+        );
+        assert_eq!(
+            directory.claim_package(ACCOUNT, [3; 16], parameters, 1_000)?,
+            ClaimOutcome::Unavailable
+        );
+        directory.expire(30_000);
+        assert!(directory.claim_status(&ACCOUNT, &[2; 16]).is_none());
+        assert!(!directory.spent.contains_key(&reference));
+        assert_eq!(
+            directory.publish_package(reference.clone(), stock, 30_000),
+            Err(DirectoryError::ExpiryOutOfRange)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn packages_are_one_use_and_claims_are_idempotent() -> Result<(), DirectoryError> {
     let mut directory = provisioned()?;
     let now = 1_000;
@@ -321,6 +369,10 @@ fn packages_are_one_use_and_claims_are_idempotent() -> Result<(), DirectoryError
         "the smallest acceptable reference is dispensed; ref 3 lacks claim validity"
     );
     assert_eq!(directory.stock(&ACCOUNT, &DEVICE_A), 2);
+    assert_eq!(
+        directory.publish_package(vec![1], package(DEVICE_A, 1, now + 7_200), now + 1),
+        Err(DirectoryError::DuplicatePackage)
+    );
     assert_eq!(
         directory.claim_package(claimant, [1; 16], parameters, now + 5)?,
         outcome,

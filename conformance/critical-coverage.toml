@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1106
-reviewed_source_sha256 = "585b216dfd8b83933786cd7fd3e1f488fc7fc75d062425fc49920cfb116bc710"
+reviewed_source_sha256 = "6a01be883f71d9e1e02a80379d33d92e7b312db2aa191fbb23cc5d8c56a3b2d7"
 deferred = []
 
 [[region]]
@@ -324,7 +324,7 @@ id = "terminal-certificate-retained-scope"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
 item = "certificate_id"
-source_sha256 = "73de65f59d86939d5551121dcf70bca683cc1feea13c9be439e85720b2c0a746"
+source_sha256 = "c6ac85b11dd26fd40fb5106a53273f78345c91d58a8c036d88e4284b190ad2ef"
 start_line = 138
 end_line = 146
 span_sha256 = "683a74ebefa61c1505c7f95a126898649783f6655b0e59a3e5d7bf84cb821ee4"
@@ -336,9 +336,9 @@ id = "terminal-certificate-row-shape"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
 item = "restore_terminal_certificates"
-source_sha256 = "73de65f59d86939d5551121dcf70bca683cc1feea13c9be439e85720b2c0a746"
-start_line = 1623
-end_line = 1625
+source_sha256 = "c6ac85b11dd26fd40fb5106a53273f78345c91d58a8c036d88e4284b190ad2ef"
+start_line = 1698
+end_line = 1700
 span_sha256 = "09e2e8ffc6485855125dafbfbc41c01ab1738260351e92efc34dd099b60ae3da"
 metric = "branches"
 reason = "A committed terminal row with the wrong role raises a recovery error instead of losing its standalone proof."
@@ -372,21 +372,69 @@ id = "sc002-claim-release"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/request_expiry/claims.rs"
 item = "remove"
-source_sha256 = "ae060a6136e9d9fa92046cb2367618508f660da2f04f28cac5a8b2b53aff86b7"
-start_line = 117
-end_line = 122
-span_sha256 = "f74b1c095105e2b3d770bb31f88694d237d48382e62d9def4f55ce2d583cf454"
+source_sha256 = "026ddad2432c4e2a0505e299ae89570ea47879f8a05bf55656026880e62e4e2d"
+start_line = 136
+end_line = 157
+span_sha256 = "5572c4a260640d755277473783024ff0f5367728e6098aa54eae2eeb29088e99"
 metric = "regions"
-reason = "An empty claim relinquishes only its resident slot, while a claimed mapping relinquishes its signed package owner in the transaction."
+reason = "Claim deletion releases the corresponding resident backing and any redundant excluded stock row that the same receipt removes."
 
 [[region]]
 id = "sc002-restore-claim-slot"
 category = "persistence-recovery"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
 item = "restore_claim_slot"
-source_sha256 = "73de65f59d86939d5551121dcf70bca683cc1feea13c9be439e85720b2c0a746"
-start_line = 345
-end_line = 364
-span_sha256 = "6ddb4e000ab3f2399183b8bb6b5da03866bcc4ee5d64f33af6aa4d940637f72c"
+source_sha256 = "c6ac85b11dd26fd40fb5106a53273f78345c91d58a8c036d88e4284b190ad2ef"
+start_line = 346
+end_line = 373
+span_sha256 = "818a44cdb688bb4f125a80ec2c8c8c102244e10aa01c9b93d46aeddfe5725806"
 metric = "regions"
-reason = "Only retained empty outcomes take a bounded slot on reload; claimed rows remain readable and admission refusals cannot become results."
+reason = "Restored empty results and successful claims acquire their respective resident permits before publication. Duplicate or refused operations cannot become results."
+
+[[region]]
+id = "sc002-withhold-package-reference"
+category = "persistence-recovery"
+file = "crates/agenc-relay-domain/src/e2ee/directory.rs"
+item = "withhold_package"
+source_sha256 = "b70b2cfc69a95b44915cdf141f4942896d4b826f78c1affefa724a02271692ac"
+start_line = 284
+end_line = 287
+span_sha256 = "376feeaa40cdb93d06e45a299f5ca34e05fe85033a623a988fcda55ad979c9a3"
+metric = "regions"
+reason = "A retained claim or excluded older publication makes its reference unavailable to new stock."
+
+[[region]]
+id = "sc002-match-redundant-stock-owner"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/request_expiry/claims.rs"
+item = "stock_owns"
+source_sha256 = "026ddad2432c4e2a0505e299ae89570ea47879f8a05bf55656026880e62e4e2d"
+start_line = 171
+end_line = 176
+span_sha256 = "ef20a20127c105ca64763f28b7caa7b5043318ce68e626bcd1d0391acf06f1b3"
+metric = "regions"
+reason = "A claim can retire a redundant stock owner only when it holds exactly the claimed public object."
+
+[[region]]
+id = "sc002-admit-package-backing"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
+item = "reserve_package_backing"
+source_sha256 = "c6ac85b11dd26fd40fb5106a53273f78345c91d58a8c036d88e4284b190ad2ef"
+start_line = 1340
+end_line = 1348
+span_sha256 = "ba963ba9c80a1794b0c5a71160e8cd5f14f37ddbe42b2cb288399dee44e2d376"
+metric = "regions"
+reason = "Every retained spent row and public MLS decode workspace on startup requires a reservation from the process pool."
+
+[[region]]
+id = "sc002-install-package-indexes"
+category = "persistence-recovery"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/startup.rs"
+item = "restore_packages"
+source_sha256 = "c6ac85b11dd26fd40fb5106a53273f78345c91d58a8c036d88e4284b190ad2ef"
+start_line = 1317
+end_line = 1338
+span_sha256 = "02a076042ba59ebcdbf10398dcac903c9c53c7e30c018a2d75e44784944f63e9"
+metric = "regions"
+reason = "Restored stock and exclusions are installed together only after all claim and stock rows have been admitted."

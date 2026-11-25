@@ -15,6 +15,14 @@ use agenc_relay_storage::e2ee_records::{OBJECT_RECORD_KIND, ObjectRow};
 use agenc_relay_storage::{PersistentRecordValue, StoredKey, TableId};
 use std::collections::BTreeMap;
 
+/// Includes sparse nodes for the spent-reference count, durable row permit,
+/// the claim record and their bounded keys and staging copies.
+pub(super) const SPENT_PACKAGE_ROW_BACKING: usize = 8192;
+
+/// The retained MLS body, its decoded outer object and its owned public fields.
+pub(super) const PACKAGE_DECODE_BACKING: usize =
+    agenc_relay_e2ee::limits::MAX_KEY_PACKAGE_OBJECT * 8;
+
 pub(super) struct Prepared {
     objects: BTreeMap<[u8; 32], Vec<u8>>,
     total: usize,

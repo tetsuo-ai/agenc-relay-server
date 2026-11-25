@@ -170,7 +170,7 @@ fn package_for(
 fn publish_params(device: [u8; 16], suite: u16) -> Vec<u8> {
     let mut params = device.to_vec();
     params.extend_from_slice(&suite.to_be_bytes());
-    params.extend_from_slice(&50_000_u64.to_be_bytes());
+    params.extend_from_slice(&LEAF_INTERVAL.1.to_be_bytes());
     params
 }
 
@@ -180,6 +180,23 @@ fn a_key_package_names_the_attached_device_and_its_suite_without_last_resort() -
     harness.publish_identity_and_roster()?;
     harness.attach()?;
     let own = package_for(&harness, DEVICE, Vec::new())?;
+    let mut mismatched = DEVICE_ID.to_vec();
+    mismatched.extend_from_slice(&1_u16.to_be_bytes());
+    mismatched.extend_from_slice(&(LEAF_INTERVAL.1 + 1).to_be_bytes());
+    assert_eq!(
+        code(harness.run(Op::PublishPackage, &mismatched, Some(&own))?),
+        Some(E2eeReplyCode::BindingAuthInvalid)
+    );
+    harness.now = LEAF_INTERVAL.0 - 1;
+    assert_eq!(
+        code(harness.run(
+            Op::PublishPackage,
+            &publish_params(DEVICE_ID, 1),
+            Some(&own)
+        )?),
+        Some(E2eeReplyCode::BindingAuthInvalid)
+    );
+    harness.now = NOW;
     assert_eq!(
         code(harness.run(
             Op::PublishPackage,
