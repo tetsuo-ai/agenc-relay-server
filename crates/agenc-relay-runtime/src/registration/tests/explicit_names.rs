@@ -360,6 +360,28 @@ async fn a_labeled_names_in_pages_keeps_one_batch_and_a_small_one_is_sent_whole(
     Ok(())
 }
 
+/// Create more than the old 32 distinct test IDs through ordinary JOIN plans on one domain.
+#[tokio::test]
+async fn independently_seeded_names_channels_have_distinct_live_identities() -> TestResult {
+    let mut node = Node::new()?;
+    let context = node.context()?;
+    let mut ids = std::collections::BTreeSet::new();
+    for index in 1..=33 {
+        let name = ChannelNameValue::parse(&format!("#independent{index:02}"))?;
+        seed_member(context, index, std::slice::from_ref(&name))?;
+        assert!(
+            ids.insert(
+                context
+                    .domain()
+                    .resolve_channel(&name)
+                    .ok_or("missing seeded channel")?
+            )
+        );
+    }
+    assert_eq!(ids.len(), 33);
+    Ok(())
+}
+
 /// A bare `NAMES` lists every joined channel in one reply. Twenty channels of
 /// 71 seeded members and the requester exceed one response batch together;
 /// every 366 follows every 353, on the last page.
