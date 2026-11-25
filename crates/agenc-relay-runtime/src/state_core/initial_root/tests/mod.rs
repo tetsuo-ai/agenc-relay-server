@@ -71,6 +71,18 @@ async fn initial_root_read_and_competing_choice_use_one_private_revision_fence()
         && c.owner.matches(&row.owner)));
     let (b, _) = context.initial_root_admission(account, generation)?;
     let (old_read, _) = context.initial_root_admission(account, generation)?;
+    // A different account can commit while the signer prepares its protected reply.
+    let other = AccountRandomId::from_bytes([0x63; 16]).to_account_id();
+    let unrelated = context.domain().plan_account_created(AccountState::new(
+        other,
+        generation,
+        context.domain().revision(),
+    ))?;
+    stage(context, unrelated, Vec::new())?;
+    assert!(context.initial_root_admission(account, generation).is_err());
+    fixture.commit_staged_batch().await?;
+    let context = fixture.context_mut()?;
+    assert!(context.domain().account(other).is_some());
     let mut writes = Vec::new();
     let plan = context.plan_initial_root_choice(a, Some([6; 32]), &mut writes)?;
     assert_eq!(writes.len(), 1);

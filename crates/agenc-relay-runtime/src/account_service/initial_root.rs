@@ -1,5 +1,8 @@
 //! Registered private account operations share the OPAQUE actor's replay and commit barrier.
 
+#[cfg(test)]
+mod tests;
+
 use super::*;
 use crate::bridge::crypto::InitialRootSealJob;
 use crate::state_core::durable::claim_replays::{CLAIM_REPLAY_SECONDS, ClaimReplay};
