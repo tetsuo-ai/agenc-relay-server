@@ -326,6 +326,7 @@ struct NodeFixture {
     config_path: PathBuf,
     log_dir: PathBuf,
     public_address: SocketAddr,
+    server_name: &'static str,
     dns_name: String,
     client_tls: TlsFixture,
     /// The identity seed, admin socket, key material, and directories the
@@ -523,6 +524,7 @@ impl NodeFixture {
             config_path,
             log_dir: data_dir.join("logs"),
             public_address,
+            server_name: identity.name,
             dns_name,
             client_tls,
             seed,

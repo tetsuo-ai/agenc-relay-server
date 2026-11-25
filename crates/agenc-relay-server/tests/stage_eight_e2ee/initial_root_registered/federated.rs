@@ -109,7 +109,7 @@ fn assert_withdrawn(owner: &mut ArcClient) -> TestResult {
     Err(failure("old client never closed after link replacement"))
 }
 
-fn unexpected_full_origin_reply(line: &str, peer: &str) -> Box<dyn std::error::Error> {
+fn unexpected_full_origin_reply(line: &str, peer: &str) -> TestError {
     let mut fields = line.split_ascii_whitespace();
     let first = fields.next().unwrap_or_default();
     let (source, command) = match first.strip_prefix(':') {
@@ -297,10 +297,10 @@ fn a_full_remote_origin_refuses_before_hpke_and_keeps_its_sibling_on_the_same_li
     let refusal = filling.account_carrier_header("ACCTROOT", "CLAIM", overflow.as_bytes())?;
     let expected = format!(
         ":{} FAIL ACCTROOT UNAVAILABLE :Account root claim unavailable",
-        edge.dns_name
+        edge.server_name
     );
     if refusal != expected {
-        return Err(unexpected_full_origin_reply(&refusal, &edge.dns_name));
+        return Err(unexpected_full_origin_reply(&refusal, edge.server_name));
     }
     assert_withdrawn(&mut filling)?;
     assert!(
