@@ -8,14 +8,31 @@ use agenc_relay_client_wire::{
     AccessTokenPolicy, CapRequestReply, CapabilityProfile, CapabilitySpec,
     MAX_TRADITIONAL_LINE_BYTES, OutputBudget, RegisteredCommandKind, RegistrationAction,
     RegistrationAuthCarrier, RegistrationError, RegistrationEvent, RegistrationPhase,
-    RegistrationState, RenderedMessage, SecretBytes, ServerStreamFramer, StreamFramer, WelcomeStep,
-    WireMessage, isupport_messages, numeric_reply, parse_message, parse_server_message,
-    split_capability_lines, user_mask,
+    RegistrationState, RenderedMessage, SecretBytes, ServerCommand, ServerFramedLine, ServerPrefix,
+    ServerStreamFramer, StreamFramer, WelcomeStep, WireMessage, isupport_messages, numeric_reply,
+    parse_message, parse_server_message, split_capability_lines, user_mask,
 };
 use agenc_relay_types::NetworkId;
 use subtle::ConstantTimeEq as _;
 
 use crate::{DeterministicMonotonicClock, MAX_TRANSCRIPT_STEP_BYTES, MAX_TRANSCRIPT_STEPS};
+
+/// Architecture 8.3 maximum from authenticated TLS completion to guest registration.
+pub const GUEST_REGISTRATION_WINDOW: std::time::Duration =
+    std::time::Duration::from_millis(agenc_relay_client_wire::REGISTRATION_TIMEOUT_MILLIS);
+
+/// Accepts only a server's structurally valid 001 for this exact guest.
+pub fn guest_welcome(line: &str, nickname: &str) -> bool {
+    let Ok(frame) = ServerFramedLine::new(line) else {
+        return false;
+    };
+    parse_server_message(frame).is_ok_and(|message| {
+        matches!(message.prefix(), Some(ServerPrefix::Server(_)))
+            && message.command() == ServerCommand::Numeric(1)
+            && message.params().middle() == [nickname]
+            && message.params().trailing().is_some()
+    })
+}
 
 const TRANSCRIPT_SERVER: &str = "server.example";
 const TRANSCRIPT_NETWORK_ID: NetworkId = NetworkId::from_bytes([0; 32]);
