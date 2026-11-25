@@ -159,6 +159,9 @@ EXPECTED_VECTOR_FILES = {
     },
 }
 EXPECTED_CONSTANT_TIME_SURFACES = {
+    "crates/agenc-relay-auth/src/service/guarded_creation.rs",
+    "crates/agenc-relay-auth/src/wire/initial_root.rs",
+    "crates/agenc-relay-crypto/src/hash/initial_root.rs",
     "crates/agenc-relay-auth/src/service.rs",
     "crates/agenc-relay-auth/src/opaque.rs",
     "crates/agenc-relay-auth/src/profile.rs",
@@ -227,7 +230,13 @@ REQUIRED_SURFACES = (
     "pub fn login_start<E: EntropySource>",
     "pub fn login_finish<E: EntropySource>",
     "pub enum OpaqueClientError",
-    "pub struct AccountServiceEnvelope",
+    "pub struct ProfiledAccountEnvelope<K: AccountHpkeExchange>",
+    "pub struct ProfiledAccountResponse<K: AccountHpkeExchange>",
+    "pub type AccountServiceEnvelope = ProfiledAccountEnvelope<AccountServiceMessageKind>;",
+    "pub type AccountServiceResponse = ProfiledAccountResponse<AccountServiceMessageKind>;",
+    "pub type InitialRootServiceEnvelope = ProfiledAccountEnvelope<InitialRootExchange>;",
+    "pub type InitialRootServiceResponse = ProfiledAccountResponse<InitialRootExchange>;",
+    "pub trait AccountHpkeExchange: private::Sealed + Copy + Eq",
     "pub fn begin_account_creation",
     "pub fn begin_authentication",
     "pub fn begin_credential_change",
@@ -407,19 +416,26 @@ def validate_modules(root: Path) -> None:
         modules = {path.name for path in source_root.glob("*.rs") if path.name != "lib.rs"}
         if modules != expected_modules:
             raise StageFourError(f"{source_root.parent.name} module set is missing or unexpected")
-        for path in source_root.glob("*.rs"):
+        for path in sorted(source_root.rglob("*.rs")):
+            if "tests" in path.relative_to(source_root).parts:
+                continue
             source = path.read_text(encoding="utf-8")
             if "#![forbid(unsafe_code)]" not in source and path.name == "lib.rs":
                 raise StageFourError(f"safe-Rust policy is absent from {path}")
-            if path.name == "websocket.rs":
+            if path == source_root / "websocket.rs":
                 if hashlib.sha256(path.read_bytes()).hexdigest() != WSS_ADAPTER_SHA256:
                     raise StageFourError("WebSocket public-nonce digest adapter differs from its reviewed source")
             elif "aws_lc_rs" in source or "SHA1_FOR_LEGACY_USE_ONLY" in source:
                 raise StageFourError("legacy handshake provider escapes its private adapter")
             sources.append(source)
-    combined = "\n".join(sources)
-    if any(surface not in combined for surface in REQUIRED_SURFACES):
-        raise StageFourError("a required Stage-04 adapter or state-machine surface is absent")
+    validate_surface_source("\n".join(sources))
+
+
+def validate_surface_source(combined: str) -> None:
+    """Require the original concrete API and its separately sealed protected profile."""
+    missing = [surface for surface in REQUIRED_SURFACES if surface not in combined]
+    if missing:
+        raise StageFourError(f"required Stage-04 adapter or state-machine surface is absent: {missing[0]}")
     forbidden = (
         "serde::",
         "#[derive(Serialize",
@@ -888,6 +904,18 @@ def self_test(root: Path) -> int:
         "does not resolve exactly one reviewed OPAQUE package",
     )
     cases += 4
+    expected_api = "\n".join(REQUIRED_SURFACES)
+    for surface, replacement in [
+        ("AccountServiceEnvelope = ProfiledAccountEnvelope<AccountServiceMessageKind>",
+         "AccountServiceEnvelope = ProfiledAccountEnvelope<InitialRootExchange>"),
+        ("AccountHpkeExchange: private::Sealed", "AccountHpkeExchange: Copy"),
+    ]:
+        expect_failure(
+            "crossed base profile or open exchange family",
+            lambda: validate_surface_source(expected_api.replace(surface, replacement)),
+            "surface is absent",
+        )
+        cases += 1
     return cases
 
 
