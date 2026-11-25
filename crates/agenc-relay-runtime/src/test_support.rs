@@ -72,7 +72,6 @@ use crate::sync::Arc;
 pub(crate) type TestResult<T = ()> = Result<T, Box<dyn core::error::Error>>;
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static NEXT_CHANNEL_SEED: AtomicU64 = AtomicU64::new(100);
 
 /// Storage limits small enough for unit tests and large enough for every
 /// mutation batch a test stages.
@@ -1116,20 +1115,21 @@ pub(crate) fn negotiated_capabilities(names: &[&str]) -> TestResult<CapabilitySt
     Ok(capabilities)
 }
 
-/// Fills one purpose-bound entropy request and returns the next channel seed.
+/// Fills one purpose-bound fixture request using the available channel IDs in this domain.
 fn answer_entropy(
     purpose: &agenc_relay_domain::EntropyPurpose,
     inputs: &mut agenc_relay_domain::ExternalInputs,
-    next_channel: u8,
-) -> u8 {
+    free_channels: &mut impl Iterator<Item = agenc_relay_types::ChannelInstanceId>,
+) -> TestResult {
     use agenc_relay_domain::EntropyPurpose;
     use agenc_relay_testkit::bytes;
     match purpose {
         EntropyPurpose::ChannelInstance(_) => {
-            inputs
-                .channel_ids
-                .push(agenc_relay_testkit::channel_id(next_channel));
-            return next_channel.wrapping_add(1);
+            inputs.channel_ids.push(
+                free_channels
+                    .next()
+                    .ok_or("all 256 fixture channel IDs are in use")?,
+            );
         }
         EntropyPurpose::Message(_) => inputs
             .message_ids
@@ -1148,19 +1148,19 @@ fn answer_entropy(
                 )))
         }
     }
-    next_channel
+    Ok(())
 }
 
-/// Answers one external request vector deterministically; every fresh channel
-/// identity comes from a process-wide counter so repeated creations never
-/// collide.
+/// Answers one external request vector using the IDs available in this fixture's domain.
 pub(crate) fn answer_external(
+    context: &StateCoreContext,
     requests: &[agenc_relay_domain::ExternalInputRequest],
-) -> agenc_relay_domain::ExternalInputs {
+) -> TestResult<agenc_relay_domain::ExternalInputs> {
     use agenc_relay_domain::{ExternalInputRequest, ExternalInputs};
     let mut inputs = ExternalInputs::default();
-    let mut next_channel =
-        u8::try_from(NEXT_CHANNEL_SEED.fetch_add(8, Ordering::Relaxed) % 256).unwrap_or_default();
+    let mut free_channels = (0..=u8::MAX)
+        .map(agenc_relay_testkit::channel_id)
+        .filter(|id| context.domain().channel(*id).is_none());
     for request in requests {
         match request {
             ExternalInputRequest::UtcNow { .. } => {
@@ -1170,14 +1170,14 @@ pub(crate) fn answer_external(
                 inputs.monotonic_now = Some(MonotonicTick::from_ticks(11));
             }
             ExternalInputRequest::Entropy { purpose, .. } => {
-                next_channel = answer_entropy(purpose, &mut inputs, next_channel);
+                answer_entropy(purpose, &mut inputs, &mut free_channels)?;
             }
             ExternalInputRequest::ChannelKeyVerification { .. } => inputs.key_verdicts.push(true),
             // Key construction needs a crypto verifier; tests that set a key answer it themselves.
             ExternalInputRequest::ChannelKeyConstruction { .. } => {}
         }
     }
-    inputs
+    Ok(inputs)
 }
 
 /// Plans one registered command against the live domain, answering any
@@ -1191,8 +1191,7 @@ pub(crate) fn plan_live(
     >,
 ) -> TestResult<agenc_relay_domain::PlanDecision> {
     use agenc_relay_domain::PlanDecision;
-    // A superset admission: registered-command credit plus message credit
-    // for the caller and for every channel the counter could have created.
+    // Admit the caller and each of the channel IDs this fixture makes available.
     let mut entries = vec![
         (
             agenc_relay_domain::RateBucket::RegisteredCommand(identity.user_id),
@@ -1222,7 +1221,7 @@ pub(crate) fn plan_live(
     let admission = agenc_relay_domain::AdmissionSnapshot::new(entries)?;
     match agenc_relay_testkit::plan(context.domain(), identity, command()?, &admission, None)? {
         PlanDecision::NeedsExternal(requests) => {
-            let inputs = answer_external(&requests);
+            let inputs = answer_external(context, &requests)?;
             Ok(agenc_relay_testkit::plan(
                 context.domain(),
                 identity,
