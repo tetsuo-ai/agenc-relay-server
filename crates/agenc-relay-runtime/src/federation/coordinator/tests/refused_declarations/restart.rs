@@ -13,6 +13,7 @@ use agenc_relay_domain::federation::{OriginKey, OriginStatus};
 use super::*;
 
 mod quota;
+mod terminal_receipts;
 
 const SEED: u8 = 56;
 
