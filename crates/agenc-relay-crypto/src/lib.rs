@@ -21,17 +21,18 @@ mod worker;
 pub use account_hpke::{
     ACCOUNT_HPKE_ENCAPSULATED_KEY_BYTES, ACCOUNT_HPKE_REQUEST_CIPHERTEXT_BYTES,
     ACCOUNT_HPKE_REQUEST_PLAINTEXT_BYTES, ACCOUNT_HPKE_RESPONSE_CIPHERTEXT_BYTES,
-    ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkeKeyId, AccountHpkePrivateKey,
-    AccountHpkePublicKey, AccountRequestBinding, AccountResponseOpenToken,
-    AccountResponseSealToken, OpenedAccountRequest, OpenedAccountResponse, SealedAccountRequest,
-    SealedAccountResponse, open_account_request, seal_account_request,
+    ACCOUNT_HPKE_RESPONSE_PLAINTEXT_BYTES, AccountHpkeExchange, AccountHpkeKeyId,
+    AccountHpkePrivateKey, AccountHpkePublicKey, AccountRequestBinding, AccountResponseOpenToken,
+    AccountResponseSealToken, InitialRootExchange, OpenedAccountRequest, OpenedAccountResponse,
+    SealedAccountRequest, SealedAccountResponse, open_account_request, seal_account_request,
 };
 pub use entropy::OsEntropy;
 pub use error::{CryptoError, CryptoWorkerError};
 pub use hash::{
-    Digest32, FederationSnapshotHash, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId,
-    OpaqueFakeCredentialKey, SemanticHashDomain, Sha256Stream, derive_fake_credential_id,
-    derive_login_index, semantic_digest,
+    Digest32, FederationSnapshotHash, InitialRootClaimOwner, InitialRootPrecommit,
+    InitialRootSecret, LoginIndexDigest, LoginIndexKey, LoginIndexKeyId, OpaqueFakeCredentialKey,
+    SemanticHashDomain, Sha256Stream, derive_fake_credential_id, derive_login_index,
+    semantic_digest,
 };
 pub use signature::{
     Ed25519PublicKey, Ed25519SecretKey, Ed25519Signature, SignatureDomain, sign_canonical,
