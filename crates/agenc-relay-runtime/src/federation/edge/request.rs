@@ -80,8 +80,8 @@ pub enum EdgeCompletion {
         /// The client's original line.
         message: Box<ParsedMessage>,
     },
-    /// A committed message's one logical response: the requester's echoes
-    /// held for it, which the router labels, or none, for which a labeled
+    /// One committed message or nickname change and its requester's echoes
+    /// held for the original labeled response, or none, for which a labeled
     /// request gets a labeled `ACK`.
     MessageCommitted {
         /// The client connection.

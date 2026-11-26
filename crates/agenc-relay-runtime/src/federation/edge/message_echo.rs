@@ -42,7 +42,7 @@ const ECHO_BACKING_BYTES: usize = 2 * agenc_relay_client_wire::MAX_PHYSICAL_LINE
 #[path = "tests/message_echo.rs"]
 mod tests;
 
-/// The requester's copy of one delivered message, held for its response.
+/// The requester's original notification, held until the matching command commits.
 pub(super) struct MessageEcho {
     /// The event that delivered it; rendering that event again replaces it.
     event: EventId,
@@ -123,9 +123,8 @@ pub(super) fn capture(
     Ok(())
 }
 
-/// The number of targets of the labeled message `pending` carries for the
-/// connection `generation`, each of which echoes at most once, when the
-/// connection negotiated `labeled-response` and is still open.
+/// How many requester notifications this event can contribute to the pending
+/// command on this live, labeled connection. A NICK must match its exact new name.
 fn labeled_targets(
     pending: &PendingRequest,
     generation: ConnectionGeneration,
