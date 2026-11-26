@@ -195,6 +195,19 @@ pub(crate) enum PendingKind {
     Close,
 }
 
+impl PendingKind {
+    fn for_operation(message: Box<ParsedMessage>, operation: &FederatedOperation) -> Self {
+        let topic_channel = match operation {
+            FederatedOperation::Topic { channel_id, .. } => Some(*channel_id),
+            _ => None,
+        };
+        Self::Command {
+            message,
+            topic_channel,
+        }
+    }
+}
+
 /// One request awaiting its result or completion.
 pub(super) struct PendingRequest {
     pub(super) generation: ConnectionGeneration,
@@ -798,13 +811,7 @@ fn route_command(
         context,
         generation,
         prepared,
-        PendingKind::Command {
-            message,
-            topic_channel: match operation {
-                FederatedOperation::Topic { channel_id, .. } => Some(channel_id),
-                _ => None,
-            },
-        },
+        PendingKind::for_operation(message, &operation),
     );
     Ok(Routed::Forwarded)
 }
