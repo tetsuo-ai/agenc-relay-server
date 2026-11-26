@@ -177,6 +177,8 @@ pub enum EgroupCommand {
 /// One `EKEY` production.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EkeyCommand {
+    /// Privately negotiated `PROVE ROOT-HEAD <challenge>` for the registered account.
+    ProveRootHead([u8; 16]),
     /// `FETCH IDENTITY <account-token>`.
     FetchIdentity([u8; 24]),
     /// `FETCH ROOT-CHAIN <account-token> <first-generation> <cursor>`.
@@ -352,6 +354,20 @@ pub fn parse_command(command: &str, params: &[&str]) -> Result<ClientCommand, E2
             _ => Err(E2eeError::InvalidValue),
         },
         _ => Err(E2eeError::UnknownDiscriminant),
+    }
+}
+
+/// Parses the one optional terminal-root operation alongside the existing grammar.
+/// The caller must hold the authenticated peer profile and client opt-in.
+pub fn parse_terminal_root_command(
+    command: &str,
+    params: &[&str],
+) -> Result<ClientCommand, E2eeError> {
+    match (command, params) {
+        ("EKEY", ["PROVE", "ROOT-HEAD", challenge]) => Ok(ClientCommand::Ekey(
+            EkeyCommand::ProveRootHead(parse_id16(challenge)?),
+        )),
+        _ => parse_command(command, params),
     }
 }
 

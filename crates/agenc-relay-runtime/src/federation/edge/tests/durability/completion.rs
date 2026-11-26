@@ -59,6 +59,7 @@ fn pending_edge() -> TestResult<EdgeFederation> {
             result_bytes: Vec::new(),
             generation: ConnectionGeneration::new(1),
             kind: request::PendingKind::Command {
+                topic_channel: None,
                 message: Box::new(parse_message(FramedLine::new("NICK after")?)?.ok_or("message")?),
             },
             header,

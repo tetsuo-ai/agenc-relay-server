@@ -141,6 +141,8 @@ pub enum TypedBody {
     Policy(Box<conversation::ArcPolicy>),
     /// `ArcLeafMembershipProof`.
     LeafMembershipProof(Box<membership::ArcLeafMembershipProof>),
+    /// The active sequencer's optional terminal-root read receipt.
+    TerminalRootHead(Box<crate::terminal_root::TerminalRootHead>),
     /// `ArcRecoverySubmission`.
     RecoverySubmission(Box<recovery::ArcRecoverySubmission>),
     /// `ArcFederationWitnessResolution`.
@@ -237,6 +239,7 @@ pub fn decode_body(
         ArcWireObjectKind::LeafMembershipProof => {
             TypedBody::LeafMembershipProof(typed(body, budget)?)
         }
+        ArcWireObjectKind::TerminalRootHead => TypedBody::TerminalRootHead(typed(body, budget)?),
         ArcWireObjectKind::WitnessResolution => TypedBody::WitnessResolution(typed(body, budget)?),
     })
 }
@@ -281,6 +284,7 @@ impl TypedBody {
             Self::FederationEvent(_) => ArcWireObjectKind::FederationEvent,
             Self::Policy(_) => ArcWireObjectKind::Policy,
             Self::LeafMembershipProof(_) => ArcWireObjectKind::LeafMembershipProof,
+            Self::TerminalRootHead(_) => ArcWireObjectKind::TerminalRootHead,
             Self::RecoverySubmission(_) => ArcWireObjectKind::RecoverySubmission,
             Self::WitnessResolution(_) => ArcWireObjectKind::WitnessResolution,
         }

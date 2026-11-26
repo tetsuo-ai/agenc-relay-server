@@ -112,10 +112,18 @@ tls_enum! {
         WitnessResolution = 36,
         /// `ArcLeafMembershipProof`, published to the server (13.7.3).
         LeafMembershipProof = 37,
+        /// Challenge-bound, optionally negotiated active-sequencer receipt.
+        TerminalRootHead = 38,
     }
 }
 
 impl ArcWireObjectKind {
+    fn admits_length(self, bytes: usize) -> bool {
+        match self {
+            Self::TerminalRootHead => bytes == crate::terminal_root::OBJECT_BYTES,
+            _ => bytes <= self.maximum_object_bytes(),
+        }
+    }
     /// Standalone Commit and ReInit terminal certificates named in §12.
     #[must_use]
     pub const fn is_terminal_certificate(self) -> bool {
@@ -166,6 +174,7 @@ impl ArcWireObjectKind {
             | Self::WitnessResolution => limits::MAX_FEDERATION_CONTROL_OBJECT,
             Self::Policy => limits::MAX_POLICY_OBJECT,
             Self::LeafMembershipProof => limits::MAX_LEAF_MEMBERSHIP_OBJECT,
+            Self::TerminalRootHead => crate::terminal_root::OBJECT_BYTES,
             Self::RecoverySubmission => limits::MAX_RECOVERY_SUBMISSION_OBJECT,
         }
     }
@@ -224,6 +233,7 @@ impl ArcWireObjectKind {
             Self::WitnessResolution => "WITNESS-RESOLUTION",
             Self::Policy => "POLICY",
             Self::LeafMembershipProof => "LEAF-MEMBERSHIP-PROOF",
+            Self::TerminalRootHead => "ROOT-HEAD",
             Self::RecoverySubmission => "RECOVERY-SUBMISSION",
         }
     }
@@ -273,7 +283,7 @@ impl<'a> ArcWireObjectRef<'a> {
             .len()
             .checked_add(WIRE_OBJECT_ENVELOPE_BYTES)
             .ok_or(E2eeError::Overflow)?;
-        if total > kind.maximum_object_bytes() {
+        if !kind.admits_length(total) {
             return Err(E2eeError::LimitExceeded);
         }
         Ok(Self { kind, body })
@@ -339,7 +349,7 @@ impl ArcWireObject {
             .len()
             .checked_add(WIRE_OBJECT_ENVELOPE_BYTES)
             .ok_or(E2eeError::Overflow)?;
-        if total > kind.maximum_object_bytes() {
+        if !kind.admits_length(total) {
             return Err(E2eeError::LimitExceeded);
         }
         Ok(Self {
@@ -398,7 +408,7 @@ impl ArcWireObject {
         let total = declared
             .checked_add(WIRE_OBJECT_ENVELOPE_BYTES)
             .ok_or(E2eeError::Overflow)?;
-        if total != object_bytes || total > kind.maximum_object_bytes() {
+        if total != object_bytes || !kind.admits_length(total) {
             return Err(E2eeError::LimitExceeded);
         }
         Ok((kind, declared))

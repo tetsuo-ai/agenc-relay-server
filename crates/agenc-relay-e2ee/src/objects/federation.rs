@@ -104,6 +104,8 @@ tls_enum! {
         SubmitRecoveryElement = 43,
         /// Store a leaf-membership proof (companion 13.7.3).
         SubmitMembership = 44,
+        /// Enhanced profile only. The requesting account's terminal root.
+        ProveRootHead = 45,
     }
 }
 

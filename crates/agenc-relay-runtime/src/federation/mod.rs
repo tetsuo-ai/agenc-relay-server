@@ -214,7 +214,9 @@ impl PeerIdentity {
             server_name: peer.server_name.as_str().to_owned(),
             role,
             recovery_epoch_pin: peer.recovery_epoch,
-            profile: if peer.initial_root_profile {
+            profile: if peer.terminal_root_profile {
+                FederationProfile::TerminalRoot
+            } else if peer.initial_root_profile {
                 FederationProfile::InitialRoot
             } else {
                 FederationProfile::Base
