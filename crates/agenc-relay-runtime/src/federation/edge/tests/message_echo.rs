@@ -148,10 +148,7 @@ fn only_the_original_topic_instance_actor_and_text_are_held() -> TestResult {
             None
         } else {
             Some((
-                agenc_relay_domain::TopicText::try_from_str(
-                    observed,
-                    agenc_relay_types::ControlPolicy::RejectAll,
-                )?,
+                observed.to_owned(),
                 agenc_relay_types::UtcSecond::from_unix_seconds(5),
                 MessageId::from_bytes([6; 16]),
             ))
