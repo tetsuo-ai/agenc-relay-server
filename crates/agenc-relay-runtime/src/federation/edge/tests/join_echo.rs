@@ -176,8 +176,14 @@ fn edge_with_pending(command: &str, header: RequestHeader) -> TestResult<EdgeFed
         PendingRequest {
             generation: ConnectionGeneration::new(1),
             sink_gone: false,
-            kind: PendingKind::Command {
+            kind: PendingKind::Join {
                 message: Box::new(message),
+                requester: crate::mutation_render::JoinRequester {
+                    nickname: agenc_relay_domain::NicknameValue::parse("alice")?,
+                    replies: agenc_relay_client_wire::StandardReplies::negotiated(
+                        &Default::default(),
+                    ),
+                },
             },
             header,
             bytes: Vec::new(),

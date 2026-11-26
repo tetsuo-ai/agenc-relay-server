@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1163
-reviewed_source_sha256 = "69686cacc46fe58335f9dfe150b4be6d9d2c903d82786c15b948365491717451"
+reviewed_source_files = 1165
+reviewed_source_sha256 = "ce7b652451303a66c6aea8b1ad160830d284c0176192334392ece4047d872ec5"
 deferred = []
 
 [[region]]
@@ -630,3 +630,27 @@ end_line = 116
 span_sha256 = "7bb4ba1e8184a09671f390c6db49109d8bbe1a37a6ecd9e1a2803448a43a05b4"
 metric = "branches"
 reason = "The origin, federation peer and shared coordinator each impose an independent bound on exact results."
+
+[[region]]
+id = "runtime-federated-join-target-error"
+category = "protocol-enum-arms"
+file = "crates/agenc-relay-runtime/src/mutation_render/join/refusal.rs"
+item = "target_error"
+source_sha256 = "cb9d8e8dee74c784f7ba99f35c433edaf98606423de70c3c6b8cb257ecd5250e"
+start_line = 173
+end_line = 198
+span_sha256 = "1868b52c1c91d861a6232e2b3008689be5bcf4f539a081b2fdae84e9faf1faf6"
+metric = "branches"
+reason = "Each v1 JOIN refusal must carry a registered decision and the proper operands for its original target."
+
+[[region]]
+id = "runtime-federated-join-check-context"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/mutation_render/join/refusal.rs"
+item = "check_context"
+source_sha256 = "cb9d8e8dee74c784f7ba99f35c433edaf98606423de70c3c6b8cb257ecd5250e"
+start_line = 150
+end_line = 156
+span_sha256 = "800e984d91eb5ef31117d065d579b7531eb49b5dfad1e2d31b5afb76b9086f30"
+metric = "branches"
+reason = "A legacy JOIN refusal can name only the original canonical first operand."

@@ -28,7 +28,9 @@ const NAMES_CHUNK_BYTES: usize = 8_000;
 
 mod join;
 mod local_join;
-pub(crate) use join::{join_result_frames, join_result_replies};
+pub(crate) use join::{
+    JoinRequester, join_result_frames, join_result_replies, refused_join_replies,
+};
 pub(crate) use local_join::render_local_join_start;
 
 mod away;
