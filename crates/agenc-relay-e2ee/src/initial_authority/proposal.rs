@@ -160,6 +160,9 @@ enum PolicyInput<'a> {
 
 struct PolicyMaterial {
     subject: ArcPolicyTbs,
+    // Unsigned subjects also need their fields resolved for local plan and council checks.
+    // Only authenticate_initial_proposal, which requires two Approved inputs, returns
+    // these summaries to a caller as authenticated policies.
     checked: VerifiedPolicy,
 }
 
