@@ -10,6 +10,8 @@
 
 #![forbid(unsafe_code)]
 
+#[path = "stage_ten_drills/deletion_expiry.rs"]
+mod deletion_expiry;
 #[path = "stage_ten_drills/index_transition.rs"]
 mod index_transition;
 #[path = "stage_ten_drills/sequencer_rotation.rs"]
@@ -1097,6 +1099,23 @@ fn refuse_unissued_deletion(
     Ok(refusal)
 }
 
+/// Read the token privately from the registered response specified by section 14.6.
+fn issue_deletion_challenge(client: &mut ArcClient) -> TestResult<String> {
+    client.send("ACCT DELETE START")?;
+    let reply = acct_reply(client)?;
+    reply
+        .split_once(" NOTE ACCT DELETE_CHALLENGE ")
+        .and_then(|(_, body)| body.strip_suffix(" :Confirm account deletion"))
+        .filter(|token| {
+            token.len() == 22
+                && URL_SAFE_NO_PAD
+                    .decode(token)
+                    .is_ok_and(|bytes| bytes.len() == 16)
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| failure("the registered relay did not issue a canonical deletion challenge"))
+}
+
 /// Deletes an account through the client protocol and returns the closing
 /// lines the server sent.
 fn delete_account(
@@ -1110,18 +1129,7 @@ fn delete_account(
     client.read_until(|line| line.contains(" NOTE ACCT UPDATED "))?;
     client.send("ACCT PRESENCE PUBLIC")?;
     client.read_until(|line| line.contains(" NOTE ACCT UPDATED "))?;
-    client.send("ACCT DELETE START")?;
-    let challenge = client
-        .read_until(|line| line.contains("DELETE_CHALLENGE") || line.contains("FAIL ACCT"))?;
-    let token = challenge
-        .iter()
-        .find_map(|line| {
-            line.split_whitespace()
-                .skip_while(|field| *field != "DELETE_CHALLENGE")
-                .nth(1)
-                .map(str::to_owned)
-        })
-        .ok_or_else(|| failure(format!("no deletion challenge: {challenge:?}")))?;
+    let token = issue_deletion_challenge(&mut client)?;
     // A private challenge cannot stale the edge's published session revision.
     client.send("AWAY :deletion pending")?;
     client.read_until(|line| line.contains(" 306 "))?;
