@@ -49,8 +49,12 @@ async fn join_fixture() -> TestResult<(PrefixFixture, RequestHeader)> {
         fixture.core.context_mut()?,
         generation,
         prepared,
-        request::PendingKind::Command {
+        request::PendingKind::Join {
             message: Box::new(message),
+            requester: crate::mutation_render::JoinRequester {
+                nickname: session.nickname.clone(),
+                replies: agenc_relay_client_wire::StandardReplies::negotiated(&Default::default()),
+            },
         },
     );
     fixture.core.commit_staged_batch().await?;

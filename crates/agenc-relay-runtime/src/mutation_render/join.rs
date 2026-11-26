@@ -1,6 +1,10 @@
 //! Bounded JOIN replies carried by the membership's committed result.
 
 use super::*;
+use agenc_relay_domain::{DomainError, RejectedPlan, TargetFailure};
+
+mod refusal;
+pub(crate) use refusal::JoinRequester;
 
 pub(crate) fn join_result_replies(
     context: &StateCoreContext,
@@ -38,11 +42,12 @@ pub(crate) fn join_result_frames(
         .try_reserve_exact(frame_limit)
         .map_err(|_| RuntimeError::MemoryExhausted)?;
     for (index, target) in targets.iter().enumerate() {
-        if plan
+        if let Some(failure) = plan
             .failures()
             .iter()
-            .any(|failure| usize::from(failure.target_index()) == index)
+            .find(|failure| usize::from(failure.target_index()) == index)
         {
+            frames.push(failure_frame(context, &nickname, failure)?);
             continue;
         }
         let channel_id = joined.next().ok_or(RuntimeError::InvalidValue)?;
@@ -61,38 +66,59 @@ pub(crate) fn join_result_frames(
     if joined.next().is_some() {
         return Err(RuntimeError::InvalidValue);
     }
-    append_failures(context, &nickname, plan, &mut frames)?;
     Ok(frames)
 }
 
-fn append_failures(
+/// B.6 carries a complete failure vector even when no channel was joined.
+pub(crate) fn refused_join_replies(
+    context: &StateCoreContext,
+    bound: BoundSession,
+    plan: &RejectedPlan,
+) -> Result<Vec<agenc_relay_federation_wire::SchemaObject>, RuntimeError> {
+    let nickname = crate::client_render::requester_nickname(context, bound.user_id);
+    plan.failures()
+        .iter()
+        .map(|failure| {
+            let frame = failure_frame(context, &nickname, failure)?;
+            crate::federation::codec::results::reply_object(&frame)
+                .map_err(|_| RuntimeError::InvalidValue)
+        })
+        .collect()
+}
+
+fn failure_frame(
     context: &StateCoreContext,
     nickname: &str,
-    plan: &MutationPlan,
-    frames: &mut Vec<WireMessage>,
-) -> Result<(), RuntimeError> {
-    let capabilities = CapabilityState::default();
-    for failure in plan.failures() {
-        let name = failure
-            .target()
-            .channel()
-            .ok_or(RuntimeError::InvalidValue)?;
-        let line = format!("JOIN {}", name.presentation());
-        let framed = agenc_relay_client_wire::FramedLine::new(&line)
-            .map_err(|_| RuntimeError::InvalidValue)?;
-        let request = agenc_relay_client_wire::parse_message(framed)
-            .map_err(|_| RuntimeError::InvalidValue)?
-            .ok_or(RuntimeError::InvalidValue)?;
-        frames.push(crate::client_render::failure_frame(
-            &capabilities,
-            context.server_prefix(),
-            nickname,
-            &request,
-            failure.error(),
-            Some(failure.target()),
-        )?);
+    failure: &TargetFailure,
+) -> Result<WireMessage, RuntimeError> {
+    // These are the independently identifiable target-local v1 JOIN outcomes. A new
+    // semantic outcome needs a lossless representation before it can enter this vector.
+    match failure.error() {
+        DomainError::SecretUnavailable
+        | DomainError::Forbidden
+        | DomainError::BadState
+        | DomainError::LimitExceeded
+        | DomainError::EncryptedRoute => {}
+        _ => return Err(RuntimeError::InvalidValue),
     }
-    Ok(())
+    let name = failure
+        .target()
+        .channel()
+        .ok_or(RuntimeError::InvalidValue)?;
+    let line = format!("JOIN {}", name.presentation());
+    let framed =
+        agenc_relay_client_wire::FramedLine::new(&line).map_err(|_| RuntimeError::InvalidValue)?;
+    let request = agenc_relay_client_wire::parse_message(framed)
+        .map_err(|_| RuntimeError::InvalidValue)?
+        .ok_or(RuntimeError::InvalidValue)?;
+    crate::client_render::failure_frame(
+        &CapabilityState::default(),
+        context.server_prefix(),
+        nickname,
+        &request,
+        failure.error(),
+        Some(failure.target()),
+    )
 }
 
 pub(super) fn topic_frames(

@@ -149,6 +149,7 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
     wait_for_link(fixture, 0)?;
     wait_for_link(&network.edge_b, 0)?;
     ordinary_edge(&network.edge_b)?;
+    drop(register_when_available(fixture, "FirstProbe")?);
     let requests = account_requests(164)?;
     let [start, ..] = requests;
     let secret = InitialRootSecret::generate()?;
@@ -221,6 +222,8 @@ fn negotiated_edge_transfers_preserve_guarded_choices_and_exact_replies_across_r
     wait_for_link(fixture, before)?;
     assert_withdrawn(&mut owner)?;
     drop(owner);
+    // A new transport has to finish synchronizing before the edge can offer this profile.
+    drop(register_when_available(fixture, "FreshProbe")?);
     let mut reopened = registered_owner(fixture, "NewOwner", login, 188, account)?;
     eprintln!("federated account check: published choice after coordinator restart");
     assert!(

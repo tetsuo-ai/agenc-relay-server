@@ -166,6 +166,48 @@ async fn join_results_replay_topics_and_preserve_partial_failures() -> TestResul
         };
         assert_eq!(accepted.parameters, ["june", "#fresh"]);
         assert_eq!(refused.parameters, ["june", "#topic"]);
+        let ResultArm::Committed {
+            resulting_state_generation,
+        } = partial.arm
+        else {
+            return Err("no partial JOIN revision".into());
+        };
+        let bytes = request(
+            &mut edge,
+            &mut first,
+            &join_request(
+                first_session,
+                resulting_state_generation,
+                &["#fresh", "#topic"],
+            ),
+        )
+        .await?;
+        let failed = answer(&mut edge, &mut Vec::new()).await?;
+        assert_eq!(failed.header.result_kind, FederationResultKind::Failed);
+        assert!(failed.header.completion_event_id.is_none());
+        let denied = reply_parts(&failed)?;
+        assert_eq!(
+            denied
+                .iter()
+                .map(|row| (row.command.as_str(), row.parameters.as_slice()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("482", ["june".to_owned(), "#fresh".to_owned()].as_slice()),
+                ("482", ["june".to_owned(), "#topic".to_owned()].as_slice())
+            ]
+        );
+        let header = RequestHeader::from_object(&SchemaObject::decode_exact(
+            "FederationRequest",
+            &bytes,
+            &mut DecodeBudget::new(1 << 20, 4096),
+        )?)?;
+        send_request(&mut edge, &header, &bytes).await?;
+        let mut repeated_events = Vec::new();
+        assert_eq!(
+            answer(&mut edge, &mut repeated_events).await?.bytes,
+            failed.bytes
+        );
+        assert!(repeated_events.is_empty());
         Ok(())
     })
     .await

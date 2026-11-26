@@ -654,24 +654,62 @@ pub fn standard_reply(
     context: &[SafeReplyContext<'_>],
     description: SafeReplyDescription,
 ) -> Result<WireMessage, RenderError> {
-    if operation != "*"
-        && !CLIENT_COMMANDS.contains(&operation)
-        && !SERVER_COMMANDS.contains(&operation)
-    {
-        return Err(RenderError::UnknownRegistryValue);
+    StandardReplies::negotiated(capabilities).render(
+        prefix,
+        kind,
+        operation,
+        code,
+        context,
+        description,
+    )
+}
+
+/// The original connection's standard-replies decision, small enough to retain with a request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StandardReplies(bool);
+
+impl StandardReplies {
+    /// Capture exactly the negotiated capability at admission.
+    #[must_use]
+    pub fn negotiated(capabilities: &CapabilityState) -> Self {
+        Self(capabilities.enabled(STANDARD_REPLIES_CAPABILITY))
     }
-    if is_restricted_standard_reply(code)
-        || (operation != "*" && !CLIENT_COMMANDS.contains(&operation))
-    {
-        return Err(RenderError::InapplicableReply);
+
+    /// Whether this request uses standard replies.
+    #[must_use]
+    pub const fn enabled(self) -> bool {
+        self.0
     }
-    if !capabilities.enabled(STANDARD_REPLIES_CAPABILITY) {
-        return Err(RenderError::CapabilityRequired);
+
+    /// Render under the captured decision and the ordinary closed command/code/context registry.
+    pub fn render(
+        self,
+        prefix: &str,
+        kind: ReplyKind,
+        operation: &str,
+        code: PublicErrorCode,
+        context: &[SafeReplyContext<'_>],
+        description: SafeReplyDescription,
+    ) -> Result<WireMessage, RenderError> {
+        if operation != "*"
+            && !CLIENT_COMMANDS.contains(&operation)
+            && !SERVER_COMMANDS.contains(&operation)
+        {
+            return Err(RenderError::UnknownRegistryValue);
+        }
+        if is_restricted_standard_reply(code)
+            || (operation != "*" && !CLIENT_COMMANDS.contains(&operation))
+        {
+            return Err(RenderError::InapplicableReply);
+        }
+        if !self.enabled() {
+            return Err(RenderError::CapabilityRequired);
+        }
+        if !standard_reply_is_applicable(kind, operation, code, context) {
+            return Err(RenderError::InapplicableReply);
+        }
+        standard_reply_unrestricted(prefix, kind, operation, code, context, description)
     }
-    if !standard_reply_is_applicable(kind, operation, code, context) {
-        return Err(RenderError::InapplicableReply);
-    }
-    standard_reply_unrestricted(prefix, kind, operation, code, context, description)
 }
 
 fn standard_reply_is_applicable(
