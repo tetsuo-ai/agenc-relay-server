@@ -7,7 +7,7 @@ use agenc_relay_crypto::SignatureDomain;
 use crate::error::E2eeError;
 use crate::identity::ValidationTime;
 use crate::sequencer::SequencerKeySet;
-use crate::tls::{TlsEncode, tls_struct};
+use crate::tls::tls_struct;
 
 /// Maximum lifetime in UTC and on the initiating client's monotonic clock.
 pub const MAX_LIFETIME_SECONDS: u64 = 30;
@@ -111,11 +111,9 @@ impl TerminalRootHead {
         {
             return Err(E2eeError::InvalidValue);
         }
-        current.key.verify(
-            SignatureDomain::TerminalRootHead,
-            &tbs.encode()?,
-            &self.signature,
-        )
+        current
+            .key
+            .verify_encoded(SignatureDomain::TerminalRootHead, tbs, &self.signature)
     }
 }
 

@@ -3127,6 +3127,19 @@ mod tests {
         let mut state = DomainState::new()?;
         insert_session(&mut state, guest);
         assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
+
+        let mut state = DomainState::new()?;
+        insert_session(&mut state, session(28, None)?);
+        state.validate()?;
+
+        let mut guest = session(28, None)?;
+        guest.login_completion = Some(LoginCompletion {
+            epoch: agenc_relay_types::RecoveryEpoch::from_bytes([4; 16]),
+            digest: [5; 32],
+        });
+        let mut state = DomainState::new()?;
+        insert_session(&mut state, guest);
+        assert_eq!(state.validate(), Err(DomainError::InvariantViolation));
         Ok(())
     }
 

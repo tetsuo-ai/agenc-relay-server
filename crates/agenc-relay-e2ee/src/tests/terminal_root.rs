@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::test_support::{ACCOUNT, NETWORK, key, sequencer_credential};
+use crate::tls::TlsEncode;
 use agenc_relay_crypto::sign_canonical;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -76,7 +77,21 @@ fn a_complete_independent_set_can_only_accept_its_current_signer_and_exact_scope
         })
     };
     let verify = |proof: &TerminalRootHead| proof.verify(&login, &root, &challenge, &set, issued);
+    struct ExhaustedEncoding;
+    impl TlsEncode for ExhaustedEncoding {
+        fn encode_into(&self, _: &mut crate::tls::Writer) -> Result<(), E2eeError> {
+            Err(E2eeError::BudgetExceeded)
+        }
+    }
     let proof = signed(tbs.clone(), &old, SignatureDomain::TerminalRootHead)?;
+    assert_eq!(
+        current.key.verify_encoded(
+            SignatureDomain::TerminalRootHead,
+            &ExhaustedEncoding,
+            &proof.signature
+        ),
+        Err(E2eeError::BudgetExceeded)
+    );
     verify(&proof)?;
     let canonical =
         crate::ArcWireObject::new(crate::ArcWireObjectKind::TerminalRootHead, proof.encode()?)?
