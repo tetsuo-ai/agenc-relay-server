@@ -46,6 +46,7 @@ fn edge_with(command: &str, opcode: FederationOpcode) -> TestResult<EdgeFederati
             generation: CONNECTION,
             sink_gone: false,
             kind: PendingKind::Command {
+                topic_channel: None,
                 message: Box::new(message),
             },
             header: RequestHeader {
@@ -113,6 +114,80 @@ fn header(event: u8, generation: u64) -> EventHeader {
         correlation: None,
         cross_profile: None,
     }
+}
+
+#[test]
+fn only_the_original_topic_instance_actor_and_text_are_held() -> TestResult {
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let capabilities = negotiated_capabilities(&["message-tags", "batch", "labeled-response"])?;
+    let channel = ChannelInstanceId::from_bytes([7; 16]);
+    let other = ChannelInstanceId::from_bytes([8; 16]);
+    for (requested, observed, instance, sink, matched) in [
+        ("value", "value", channel, SENDER, true),
+        ("", "", channel, SENDER, true),
+        ("value", "other", channel, SENDER, false),
+        ("value", "value", other, SENDER, false),
+        (
+            "value",
+            "value",
+            channel,
+            UserId::from_bytes([19; 16]),
+            false,
+        ),
+    ] {
+        let mut edge = edge_with(
+            &format!("@label=t TOPIC #test :{requested}"),
+            FederationOpcode::Topic,
+        )?;
+        let PendingKind::Command { topic_channel, .. } = &mut pending(&mut edge)?.kind else {
+            return Err("missing original command".into());
+        };
+        *topic_channel = Some(channel);
+        let value = if observed.is_empty() {
+            None
+        } else {
+            Some((
+                agenc_relay_domain::TopicText::try_from_str(
+                    observed,
+                    agenc_relay_types::ControlPolicy::RejectAll,
+                )?,
+                agenc_relay_types::UtcSecond::from_unix_seconds(5),
+                MessageId::from_bytes([6; 16]),
+            ))
+        };
+        let event = ProjectedEvent::TopicChanged {
+            channel_id: instance,
+            resulting_revision: Revision::new(3)?,
+            actor: SourceView {
+                user_id: SENDER,
+                nickname: NicknameValue::parse("sam")?,
+                public_cloak: agenc_relay_testkit::deterministic_cloak(1)?,
+                account_label: None,
+            },
+            topic: value,
+        };
+        let mut header = header(1, GENERATION);
+        header.event_kind = FederationEventKind::TopicChanged;
+        let mut frames = vec![WireMessage::new(
+            "sam!u-a@h-b.invalid",
+            "TOPIC",
+            &["#test"],
+            Some(observed),
+        )?];
+        capture(
+            &mut edge,
+            context,
+            &header,
+            &event,
+            (sink, CONNECTION, Some(&capabilities)),
+            &mut frames,
+        )
+        .map_err(|e| format!("topic capture: {e:?}"))?;
+        assert_eq!(frames.is_empty(), matched);
+        assert_eq!(held(&edge)?, usize::from(matched));
+    }
+    Ok(())
 }
 
 #[test]
@@ -664,7 +739,7 @@ fn the_held_copies_become_the_response_and_keep_their_backing_until_sent() -> Te
         .map_err(|error| format!("{error:?}"))?;
     }
     let request = edge.pending.remove(&REQUEST).ok_or("pending")?;
-    let PendingKind::Command { message } = request.kind else {
+    let PendingKind::Command { message, .. } = request.kind else {
         return Err("not a command".into());
     };
     let reply = agenc_relay_client_wire::numeric_reply(

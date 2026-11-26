@@ -2856,7 +2856,7 @@ fn a_who_continuation_retains_the_exact_command_and_cursor() -> TestResult {
         agenc_relay_federation_wire::access::opaque_field(&query, "cursor")?,
         cursor
     );
-    let request::PendingKind::Command { message: saved } = &pending.kind else {
+    let request::PendingKind::Command { message: saved, .. } = &pending.kind else {
         return Err("continuation lost its client command".into());
     };
     assert_eq!(saved.command(), "WHO");

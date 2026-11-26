@@ -231,6 +231,7 @@ fn fixture_with_options(
             result_bytes: Vec::new(),
             generation,
             kind: PendingKind::Command {
+                topic_channel: None,
                 message: Box::new(
                     parse_message(FramedLine::new(
                         "@label=original CHATHISTORY LATEST #room * 7",
@@ -458,7 +459,7 @@ async fn disabled_or_unnegotiated_history_never_allocates_a_federation_request()
     for (enabled, negotiated) in [(false, true), (true, false)] {
         let (mut fixture, mut edge, sink, _) = fixture_with_options(enabled, negotiated)?;
         let pending = edge.pending.remove(&ID).ok_or("pending")?;
-        let PendingKind::Command { message } = pending.kind else {
+        let PendingKind::Command { message, .. } = pending.kind else {
             return Err("command".into());
         };
         edge.history.records.clear();

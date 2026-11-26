@@ -177,6 +177,7 @@ fn edge_with_pending(command: &str, header: RequestHeader) -> TestResult<EdgeFed
             generation: ConnectionGeneration::new(1),
             sink_gone: false,
             kind: PendingKind::Command {
+                topic_channel: None,
                 message: Box::new(message),
             },
             header,

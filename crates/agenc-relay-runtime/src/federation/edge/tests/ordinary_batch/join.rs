@@ -50,6 +50,7 @@ async fn join_fixture() -> TestResult<(PrefixFixture, RequestHeader)> {
         generation,
         prepared,
         request::PendingKind::Command {
+            topic_channel: None,
             message: Box::new(message),
         },
     );

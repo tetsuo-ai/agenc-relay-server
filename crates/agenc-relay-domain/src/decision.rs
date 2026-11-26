@@ -4249,7 +4249,7 @@ impl DomainState {
         revision: Revision,
     ) {
         if let Some(channel) = self.channels.get_mut(&channel_id) {
-            channel.topic = Some(topic);
+            channel.topic = (!topic.text.is_empty()).then_some(topic);
             channel.revision = revision;
         }
     }

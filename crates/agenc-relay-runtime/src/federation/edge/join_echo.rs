@@ -78,7 +78,7 @@ pub(super) fn capture(
 
 fn is_join(pending: &PendingRequest) -> bool {
     pending.header.opcode == agenc_relay_types::FederationOpcode::Join
-        && matches!(&pending.kind, PendingKind::Command { message } if message.command() == "JOIN")
+        && matches!(&pending.kind, PendingKind::Command { message, .. } if message.command() == "JOIN")
 }
 
 // Only RequestCompleted carries a wire correlation. A live origin admits one
@@ -185,7 +185,7 @@ fn check_target(
     {
         return Err(Violation::Ceiling);
     }
-    let PendingKind::Command { message } = &pending.kind else {
+    let PendingKind::Command { message, .. } = &pending.kind else {
         return Err(Violation::Consistency);
     };
     let name = edge

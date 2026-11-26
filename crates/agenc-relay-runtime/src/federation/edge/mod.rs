@@ -992,7 +992,7 @@ impl EdgeFederation {
             .values()
             .filter(|pending| !pending.sink_gone)
             .filter(|pending| {
-                matches!(&pending.kind, request::PendingKind::Command { message }
+                matches!(&pending.kind, request::PendingKind::Command { message, .. }
                     if message.command() == "JOIN")
             })
             .map(|pending| pending.generation);

@@ -189,6 +189,8 @@ pub(crate) enum PendingKind {
     },
     Command {
         message: Box<ParsedMessage>,
+        /// Channel instance selected at admission for the original public topic change.
+        topic_channel: Option<agenc_relay_types::ChannelInstanceId>,
     },
     Close,
 }
@@ -796,7 +798,13 @@ fn route_command(
         context,
         generation,
         prepared,
-        PendingKind::Command { message },
+        PendingKind::Command {
+            message,
+            topic_channel: match operation {
+                FederatedOperation::Topic { channel_id, .. } => Some(channel_id),
+                _ => None,
+            },
+        },
     );
     Ok(Routed::Forwarded)
 }
@@ -1989,7 +1997,7 @@ fn completed_request(
                 }]
             }
         }
-        (PendingKind::Command { message }, ResultArm::Failed { code, .. }) => {
+        (PendingKind::Command { message, .. }, ResultArm::Failed { code, .. }) => {
             vec![EdgeCompletion::CommandFailed {
                 generation,
                 message,
@@ -1997,7 +2005,7 @@ fn completed_request(
             }]
         }
         (
-            PendingKind::Command { message },
+            PendingKind::Command { message, .. },
             ResultArm::ReplyPage {
                 page_sequence,
                 next_cursor,
@@ -2013,7 +2021,7 @@ fn completed_request(
             }]
         }
         (
-            PendingKind::Command { message },
+            PendingKind::Command { message, .. },
             ResultArm::Committed {
                 resulting_state_generation,
             },
@@ -2030,12 +2038,13 @@ fn completed_request(
                 pending.replies,
             )
         }
-        (PendingKind::Command { message }, ResultArm::Committed { .. })
+        (PendingKind::Command { message, .. }, ResultArm::Committed { .. })
             if matches!(
                 pending.header.opcode,
                 agenc_relay_types::FederationOpcode::Message
                     | agenc_relay_types::FederationOpcode::NickChange
                     | agenc_relay_types::FederationOpcode::Setname
+                    | agenc_relay_types::FederationOpcode::Topic
             ) =>
         {
             super::message_echo::complete(
@@ -2046,7 +2055,7 @@ fn completed_request(
                 pending.replies,
             )
         }
-        (PendingKind::Command { message }, ResultArm::Committed { .. })
+        (PendingKind::Command { message, .. }, ResultArm::Committed { .. })
             if pending.header.opcode == agenc_relay_types::FederationOpcode::AccountSettings
                 && is_committed_account_deletion(&message, &pending.replies) =>
         {
@@ -2056,7 +2065,7 @@ fn completed_request(
                 message,
             }]
         }
-        (PendingKind::Command { message }, _) if !pending.replies.is_empty() => {
+        (PendingKind::Command { message, .. }, _) if !pending.replies.is_empty() => {
             vec![EdgeCompletion::Replies {
                 generation,
                 frames: pending.replies,
@@ -2065,14 +2074,16 @@ fn completed_request(
                 message,
             }]
         }
-        (PendingKind::Command { message }, ResultArm::NoContent) => vec![EdgeCompletion::Replies {
-            generation,
-            frames: Vec::new(),
-            page_sequence: 0,
-            next_cursor: None,
-            message,
-        }],
-        (PendingKind::Command { message }, _) => vec![EdgeCompletion::CommandCompleted {
+        (PendingKind::Command { message, .. }, ResultArm::NoContent) => {
+            vec![EdgeCompletion::Replies {
+                generation,
+                frames: Vec::new(),
+                page_sequence: 0,
+                next_cursor: None,
+                message,
+            }]
+        }
+        (PendingKind::Command { message, .. }, _) => vec![EdgeCompletion::CommandCompleted {
             generation,
             message,
         }],
@@ -2196,7 +2207,10 @@ fn send_directory_query(
         context,
         generation,
         prepared,
-        PendingKind::Command { message },
+        PendingKind::Command {
+            message,
+            topic_channel: None,
+        },
     );
     true
 }
@@ -2236,7 +2250,10 @@ pub(super) fn continue_join_names(
         context,
         generation,
         prepared,
-        PendingKind::Command { message },
+        PendingKind::Command {
+            message,
+            topic_channel: None,
+        },
     );
     true
 }
