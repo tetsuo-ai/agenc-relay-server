@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1163
-reviewed_source_sha256 = "69686cacc46fe58335f9dfe150b4be6d9d2c903d82786c15b948365491717451"
+reviewed_source_files = 1164
+reviewed_source_sha256 = "462bedce1d3027e6771ed2827bd3ef09a8a9f1ff0cfb82c183bbc36115f3c684"
 deferred = []
 
 [[region]]
@@ -636,9 +636,21 @@ id = "genesis-policy-review-initial-policy-proposal"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal/prospective.rs"
 item = "review_initial_policy_proposal"
-source_sha256 = "39dad9219734f8edcade5e66c844d62deac68250b975e344a41448bacd84b67d"
-start_line = 106
-end_line = 144
-span_sha256 = "c828896cb92e0ef192bc1e018080a77a7fa25080bc48bbf3da2351966d929474"
+source_sha256 = "d595ca21b4b67126129ba5e2dfccd9907e3ad219c7d5fc98a302569c8c9162f3"
+start_line = 145
+end_line = 184
+span_sha256 = "7c8eba7eef7902fabd8dc68c34eb6a3bc809610fd681901c6c6e2b7280c3d418"
 metric = "branches"
 reason = "A pending controller approval uses the canonical unsigned policy subject or the verified predecessor required by its generation."
+
+[[region]]
+id = "genesis-policy-assemble"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/proposal/prospective.rs"
+item = "assemble"
+source_sha256 = "d595ca21b4b67126129ba5e2dfccd9907e3ad219c7d5fc98a302569c8c9162f3"
+start_line = 110
+end_line = 134
+span_sha256 = "3885f171d21f5e76ef28a995817f746dff3c15a274f64765251553945b1d28c1"
+metric = "branches"
+reason = "A manual initial policy accepts bounded original approvals only from planned active signers and checks the original governing quorum before returning a complete registered policy."

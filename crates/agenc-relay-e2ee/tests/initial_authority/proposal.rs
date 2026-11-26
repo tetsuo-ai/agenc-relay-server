@@ -64,6 +64,58 @@ fn with_inputs<T>(
 }
 
 #[test]
+fn manually_collected_initial_policy_approvals_are_bound_to_the_reviewed_stage() -> TestResult {
+    use agenc_relay_e2ee::limits::{MAX_POLICY_APPROVALS_BYTES, POLICY_APPROVAL_BYTES};
+    for kind in [ArcConversationKind::Channel, ArcConversationKind::Direct] {
+        let f = unsigned(kind)?;
+        let bootstrap_tbs = f.policy.tbs.encode()?;
+        let operational_tbs = f.operational.tbs.encode()?;
+        let bootstrap = review(
+            &f,
+            InitialPolicyInputs::Bootstrap {
+                bootstrap_tbs: &bootstrap_tbs,
+                operational_tbs: &operational_tbs,
+            },
+            &mut budget(),
+        )?;
+        let zero = bootstrap
+            .assemble(f.policy.approvals.as_slice())?
+            .encode()?;
+        assert_eq!(zero, object(ArcWireObjectKind::Policy, &f.policy)?);
+        let next = review(
+            &f,
+            InitialPolicyInputs::Operational {
+                approved_bootstrap: &zero,
+                operational_tbs: &operational_tbs,
+            },
+            &mut budget(),
+        )?;
+        let approvals = f.operational.approvals.as_slice();
+        let received = next.assemble(approvals)?.encode()?;
+        assert_eq!(received, object(ArcWireObjectKind::Policy, &f.operational)?);
+        assert!(next.assemble(f.policy.approvals.as_slice()).is_err());
+        assert!(bootstrap.assemble(approvals).is_err());
+        assert!(next.assemble(&[]).is_err());
+        let first = approvals.first().ok_or(E2eeError::InvalidValue)?;
+        assert_eq!(first.encode()?.len(), POLICY_APPROVAL_BYTES);
+        let mut repeated = vec![first.clone(); MAX_POLICY_APPROVALS_BYTES / POLICY_APPROVAL_BYTES];
+        assert_eq!(next.assemble(&repeated)?.encode()?, received);
+        repeated.push(first.clone());
+        assert!(matches!(
+            next.assemble(&repeated),
+            Err(E2eeError::LimitExceeded)
+        ));
+        let mut conflicting = first.clone();
+        conflicting.device_signature[0] ^= 1;
+        assert!(next.assemble(&[first.clone(), conflicting]).is_err());
+        let mut foreign = first.clone();
+        foreign.signer_root_fingerprint[0] ^= 1;
+        assert!(next.assemble(&[foreign]).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn genesis_policy_review_separates_both_unsigned_subjects_and_the_approved_predecessor()
 -> TestResult {
     for route in [ArcConversationKind::Channel, ArcConversationKind::Direct] {

@@ -4,8 +4,10 @@ use super::{
     check_proposal,
 };
 use crate::identity::VerifiedCertificate;
-use crate::objects::conversation::ArcPolicyTbs;
-use crate::{DecodeBudget, E2eeError};
+use crate::limits::{MAX_POLICY_APPROVALS_BYTES, POLICY_APPROVAL_BYTES};
+use crate::objects::conversation::{ArcPolicy, ArcPolicyApproval, ArcPolicyTbs};
+use crate::policy::{VerifiedPolicy, verify_policy};
+use crate::{ArcWireObject, ArcWireObjectKind, DecodeBudget, E2eeError, TlsEncode, TlsVec};
 
 /// The two distinct policy decisions made before a generation-zero binding can be signed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,7 +40,7 @@ pub enum InitialPolicyInputs<'a> {
 /// public context can become a verified policy, a verified binding, or signing authority.
 pub struct InitialPolicyProposal {
     scope: InitialProposalScope,
-    stage: InitialPolicyStage,
+    approved_predecessor: Option<VerifiedPolicy>,
     bootstrap: ArcPolicyTbs,
     operational: ArcPolicyTbs,
     controller: [u8; 32],
@@ -51,7 +53,11 @@ impl InitialPolicyProposal {
     }
     /// The policy approval this review can request.
     pub fn stage(&self) -> InitialPolicyStage {
-        self.stage
+        if self.approved_predecessor.is_some() {
+            InitialPolicyStage::Operational
+        } else {
+            InitialPolicyStage::Bootstrap
+        }
     }
     /// The two policy subjects whose semantic IDs the binding and context commit.
     pub fn policies(&self) -> (&ArcPolicyTbs, &ArcPolicyTbs) {
@@ -59,7 +65,7 @@ impl InitialPolicyProposal {
     }
     /// Canonical input to the existing policy-approval signature for this stage.
     pub fn subject(&self) -> &ArcPolicyTbs {
-        match self.stage {
+        match self.stage() {
             InitialPolicyStage::Bootstrap => &self.bootstrap,
             InitialPolicyStage::Operational => &self.operational,
         }
@@ -92,6 +98,39 @@ impl InitialPolicyProposal {
             return Err(E2eeError::InvalidValue);
         }
         Ok(cert)
+    }
+
+    /// Assemble the canonical policy envelope after the governing devices return approvals.
+    /// Every signer must be planned and active in the reviewed directories. A repeated
+    /// identical response counts once. The existing policy verifier checks the signatures
+    /// and the governing quorum before the envelope is returned.
+    ///
+    /// # Errors
+    /// Refuses missing, conflicting, oversized, out-of-scope or invalid approvals.
+    pub fn assemble(&self, approvals: &[ArcPolicyApproval]) -> Result<ArcWireObject, E2eeError> {
+        if approvals.len() > MAX_POLICY_APPROVALS_BYTES / POLICY_APPROVAL_BYTES {
+            return Err(E2eeError::LimitExceeded);
+        }
+        let mut approvals = approvals.to_vec();
+        approvals
+            .sort_unstable_by_key(|entry| (entry.signer_root_fingerprint, entry.signer_device_id));
+        approvals.dedup();
+        for entry in &approvals {
+            self.eligible_signer(&entry.signer_root_fingerprint, &entry.signer_device_id)?;
+        }
+        let policy = ArcPolicy {
+            tbs: self.subject().clone(),
+            approvals: TlsVec::new(approvals)?,
+        };
+        let binding = self.scope.binding();
+        verify_policy(
+            &binding.network_id,
+            &binding.conversation_id,
+            &policy,
+            self.scope.principals(),
+            self.approved_predecessor.as_ref(),
+        )?;
+        ArcWireObject::new(ArcWireObjectKind::Policy, policy.encode()?)
     }
 }
 
@@ -136,7 +175,8 @@ pub fn review_initial_policy_proposal(
     )?;
     Ok(InitialPolicyProposal {
         scope: checked.scope,
-        stage,
+        approved_predecessor: (stage == InitialPolicyStage::Operational)
+            .then_some(checked.initial.checked),
         bootstrap: checked.initial.subject,
         operational: checked.operational.subject,
         controller: checked.creator,
