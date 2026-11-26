@@ -3512,7 +3512,8 @@ impl DomainState {
         display_name: DisplayNameValue,
         charges: Vec<RateCharge>,
     ) -> Result<PlanDecision, DomainError> {
-        let recipients = self.session_recipients(user_id)?;
+        let mut recipients = self.session_recipients(user_id)?;
+        recipients.insert(user_id);
         self.command_plan(
             vec![Mutation::SetDisplayName {
                 user_id,

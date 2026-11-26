@@ -116,6 +116,63 @@ fn header(event: u8, generation: u64) -> EventHeader {
 }
 
 #[test]
+fn only_the_negotiated_original_prepared_display_name_is_held() -> TestResult {
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let negotiated =
+        negotiated_capabilities(&["message-tags", "batch", "labeled-response", "setname"])?;
+    let no_setname = negotiated_capabilities(&["message-tags", "batch", "labeled-response"])?;
+    for (text, sink, capabilities, matched) in [
+        ("New Display", SENDER, &negotiated, true),
+        ("Other", SENDER, &negotiated, false),
+        (
+            "New Display",
+            UserId::from_bytes([9; 16]),
+            &negotiated,
+            false,
+        ),
+        ("New Display", SENDER, &no_setname, false),
+    ] {
+        let mut edge = edge_with(
+            "@label=name SETNAME :New  Display",
+            FederationOpcode::Setname,
+        )?;
+        let notification = ProjectedEvent::DisplayNameChanged {
+            view: agenc_relay_domain::federation::SessionEventView {
+                source: SourceView {
+                    user_id: SENDER,
+                    nickname: NicknameValue::parse("sam")?,
+                    public_cloak: agenc_relay_testkit::deterministic_cloak(1)?,
+                    account_label: None,
+                },
+                home_projection: None,
+            },
+            display_name: agenc_relay_domain::DisplayNameValue::prepare(text)?,
+        };
+        let mut header = header(1, GENERATION);
+        header.event_kind = FederationEventKind::DisplayNameChanged;
+        let mut frames = vec![WireMessage::new(
+            "sam!u-a@h-b.invalid",
+            "SETNAME",
+            &[],
+            Some(text),
+        )?];
+        capture(
+            &mut edge,
+            context,
+            &header,
+            &notification,
+            (sink, CONNECTION, Some(capabilities)),
+            &mut frames,
+        )
+        .map_err(|e| format!("display name capture: {e:?}"))?;
+        assert_eq!(held(&edge)?, usize::from(matched));
+        assert_eq!(frames.is_empty(), matched);
+    }
+    Ok(())
+}
+
+#[test]
 fn only_the_exact_original_nickname_change_is_held_without_echo_message() -> TestResult {
     let mut fixture = StateCoreFixture::new(Vec::new())?;
     let context = fixture.context_mut()?;
