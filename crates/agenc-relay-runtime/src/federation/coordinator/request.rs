@@ -867,9 +867,11 @@ pub(super) fn open_session_with_writes(
         resulting_state_generation: 0,
     };
     let planned = match grant.as_ref() {
-        Some(grant) => context
-            .domain()
-            .plan_authenticated_session_opened(seed, grant.authenticated_at),
+        Some(grant) => context.domain().plan_session_opened_with_login(
+            seed,
+            grant.login.authenticated_at,
+            grant.login.completion,
+        ),
         None => context.domain().plan_session_opened(seed),
     };
     let plan = match planned {

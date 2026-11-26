@@ -197,6 +197,7 @@ impl DurableSession {
             joined_channels: self.joined_channels.into_iter().collect(),
             created_at_utc: self.created_at_utc,
             fresh_auth_deadline: None,
+            login_completion: None,
             revision: self.revision,
         })
     }

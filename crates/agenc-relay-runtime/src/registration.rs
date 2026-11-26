@@ -118,6 +118,7 @@ struct ConnectionState {
     registration: RegistrationState,
     advertised: Arc<CapabilityProfile>,
     initial_root_edge: Option<crate::federation::LinkId>,
+    terminal_root_edge: Option<crate::federation::LinkId>,
     lease: Option<NicknameLease>,
     bound: Option<BoundSession>,
     nickname: Option<String>,
@@ -156,6 +157,7 @@ pub struct RegistrationRouter {
     advertised: ClientCapabilityProfiles,
     initial_root_profiles: ClientCapabilityProfiles,
     last_initial_root_link: Option<crate::federation::LinkId>,
+    last_terminal_root_link: Option<crate::federation::LinkId>,
     accounts: Option<AccountServiceCoordinator>,
     commands: crate::channels::RegisteredCommandExecutor,
     connections: BTreeMap<ConnectionGeneration, ConnectionState>,
@@ -320,6 +322,7 @@ impl RegistrationRouter {
             advertised,
             initial_root_profiles,
             last_initial_root_link: None,
+            last_terminal_root_link: None,
             accounts: hosted.map(AccountServiceCoordinator::new).transpose()?,
             commands,
             connections: BTreeMap::new(),
@@ -541,7 +544,9 @@ impl RegistrationRouter {
             complete_observation(context, &mut observation, ResultClass::Error);
             return RouteOutcome::Close(CloseReason::ProtocolError);
         };
-        if state.lost_initial_root_link(self.initial_root_link()) {
+        if state.lost_initial_root_link(self.initial_root_link())
+            || state.lost_terminal_root_link(self.terminal_root_link())
+        {
             complete_observation(context, &mut observation, ResultClass::Closed);
             self.connections.insert(generation, state);
             return RouteOutcome::Close(CloseReason::ProtocolError);
@@ -3405,6 +3410,7 @@ impl CommandRouter for RegistrationRouter {
                     registration,
                     advertised,
                     initial_root_edge: None,
+                    terminal_root_edge: None,
                     lease: None,
                     bound: None,
                     nickname: None,

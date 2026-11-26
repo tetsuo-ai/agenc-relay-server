@@ -689,6 +689,7 @@ pub struct SessionState {
     pub(crate) joined_channels: BTreeSet<ChannelInstanceId>,
     pub(crate) created_at_utc: UtcSecond,
     pub(crate) fresh_auth_deadline: Option<MonotonicTick>,
+    pub(crate) login_completion: Option<LoginCompletion>,
     pub(crate) revision: Revision,
 }
 
@@ -712,6 +713,7 @@ impl SessionState {
             joined_channels: BTreeSet::new(),
             created_at_utc: seed.created_at_utc,
             fresh_auth_deadline: None,
+            login_completion: None,
             revision: seed.revision,
         }
     }
@@ -828,6 +830,12 @@ impl SessionState {
         self.fresh_auth_deadline
     }
 
+    /// The process-local, grant-bound receipt for this registered session.
+    #[must_use]
+    pub const fn login_completion(&self) -> Option<LoginCompletion> {
+        self.login_completion
+    }
+
     /// Returns a principal that does not confuse account and guest authority.
     #[must_use]
     pub const fn principal(&self) -> Principal {
@@ -835,6 +843,22 @@ impl SessionState {
             Some(account_id) => Principal::Account(account_id),
             None => Principal::Guest(self.user_id),
         }
+    }
+}
+
+/// Identity of the opaque response established at a committed login. The
+/// cleartext account and generation stay on the authoritative session.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct LoginCompletion {
+    /// The coordinator epoch under which the account service sealed the response.
+    pub epoch: agenc_relay_types::RecoveryEpoch,
+    /// SHA-256 of the exact raw sealed response.
+    pub digest: [u8; 32],
+}
+
+impl core::fmt::Debug for LoginCompletion {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        out.write_str("LoginCompletion")
     }
 }
 
@@ -2049,7 +2073,8 @@ impl DomainState {
                 Err(DomainError::InvariantViolation)
             }
             None if session.account_session_generation.get() != 0
-                || session.fresh_auth_deadline.is_some() =>
+                || session.fresh_auth_deadline.is_some()
+                || session.login_completion.is_some() =>
             {
                 Err(DomainError::InvariantViolation)
             }

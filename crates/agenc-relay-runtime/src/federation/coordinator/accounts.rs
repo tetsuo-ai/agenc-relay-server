@@ -45,7 +45,7 @@ pub(crate) struct RemoteSessionGrant {
     /// The exact durable grant-row deletion.
     pub writes: Vec<AccountServiceDurableWrite>,
     /// The same connection's original OPAQUE authentication instant.
-    pub authenticated_at: agenc_relay_types::MonotonicTick,
+    pub login: crate::account_service::RegistrationLogin,
     /// The virtual connection whose grant barrier settles with the batch.
     pub owner: ConnectionGeneration,
 }

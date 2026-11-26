@@ -110,6 +110,8 @@ pub enum Staged {
 
 /// Everything the owner supplies about the base state for one execution.
 pub struct BaseView<'a> {
+    /// The current peer still supports the optional proof, including at replay.
+    pub terminal_root_profile: bool,
     /// The state core context.
     pub context: &'a mut StateCoreContext,
     /// Every configured edge.
@@ -201,6 +203,12 @@ pub(crate) fn run_with_object(
 ) -> Result<Staged, E2eeReplyCode> {
     let home = *peer.as_bytes();
     let decoded = request::decode(coordinator, &complete)?;
+    if decoded.request.opcode
+        == agenc_relay_e2ee::objects::federation::ArcFederationOpcode::ProveRootHead
+        && !view.terminal_root_profile
+    {
+        return Err(E2eeReplyCode::CapRequired);
+    }
     if decoded.request.home_server_id != home {
         return Err(E2eeReplyCode::InvalidFragment);
     }
@@ -542,6 +550,33 @@ fn execute(
         channel_member: &channel_member,
         binding_channel: &binding_channel,
         plan_binding: &plan_binding,
+        terminal_login: user_id.and_then(|id| {
+            if decoded.request.opcode
+                != agenc_relay_e2ee::objects::federation::ArcFederationOpcode::ProveRootHead
+            {
+                return None;
+            }
+            let session = domain.session(id)?;
+            let account = session.account_id()?.to_text();
+            let original = session.login_completion()?;
+            if session.home_server_id() != home
+                || session.connection_nonce() != &origin.connection_nonce
+                || origin.account_id.as_ref()?.as_slice() != account.as_bytes()
+                || !context.drift().accepts_wall(
+                    context.now(),
+                    agenc_relay_types::UtcSecond::from_unix_seconds(now),
+                )
+            {
+                return None;
+            }
+            Some(agenc_relay_e2ee::terminal_root::TerminalRootLogin {
+                network_id: coordinator.network_id,
+                recovery_epoch: *original.epoch.as_bytes(),
+                account_id: origin.account_id?,
+                account_session_generation: session.account_session_generation().get(),
+                login_completion_sha256: original.digest,
+            })
+        }),
         plan_root: &|root, object| {
             let account = agenc_relay_types::AccountId::parse_wire_bytes(&root.account_id)
                 .map_err(|_| E2eeReplyCode::AccountRequired)?;

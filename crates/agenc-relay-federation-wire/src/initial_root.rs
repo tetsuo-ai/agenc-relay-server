@@ -15,6 +15,8 @@ pub enum FederationProfile {
     Base,
     /// Appendix B plus prospective root creation and the private claim exchange.
     InitialRoot,
+    /// Initial-root profile plus private authenticated current-directory-head reads.
+    TerminalRoot,
 }
 
 impl FederationProfile {
@@ -24,7 +26,22 @@ impl FederationProfile {
         match self {
             Self::Base => BASE_FEDERATION_PROFILE_SHA256,
             Self::InitialRoot => INITIAL_ROOT_PROFILE_SHA256,
+            Self::TerminalRoot => agenc_relay_types::TERMINAL_ROOT_PROFILE_SHA256,
         }
+    }
+
+    /// The authenticated wire version for this peer.
+    pub const fn version(self) -> u16 {
+        match self {
+            Self::Base => 1,
+            Self::InitialRoot => 2,
+            Self::TerminalRoot => 3,
+        }
+    }
+
+    /// Both enhanced profiles preserve the v2 account operations.
+    pub const fn supports_initial_root(self) -> bool {
+        matches!(self, Self::InitialRoot | Self::TerminalRoot)
     }
 
     fn hello_bytes<const N: usize>(
@@ -33,14 +50,14 @@ impl FederationProfile {
         hash: [u8; 32],
     ) -> Result<[u8; N], CodecError> {
         let mut wire: [u8; N] = base.try_into().map_err(|_| CodecError::TypeMismatch)?;
-        if self == Self::InitialRoot {
+        if self.supports_initial_root() {
             if hash != self.hash() {
                 return Err(CodecError::CrossReference);
             }
             // Both profiles use exactly the same validated fields. Only the
             // leading version changes, including in the input to Ed25519.
             let version = wire.get_mut(..2).ok_or(CodecError::UnexpectedEof)?;
-            version.copy_from_slice(&2_u16.to_be_bytes());
+            version.copy_from_slice(&self.version().to_be_bytes());
         }
         Ok(wire)
     }
@@ -59,7 +76,7 @@ impl FederationProfile {
             return FederationHello::decode(&wire);
         }
         let version = wire.get_mut(..2).ok_or(CodecError::UnexpectedEof)?;
-        if version != 2_u16.to_be_bytes() {
+        if version != self.version().to_be_bytes() {
             return Err(CodecError::CrossReference);
         }
         version.copy_from_slice(&1_u16.to_be_bytes());

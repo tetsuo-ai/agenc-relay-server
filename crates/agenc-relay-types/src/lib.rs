@@ -27,6 +27,7 @@ pub use identifiers::{
 };
 pub use initial_root::{
     INITIAL_ROOT_CAPABILITY, INITIAL_ROOT_PROFILE_SHA256, INITIAL_ROOT_PROFILE_TOKEN,
+    TERMINAL_ROOT_CAPABILITY, TERMINAL_ROOT_PROFILE_SHA256, TERMINAL_ROOT_PROFILE_TOKEN,
 };
 pub use masks::{CompiledGlob, MAX_GLOB_BYTES, MAX_TYPED_MASK_BYTES, MaskSubject, TypedMask};
 pub use names::{
