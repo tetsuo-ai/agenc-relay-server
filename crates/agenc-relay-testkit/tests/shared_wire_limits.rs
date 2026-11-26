@@ -29,8 +29,19 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// holds every token at its ordinal position, and nothing else.
 #[test]
 fn object_kind_registries_agree() -> TestResult {
-    assert_eq!(E2EE_OBJECT_KINDS.len(), ArcWireObjectKind::ALL.len());
+    assert_eq!(E2EE_OBJECT_KINDS.len(), 37);
+    assert_eq!(E2EE_OBJECT_KINDS.len() + 1, ArcWireObjectKind::ALL.len());
     for kind in ArcWireObjectKind::ALL {
+        if *kind == ArcWireObjectKind::TerminalRootHead {
+            assert_eq!(kind.value(), 38);
+            assert!(E2eeObjectKind::parse(kind.token()).is_err());
+            assert_eq!(
+                E2eeObjectKind::terminal_root_response(kind.token())?.as_str(),
+                kind.token()
+            );
+            continue;
+        }
+        assert!(E2eeObjectKind::terminal_root_response(kind.token()).is_err());
         let ordinal = usize::from(kind.value());
         let position = ordinal.checked_sub(1).ok_or("ordinal zero")?;
         assert_eq!(
