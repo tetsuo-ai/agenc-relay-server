@@ -549,7 +549,7 @@ pub(super) fn committed(
                 (id, header, bytes),
                 PendingKind::Command {
                     message,
-                    topic_channel: None,
+                    echo_channels: None,
                 },
             );
             Vec::new()

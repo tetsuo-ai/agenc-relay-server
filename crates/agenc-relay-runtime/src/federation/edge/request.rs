@@ -170,6 +170,15 @@ pub enum EdgeCompletion {
     },
 }
 
+/// Physical channels selected when the originating command was admitted.
+pub(crate) enum EchoChannels {
+    Topic(agenc_relay_types::ChannelInstanceId),
+    Part {
+        channels: Vec<agenc_relay_types::ChannelInstanceId>,
+        reason: String,
+    },
+}
+
 /// Why a request was sent.
 pub(crate) enum PendingKind {
     SessionOpen {
@@ -189,8 +198,8 @@ pub(crate) enum PendingKind {
     },
     Command {
         message: Box<ParsedMessage>,
-        /// Channel instance selected at admission for the original public topic change.
-        topic_channel: Option<agenc_relay_types::ChannelInstanceId>,
+        /// Original channel instances for correlated membership and topic notifications.
+        echo_channels: Option<EchoChannels>,
     },
     Join {
         message: Box<ParsedMessage>,
@@ -200,14 +209,20 @@ pub(crate) enum PendingKind {
 }
 
 impl PendingKind {
-    fn for_operation(message: Box<ParsedMessage>, operation: &FederatedOperation) -> Self {
-        let topic_channel = match operation {
-            FederatedOperation::Topic { channel_id, .. } => Some(*channel_id),
+    fn for_operation(message: Box<ParsedMessage>, operation: FederatedOperation) -> Self {
+        let echo_channels = match operation {
+            FederatedOperation::Topic { channel_id, .. } => Some(EchoChannels::Topic(channel_id)),
+            FederatedOperation::Part {
+                all_channels: false,
+                channels,
+                reason,
+                ..
+            } => Some(EchoChannels::Part { channels, reason }),
             _ => None,
         };
         Self::Command {
             message,
-            topic_channel,
+            echo_channels,
         }
     }
 }
@@ -827,7 +842,7 @@ fn forward_command(
     };
     let pending = match requester {
         Some(requester) => PendingKind::Join { message, requester },
-        None => PendingKind::for_operation(message, &operation),
+        None => PendingKind::for_operation(message, operation),
     };
     register_request(edge, context, generation, prepared, pending);
     Ok(Routed::Forwarded)
@@ -2135,14 +2150,19 @@ fn completed_request(
                 pending.replies,
             )
         }
-        (PendingKind::Command { message, .. }, ResultArm::Committed { .. })
-            if matches!(
-                pending.header.opcode,
-                agenc_relay_types::FederationOpcode::Message
-                    | agenc_relay_types::FederationOpcode::NickChange
-                    | agenc_relay_types::FederationOpcode::Setname
-                    | agenc_relay_types::FederationOpcode::Topic
-            ) =>
+        (
+            PendingKind::Command {
+                message,
+                echo_channels,
+            },
+            ResultArm::Committed { .. },
+        ) if matches!(
+            pending.header.opcode,
+            agenc_relay_types::FederationOpcode::Message
+                | agenc_relay_types::FederationOpcode::NickChange
+                | agenc_relay_types::FederationOpcode::Setname
+                | agenc_relay_types::FederationOpcode::Topic
+        ) || matches!(echo_channels, Some(EchoChannels::Part { .. })) =>
         {
             super::message_echo::complete(
                 context,
@@ -2306,7 +2326,7 @@ fn send_directory_query(
         prepared,
         PendingKind::Command {
             message,
-            topic_channel: None,
+            echo_channels: None,
         },
     );
     true
@@ -2349,7 +2369,7 @@ pub(super) fn continue_join_names(
         prepared,
         PendingKind::Command {
             message,
-            topic_channel: None,
+            echo_channels: None,
         },
     );
     true

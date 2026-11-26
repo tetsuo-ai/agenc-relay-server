@@ -231,7 +231,7 @@ fn fixture_with_options(
             result_bytes: Vec::new(),
             generation,
             kind: PendingKind::Command {
-                topic_channel: None,
+                echo_channels: None,
                 message: Box::new(
                     parse_message(FramedLine::new(
                         "@label=original CHATHISTORY LATEST #room * 7",

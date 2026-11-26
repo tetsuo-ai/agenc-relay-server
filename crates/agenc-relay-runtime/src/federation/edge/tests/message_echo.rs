@@ -46,7 +46,7 @@ fn edge_with(command: &str, opcode: FederationOpcode) -> TestResult<EdgeFederati
             generation: CONNECTION,
             sink_gone: false,
             kind: PendingKind::Command {
-                topic_channel: None,
+                echo_channels: None,
                 message: Box::new(message),
             },
             header: RequestHeader {
@@ -140,10 +140,10 @@ fn only_the_original_topic_instance_actor_and_text_are_held() -> TestResult {
             &format!("@label=t TOPIC #test :{requested}"),
             FederationOpcode::Topic,
         )?;
-        let PendingKind::Command { topic_channel, .. } = &mut pending(&mut edge)?.kind else {
+        let PendingKind::Command { echo_channels, .. } = &mut pending(&mut edge)?.kind else {
             return Err("missing original command".into());
         };
-        *topic_channel = Some(channel);
+        *echo_channels = Some(EchoChannels::Topic(channel));
         let value = if observed.is_empty() {
             None
         } else {
@@ -183,6 +183,72 @@ fn only_the_original_topic_instance_actor_and_text_are_held() -> TestResult {
         .map_err(|e| format!("topic capture: {e:?}"))?;
         assert_eq!(frames.is_empty(), matched);
         assert_eq!(held(&edge)?, usize::from(matched));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_departure_echo_belongs_to_one_original_instance_actor_and_reason() -> TestResult {
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let capabilities = labeled()?;
+    let first = ChannelInstanceId::from_bytes([7; 16]);
+    let second = ChannelInstanceId::from_bytes([8; 16]);
+    let foreign = ChannelInstanceId::from_bytes([9; 16]);
+    for reason in ["", "requested"] {
+        let mut edge = edge_with(
+            &format!("@label=p PART #one,#two :{reason}"),
+            FederationOpcode::Part,
+        )?;
+        let PendingKind::Command { echo_channels, .. } = &mut pending(&mut edge)?.kind else {
+            return Err("missing original command".into());
+        };
+        *echo_channels = Some(EchoChannels::Part {
+            channels: vec![first, second],
+            reason: reason.to_owned(),
+        });
+        for (id, channel, actor, observed, expected, held_count) in [
+            (1, foreign, SENDER, reason, Ok(false), 0),
+            (1, first, SENDER, "different", Ok(false), 0),
+            (1, first, UserId::from_bytes([19; 16]), reason, Ok(false), 0),
+            (1, first, SENDER, reason, Ok(true), 1),
+            (1, first, SENDER, reason, Ok(true), 1),
+            (1, second, SENDER, reason, Err(Violation::Consistency), 1),
+            (2, first, SENDER, reason, Err(Violation::Consistency), 1),
+            (2, second, SENDER, reason, Ok(true), 2),
+        ] {
+            let event = ProjectedEvent::MemberParted {
+                channel_id: channel,
+                source: SourceView {
+                    user_id: actor,
+                    nickname: NicknameValue::parse("sam")?,
+                    public_cloak: agenc_relay_testkit::deterministic_cloak(1)?,
+                    account_label: None,
+                },
+                resulting_revision: Revision::new(3)?,
+                home_session_revision: Some(Revision::new(4)?),
+                reason: observed.to_owned(),
+            };
+            let mut header = header(id, GENERATION);
+            header.event_kind = FederationEventKind::MemberParted;
+            let name = if channel == first { "#one" } else { "#two" };
+            let mut frames = vec![WireMessage::new(
+                "sam!u-a@h-b.invalid",
+                "PART",
+                &[name],
+                Some(observed),
+            )?];
+            let result = capture(
+                &mut edge,
+                context,
+                &header,
+                &event,
+                (SENDER, CONNECTION, Some(&capabilities)),
+                &mut frames,
+            );
+            assert_eq!(result.map(|()| frames.is_empty()), expected);
+            assert_eq!(held(&edge)?, held_count);
+        }
     }
     Ok(())
 }

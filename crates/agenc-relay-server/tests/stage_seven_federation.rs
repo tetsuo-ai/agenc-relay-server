@@ -1507,7 +1507,8 @@ fn an_edge_gives_a_labeled_channel_message_one_labeled_response() -> TestResult 
     let outcome = wait_for_link(&network.edge_a, 0)
         .and_then(|()| wait_for_link(&network.edge_b, 0))
         .and_then(|()| exercise_labeled_channel_messages(&network))
-        .and_then(|()| verify_labeled_public_topics(&network));
+        .and_then(|()| verify_labeled_public_topics(&network))
+        .and_then(|()| verify_labeled_departures(&network));
     let stopped_a = edge_a.stop();
     let stopped_b = edge_b.stop();
     let stopped_core = coordinator.stop();
@@ -1666,6 +1667,81 @@ fn exercise_labeled_channel_messages(network: &Network) -> TestResult {
             return Err(failure(format!(
                 "{name}: expected one labeled ACK, received {replies:?}"
             )));
+        }
+    }
+    Ok(())
+}
+
+fn verify_labeled_departures(network: &Network) -> TestResult {
+    for (node, nick, watcher, channels) in [
+        (
+            &network.coordinator,
+            "corepart",
+            "corewatch",
+            ["#coreparta", "#corepartb"],
+        ),
+        (
+            &network.edge_a,
+            "edgepart",
+            "edgewatch",
+            ["#edgeparta", "#edgepartb"],
+        ),
+    ] {
+        let mut member = register_when_available(node, nick)?;
+        let mut observer = register_when_available(node, watcher)?;
+        member.send("CAP REQ :message-tags batch labeled-response")?;
+        member.read_until(|line| line.contains(" ACK "))?;
+        for channel in channels {
+            for (client, user) in [(&mut observer, watcher), (&mut member, nick)] {
+                client.send(&format!("JOIN {channel}"))?;
+                client.read_until(|line| line.contains(&format!(" 366 {user} {channel} ")))?;
+            }
+        }
+        let frames = labeled_exchange(
+            &mut member,
+            "depart",
+            &format!("PART {} :later", channels.join(",")),
+        )?;
+        let batch = frames
+            .iter()
+            .find_map(|frame| {
+                let mut fields = frame.split_ascii_whitespace();
+                (fields.next()? == "@label=depart" && fields.nth(1)? == "BATCH")
+                    .then(|| fields.next()?.strip_prefix('+'))
+                    .flatten()
+            })
+            .ok_or_else(|| failure(format!("{nick} lacked its labeled departure batch")))?;
+        for channel in channels {
+            let suffix = format!(" PART {channel} :later");
+            let copies: Vec<_> = frames
+                .iter()
+                .filter(|line| line.ends_with(&suffix))
+                .collect();
+            if copies.len() != 1 || !copies[0].starts_with(&format!("@batch={batch} :{nick}!")) {
+                return Err(failure(format!(
+                    "{nick} did not receive its unique departure from {channel}"
+                )));
+            }
+        }
+        let mut count = 0;
+        let observed = observer.read_until(|line| {
+            if line.starts_with(&format!(":{nick}!")) && line.contains(" PART ") {
+                count += 1;
+            }
+            count == 2
+        })?;
+        for channel in channels {
+            let suffix = format!(" PART {channel} :later");
+            if observed
+                .iter()
+                .filter(|line| line.starts_with(&format!(":{nick}!")) && line.ends_with(&suffix))
+                .count()
+                != 1
+            {
+                return Err(failure(format!(
+                    "{watcher} did not receive an ordinary departure from {channel}"
+                )));
+            }
         }
     }
     Ok(())
