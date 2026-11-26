@@ -589,7 +589,12 @@ impl DurableChannel {
             modes: self.modes,
             key_verifier: self.key_verifier,
             member_limit: self.member_limit,
-            topic: self.topic.map(DurableTopic::into_state).transpose()?,
+            // Older snapshots represented a cleared topic as a present empty value.
+            topic: self
+                .topic
+                .map(DurableTopic::into_state)
+                .transpose()?
+                .filter(|topic| !topic.text.is_empty()),
             memberships: self
                 .memberships
                 .into_iter()

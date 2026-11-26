@@ -271,8 +271,21 @@ impl RegistrationRouter {
     ) -> Result<(), RuntimeError> {
         let channels = accepted_channels(&frames)?;
         if channels.is_empty() {
+            let concealed = !frames.is_empty() && frames.iter().all(|frame| {
+                frame.command() == "403" || frame.command() == "FAIL"
+                    && matches!(frame.middle(), [op, code, _] if op == "JOIN" && code == "SECRET_UNAVAILABLE")
+            });
             let frames = self.prepare_edge_replies(generation, frames, (0, None), &message)?;
-            send_frames(context, generation, frames)?;
+            if concealed {
+                // Federation processing is asynchronous. The local cut starts a complete
+                // disclosure floor and orders subsequent output behind this logical reply.
+                context.begin_secret_floor(generation);
+                if let Err(due) = context.hold_secret_floor(generation, frames) {
+                    send_frames(context, generation, due)?;
+                }
+            } else {
+                send_frames(context, generation, frames)?;
+            }
             self.finish_join_names(context, generation);
             return Ok(());
         }

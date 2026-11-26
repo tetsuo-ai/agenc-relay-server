@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1166
-reviewed_source_sha256 = "310631e5dd71d6ab8b78b2a4dcd04330850f93f2dd073dd8b7558a2b316a37d2"
+reviewed_source_files = 1168
+reviewed_source_sha256 = "e7a8cb6f87da94c5244fa4beac57d835c6a5f4792f4f8117b7167a84a1ce8da4"
 deferred = []
 
 [[region]]
@@ -36,7 +36,7 @@ id = "domain-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-relay-domain/src/decision.rs"
 item = "validate_session_seed"
-source_sha256 = "49aff17491397496b0e65bbbf3043e8092c29d9821d4fe872ac01f519c405598"
+source_sha256 = "457b241ea8eded5283fe62fb17074cd995b028992ebf34423b688dddeefd1d0f"
 start_line = 2193
 end_line = 2462
 span_sha256 = "7f01e89dd0becb331f4f18bb3416a111d255167cc580353efa5a9f7fae8f7985"
@@ -84,7 +84,7 @@ id = "history-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-relay-domain/src/decision.rs"
 item = "authorize_history"
-source_sha256 = "49aff17491397496b0e65bbbf3043e8092c29d9821d4fe872ac01f519c405598"
+source_sha256 = "457b241ea8eded5283fe62fb17074cd995b028992ebf34423b688dddeefd1d0f"
 start_line = 2488
 end_line = 2509
 span_sha256 = "1ff392e30f0941e478445d2d53980c75cc49b516905653ebf94d9ccbc7ab2584"
@@ -168,7 +168,7 @@ id = "mode-mask-lookup-after-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-relay-domain/src/decision.rs"
 item = "entry_for_mask"
-source_sha256 = "49aff17491397496b0e65bbbf3043e8092c29d9821d4fe872ac01f519c405598"
+source_sha256 = "457b241ea8eded5283fe62fb17074cd995b028992ebf34423b688dddeefd1d0f"
 start_line = 5106
 end_line = 5126
 span_sha256 = "8674272a6fecd5827275e7a17fcef846a0ea4a82bdaf0a116360812bf27566df"
@@ -666,3 +666,27 @@ end_line = 135
 span_sha256 = "93a2d9fd31c8983d1987e719ceb069eaa31ae10d6f2b97d12f2b3d19a7c6fb86"
 metric = "regions"
 reason = "A failed canonical encoding cannot reach the purpose-bound signature verifier."
+
+[[region]]
+id = "runtime-federated-join-target-error"
+category = "protocol-enum-arms"
+file = "crates/agenc-relay-runtime/src/mutation_render/join/refusal.rs"
+item = "target_error"
+source_sha256 = "61330ec424843d7a9bd22d6973dd256d6c54e932e61d8ac6d567986f945cdc0b"
+start_line = 176
+end_line = 201
+span_sha256 = "1868b52c1c91d861a6232e2b3008689be5bcf4f539a081b2fdae84e9faf1faf6"
+metric = "branches"
+reason = "Each v1 JOIN refusal must carry a registered decision and the proper operands for its original target."
+
+[[region]]
+id = "runtime-federated-join-check-context"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/mutation_render/join/refusal.rs"
+item = "check_context"
+source_sha256 = "61330ec424843d7a9bd22d6973dd256d6c54e932e61d8ac6d567986f945cdc0b"
+start_line = 154
+end_line = 160
+span_sha256 = "800e984d91eb5ef31117d065d579b7531eb49b5dfad1e2d31b5afb76b9086f30"
+metric = "branches"
+reason = "A legacy JOIN refusal can name only the original canonical first operand."

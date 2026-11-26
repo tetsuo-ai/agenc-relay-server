@@ -1506,7 +1506,8 @@ fn an_edge_gives_a_labeled_channel_message_one_labeled_response() -> TestResult 
     let mut edge_b = DaemonProcess::start(&network.edge_b.config_path)?;
     let outcome = wait_for_link(&network.edge_a, 0)
         .and_then(|()| wait_for_link(&network.edge_b, 0))
-        .and_then(|()| exercise_labeled_channel_messages(&network));
+        .and_then(|()| exercise_labeled_channel_messages(&network))
+        .and_then(|()| verify_labeled_public_topics(&network));
     let stopped_a = edge_a.stop();
     let stopped_b = edge_b.stop();
     let stopped_core = coordinator.stop();
@@ -1665,6 +1666,61 @@ fn exercise_labeled_channel_messages(network: &Network) -> TestResult {
             return Err(failure(format!(
                 "{name}: expected one labeled ACK, received {replies:?}"
             )));
+        }
+    }
+    Ok(())
+}
+
+fn verify_labeled_public_topics(network: &Network) -> TestResult {
+    let full_topic = "é".repeat(512);
+    for (node, owner_name, member_name, channel) in [
+        (
+            &network.coordinator,
+            "coretopic",
+            "coremember",
+            "#coretopic",
+        ),
+        (&network.edge_a, "edgetopic", "edgemember", "#edgetopic"),
+    ] {
+        let mut owner = register_when_available(node, owner_name)?;
+        let mut member = register_when_available(node, member_name)?;
+        owner.send("CAP REQ :message-tags batch labeled-response")?;
+        owner.read_until(|line| line.contains(" ACK "))?;
+        for (client, nick) in [(&mut owner, owner_name), (&mut member, member_name)] {
+            client.send(&format!("JOIN {channel}"))?;
+            client.read_until(|line| line.contains(&format!(" 366 {nick} {channel} ")))?;
+        }
+        for (label, value) in [("set-topic", full_topic.as_str()), ("clear-topic", "")] {
+            let command = format!("TOPIC {channel} :{value}");
+            let received = labeled_exchange(&mut owner, label, &command)?;
+            let own = received
+                .iter()
+                .filter(|line| {
+                    line.contains(" TOPIC ") || line.starts_with(&format!("@label={label} "))
+                })
+                .collect::<Vec<_>>();
+            if !matches!(own.as_slice(), [line] if line.starts_with(&format!("@label={label} :{owner_name}!")) && line.ends_with(&command))
+            {
+                return Err(failure(format!(
+                    "{owner_name} did not receive one original labeled topic"
+                )));
+            }
+            let notification = member.read_until(|line| line.ends_with(&command))?;
+            if !notification
+                .last()
+                .is_some_and(|line| line.starts_with(&format!(":{owner_name}!")))
+            {
+                return Err(failure(
+                    "channel member did not receive the original user's ordinary topic",
+                ));
+            }
+            member.send(&format!("TOPIC {channel}"))?;
+            let code = if value.is_empty() { 331 } else { 332 };
+            let prefix = format!(" {code} {member_name} {channel} ");
+            let read = member.read_until(|line| line.contains(&prefix))?;
+            if !value.is_empty() && !read.last().is_some_and(|line| line.ends_with(value)) {
+                return Err(failure("public topic readback differed"));
+            }
         }
     }
     Ok(())

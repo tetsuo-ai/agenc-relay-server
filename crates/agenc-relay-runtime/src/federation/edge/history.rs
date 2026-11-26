@@ -368,7 +368,7 @@ fn render_page(
         .pending
         .get(&RequestId::from_bytes(record.request.request_id))
         .ok_or(Violation::Consistency)?;
-    let PendingKind::Command { message } = &pending.kind else {
+    let PendingKind::Command { message, .. } = &pending.kind else {
         return Err(Violation::Consistency);
     };
     let label = message
@@ -547,7 +547,10 @@ pub(super) fn committed(
                 context,
                 prepared.generation,
                 (id, header, bytes),
-                PendingKind::Command { message },
+                PendingKind::Command {
+                    message,
+                    topic_channel: None,
+                },
             );
             Vec::new()
         }
@@ -572,7 +575,7 @@ fn finish_page(
     let Some(pending) = edge.pending.remove(&id) else {
         return Vec::new();
     };
-    let PendingKind::Command { message } = pending.kind else {
+    let PendingKind::Command { message, .. } = pending.kind else {
         return Vec::new();
     };
     let Some(cursor) = next else {

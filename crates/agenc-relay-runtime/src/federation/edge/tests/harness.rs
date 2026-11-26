@@ -2856,7 +2856,7 @@ fn a_who_continuation_retains_the_exact_command_and_cursor() -> TestResult {
         agenc_relay_federation_wire::access::opaque_field(&query, "cursor")?,
         cursor
     );
-    let request::PendingKind::Command { message: saved } = &pending.kind else {
+    let request::PendingKind::Command { message: saved, .. } = &pending.kind else {
         return Err("continuation lost its client command".into());
     };
     assert_eq!(saved.command(), "WHO");
@@ -3012,6 +3012,15 @@ fn losing_the_link_before_a_join_echo_closes_that_requester_but_keeps_other_quer
         edge.connection_opened(context, generation);
         let session = SessionId::from_bytes([u8::try_from(number)?; 16]);
         let user = UserId::from_bytes([u8::try_from(number + 10)?; 16]);
+        context.sessions_mut().bind_session(
+            generation,
+            crate::state_core::session::BoundSession {
+                session_id: session,
+                user_id: user,
+                capability_hash: [0; 32],
+            },
+            Default::default(),
+        )?;
         let origin = edge.origins.get_mut(&generation).ok_or("missing origin")?;
         origin.session = Some((session, user));
         origin.pending_updates.clear();

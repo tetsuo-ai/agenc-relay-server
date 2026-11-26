@@ -1152,11 +1152,7 @@ fn finish_decision(
             stage_with_plan(coordinator, context, link, peer, fresh, arm, plan, fanout)
         }
         PlanDecision::Rejected(rejected) => {
-            let error = rejected
-                .failures()
-                .first()
-                .map_or(DomainError::BadState, |failure| failure.error());
-            finish_failed(coordinator, context, link, peer, fresh, error)
+            finish_rejected(coordinator, context, link, peer, fresh, &rejected)
         }
         // Query pages are the next slice; until then a query answers busy so
         // the client retries rather than waiting on a silent link.
@@ -1169,6 +1165,36 @@ fn finish_decision(
             DomainError::ServerBusy,
         ),
     }
+}
+
+fn finish_rejected(
+    coordinator: &mut FederationCoordinator,
+    context: &mut StateCoreContext,
+    link: LinkId,
+    peer: ServerId,
+    fresh: FreshRequest,
+    rejected: &agenc_relay_domain::RejectedPlan,
+) -> Result<(), Violation> {
+    let error = rejected
+        .failures()
+        .first()
+        .map_or(DomainError::BadState, |failure| failure.error());
+    if fresh.header.opcode != agenc_relay_types::FederationOpcode::Join {
+        return finish_failed(coordinator, context, link, peer, fresh, error);
+    }
+    let bound = fresh.bound.ok_or(Violation::Codec)?;
+    let replies = crate::mutation_render::refused_join_replies(context, bound, rejected)
+        .map_err(|_| Violation::Codec)?;
+    let code = if error == DomainError::LimitExceeded {
+        "SERVER_BUSY"
+    } else {
+        failure_code(error)
+    };
+    let arm = ResultArm::Failed {
+        code: code.to_owned(),
+        context: String::new(),
+    };
+    finish_without_plan(coordinator, context, link, peer, fresh, arm, replies)
 }
 
 /// Stages one mutation plan with its result, origin, and projection rows.

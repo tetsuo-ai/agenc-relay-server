@@ -199,6 +199,7 @@ fn install_request(base: &mut EdgeFederation, header: RequestHeader, bytes: Vec<
             result_bytes: Vec::new(),
             generation: ConnectionGeneration::new(1),
             kind: PendingKind::Command {
+                topic_channel: None,
                 message: Box::new(message),
             },
             header,

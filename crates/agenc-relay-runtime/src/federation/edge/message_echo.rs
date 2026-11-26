@@ -20,6 +20,8 @@
 //! notifications are independent of echo-message. The requested name and
 //! the coordinator's committed generation must match before sending the label.
 //! A connection without setname receives its ordinary labeled ACK.
+//! A public TOPIC notification must match the instance selected at admission,
+//! the original actor and the exact topic bytes (including an explicit clear).
 
 use agenc_relay_client_wire::{CapabilityState, ParsedMessage, WireMessage};
 use agenc_relay_domain::federation::ProjectedEvent;
@@ -68,6 +70,7 @@ pub(super) fn capture(
     let (user_id, generation, capabilities) = recipient;
     let actor = match event {
         ProjectedEvent::MessageDelivered(record) => record.sender.user_id,
+        ProjectedEvent::TopicChanged { actor, .. } => actor.user_id,
         ProjectedEvent::NicknameChanged { view, .. }
         | ProjectedEvent::DisplayNameChanged { view, .. } => view.source.user_id,
         _ => return Ok(()),
@@ -132,7 +135,11 @@ fn labeled_targets(
     capabilities: Option<&CapabilityState>,
     event: &ProjectedEvent,
 ) -> Option<usize> {
-    let PendingKind::Command { message } = &pending.kind else {
+    let PendingKind::Command {
+        message,
+        topic_channel,
+    } = &pending.kind
+    else {
         return None;
     };
     let labeled = message
@@ -151,6 +158,16 @@ fn labeled_targets(
             .middle()
             .first()
             .map(|targets| targets.split(',').count()),
+        (
+            FederationOpcode::Topic,
+            ProjectedEvent::TopicChanged {
+                channel_id, topic, ..
+            },
+        ) => {
+            let committed = topic.as_ref().map_or("", |(text, _, _)| text.as_str());
+            (topic_channel.as_ref() == Some(channel_id) && message.trailing() == Some(committed))
+                .then_some(1)
+        }
         (FederationOpcode::NickChange, ProjectedEvent::NicknameChanged { view, .. }) => {
             let requested = message
                 .middle()
