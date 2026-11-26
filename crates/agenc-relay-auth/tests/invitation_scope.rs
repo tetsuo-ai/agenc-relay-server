@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Architecture §11.3 and Appendix C. The client and coordinator share one scope check.
 use agenc_relay_auth::{AccountCreationInvite, AuthError};
 use agenc_relay_crypto::Ed25519SecretKey;
