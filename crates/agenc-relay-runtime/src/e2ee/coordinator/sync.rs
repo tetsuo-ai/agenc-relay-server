@@ -65,6 +65,10 @@ pub struct BaseOriginView {
 
 /// The base facts the owner supplies while a companion frame is handled.
 pub trait CompanionHost {
+    /// The original authenticated home link explicitly selected the terminal-head profile.
+    fn terminal_root_profile(&self) -> bool {
+        false
+    }
     /// Current UTC accepted by the existing drift monitor; absence cannot expire replay.
     fn trusted_ack_unix_seconds(&self) -> Option<u64> {
         None

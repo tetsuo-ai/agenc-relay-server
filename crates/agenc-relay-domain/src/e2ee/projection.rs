@@ -109,16 +109,18 @@ impl Opcode {
     pub const SUBMIT_RECOVERY_ELEMENT: Self = Self(43);
     /// `submit_membership` (companion 13.7.3).
     pub const SUBMIT_MEMBERSHIP: Self = Self(44);
+    /// Enhanced profile `prove_root_head`, for the issuing account only.
+    pub const PROVE_ROOT_HEAD: Self = Self(45);
 
     /// Every registered opcode.
     pub fn all() -> impl Iterator<Item = Self> {
-        (1..=44).map(Self)
+        (1..=45).map(Self)
     }
 
     /// Whether the value is a registered opcode.
     #[must_use]
     pub const fn is_valid(self) -> bool {
-        self.0 >= 1 && self.0 <= 44
+        self.0 >= 1 && self.0 <= 45
     }
 }
 
@@ -470,6 +472,7 @@ fn fetch_and_directory_completion(
         | (Opcode::FETCH_ACKS, R::ObjectPage | R::Empty(EmptyKind::Acks))
         | (Opcode::FETCH_RECEIPTS, R::ObjectPage | R::Empty(EmptyKind::Receipts))
         | (Opcode::FETCH_IDENTITY, R::ObjectPage | R::Empty(EmptyKind::Identity))
+        | (Opcode::PROVE_ROOT_HEAD, R::ObjectPage | R::Empty(EmptyKind::Identity))
         | (Opcode::FETCH_ROOT_CHAIN, R::ObjectPage | R::Empty(EmptyKind::RootChain))
         | (Opcode::FETCH_ROSTER, R::ObjectPage | R::Empty(EmptyKind::Roster))
         | (Opcode::FETCH_CAPABILITIES, R::ObjectPage | R::Empty(EmptyKind::Capabilities))
@@ -545,6 +548,7 @@ const FETCHABLE_KINDS: [u8; 30] = [
 pub fn descriptor_rule(opcode: Opcode, result: ResultKind) -> Result<DescriptorRule, PlanError> {
     completion_for(opcode, result)?;
     let rule = match (opcode, result) {
+        (Opcode::PROVE_ROOT_HEAD, ResultKind::ObjectPage) => DescriptorRule::ExactlyOne(38),
         (Opcode::RESERVE_CHANNEL | Opcode::RESERVE_DIRECT, ResultKind::Reserved) => {
             DescriptorRule::ExactlyOne(KIND_RESERVATION)
         }

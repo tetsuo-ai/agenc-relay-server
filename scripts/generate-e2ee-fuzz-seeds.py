@@ -122,6 +122,22 @@ def attach_challenge() -> bytes:
     return tbs + bytes([98] * 64)
 
 
+def terminal_root_head() -> bytes:
+    """Public signature and credential digests from the deterministic Rust signing vector."""
+    set_digest = bytes.fromhex("4b751f75f5ab18430aeaf931c2e545001b09e13d4d854b780f17064e4b8412f0")
+    credential_id = bytes.fromhex("0b93b8b5b277e0fd15f3191f9b2858557be371f99a5c91827fbf82ffa8b7de58")
+    signature = bytes.fromhex(
+        "7b64a9957b9510dda3bb9f63ca403ca92ff1a95ade077d560631ed693924270c"
+        "e14e0f1a92b5202266f1199c27a55134789827f7d82cf6adf0c7e9e9a94a1a08"
+    )
+    login = u16(1) + bytes([1] * 32) + bytes([9] * 16) + ACCOUNT + u64(4) + bytes([10] * 32)
+    root = u64(17) + bytes([11] * 32) + bytes([12] * 32)
+    return (
+        login + bytes([13] * 16) + root + u64(7) + set_digest + credential_id
+        + u64(520_000) + u64(520_030) + signature
+    )
+
+
 def commit_ack() -> bytes:
     tbs = (
         u16(1)
@@ -270,6 +286,7 @@ def main() -> None:
         "sequencer-record-candidate": envelope(25, u8(1) + candidate_receipt()),
         "device-attach-challenge": envelope(26, attach_challenge()),
         "commit-ack": envelope(4, commit_ack()),
+        "terminal-root-head": envelope(38, terminal_root_head()),
         "federation-origin": envelope(30, federation_origin()),
         "application-mls": envelope(1, private_message(1)),
         "commit-mls": envelope(2, private_message(3)),

@@ -11,3 +11,15 @@ pub const INITIAL_ROOT_PROFILE_SHA256: [u8; 32] = [
 
 /// Unpadded base64url encoding of the prospective initial-root profile digest.
 pub const INITIAL_ROOT_PROFILE_TOKEN: &str = "mILG1np5ioX2E2EDLXjvqP6ALXCPQ8OW8uQNpILX5KE";
+
+/// Independently negotiated current-root directory read.
+pub const TERMINAL_ROOT_CAPABILITY: &str = "agenc.ag/root-head";
+
+/// Hash over the optional version 2 profile and the exact terminal-head specification.
+pub const TERMINAL_ROOT_PROFILE_SHA256: [u8; 32] = [
+    0x42, 0x73, 0x7e, 0xfb, 0x2d, 0x11, 0xd1, 0xd6, 0xf7, 0x96, 0x71, 0xf0, 0x69, 0x4c, 0x27, 0x3a,
+    0x9b, 0x57, 0xb3, 0x3e, 0x7b, 0x38, 0x1a, 0xed, 0xd7, 0xd0, 0x2e, 0xa0, 0xb3, 0x60, 0xab, 0xcf,
+];
+
+/// Unpadded base64url of the terminal-head profile.
+pub const TERMINAL_ROOT_PROFILE_TOKEN: &str = "QnN--y0R0db3lnHwaUwnOptXsz57OBrt19AuoLNgq88";

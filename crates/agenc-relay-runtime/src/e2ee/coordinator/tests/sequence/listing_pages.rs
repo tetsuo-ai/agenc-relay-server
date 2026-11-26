@@ -226,6 +226,7 @@ fn evaluate_with(
         channel_member: &member,
         binding_channel: &|_| None,
         plan_binding: &plan_binding,
+        terminal_login: None,
         plan_root: &|_, _| Ok(None),
         state_generation: super::super::STATE_GENERATION,
         source_view: Vec::new(),
