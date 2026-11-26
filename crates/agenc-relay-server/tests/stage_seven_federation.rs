@@ -1624,6 +1624,72 @@ fn exercise_labeled_channel_messages(network: &Network) -> TestResult {
             )));
         }
     }
+    // A labeled mutation has one original reply even without echo-message.
+    // The legacy remote projection carries no per-client nickname audience.
+    iris.send("CAP REQ :-echo-message")?;
+    iris.read_until(|line| line.contains(" ACK "))
+        .map_err(|e| failure(format!("disable echo-message: {e}")))?;
+    verify_nickname_echo(&mut iris, &mut jon, &mut lia, "iris", "IrisTwo")?;
+    kai.send("CAP REQ :message-tags batch labeled-response")?;
+    kai.read_until(|line| line.contains(" ACK "))?;
+    let mut cora = register_when_available(&network.coordinator, "cora")?;
+    cora.send("JOIN #echo")?;
+    cora.read_until(|line| line.contains(" 366 cora #echo "))?;
+    verify_nickname_echo(&mut kai, &mut cora, &mut lia, "kai", "KaiTwo")
+}
+
+fn verify_nickname_echo(
+    sender: &mut ArcClient,
+    local_observer: &mut ArcClient,
+    other_edge: &mut ArcClient,
+    before: &str,
+    after: &str,
+) -> TestResult {
+    let lines = labeled_exchange(sender, "self-nick", &format!("NICK {after}"))
+        .map_err(|e| failure(format!("original {before} rename: {e}")))?;
+    let own: Vec<_> = lines
+        .iter()
+        .filter(|line| line.contains(" NICK "))
+        .collect();
+    let expected_source = format!(":{before}!");
+    let expected_target = |line: &str| {
+        line.split_once(" NICK ")
+            .is_some_and(|(_, target)| target.strip_prefix(':').unwrap_or(target) == after)
+    };
+    let label_count = lines
+        .iter()
+        .filter(|line| line.starts_with("@label=self-nick "))
+        .count();
+    if !matches!(own.as_slice(), [line] if line.strip_prefix("@label=self-nick ").is_some_and(|line|
+        line.starts_with(&expected_source) && expected_target(line)))
+        || label_count != 1
+    {
+        return Err(failure(format!(
+            "expected one original labeled nickname echo: {lines:?}"
+        )));
+    }
+    let copies = local_observer
+        .read_until(|line| line.contains(" NICK "))
+        .map_err(|e| failure(format!("local observer of {before} rename: {e}")))?;
+    let copy = copies.last().ok_or("missing local nickname notification")?;
+    if !copy.starts_with(&expected_source) || !expected_target(copy) {
+        return Err(failure(format!(
+            "unexpected local nickname notification: {copy}"
+        )));
+    }
+    other_edge.send(&format!("WHOIS {after}"))?;
+    let observed = other_edge.read_until(|line| line.contains(" 318 "))?;
+    if !observed
+        .iter()
+        .any(|line| line.contains(&format!(" 311 lia {after} ")))
+        || observed
+            .iter()
+            .any(|line| line.contains("self-nick") || line.contains(" NICK "))
+    {
+        return Err(failure(format!(
+            "unexpected legacy cross-edge nickname view: {observed:?}"
+        )));
+    }
     Ok(())
 }
 

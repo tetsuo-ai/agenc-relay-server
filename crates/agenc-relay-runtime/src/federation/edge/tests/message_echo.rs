@@ -115,6 +115,77 @@ fn header(event: u8, generation: u64) -> EventHeader {
     }
 }
 
+#[test]
+fn only_the_exact_original_nickname_change_is_held_without_echo_message() -> TestResult {
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let capabilities = negotiated_capabilities(&["message-tags", "batch", "labeled-response"])?;
+    for (request, new_name, recipient, matched) in [
+        ("@label=n NICK Wren", "Wren", SENDER, true),
+        ("@label=n NICK :Wren", "Wren", SENDER, true),
+        ("@label=n NICK Wren", "Other", SENDER, false),
+        (
+            "@label=n NICK Wren",
+            "Wren",
+            UserId::from_bytes([9; 16]),
+            false,
+        ),
+        ("NICK Wren", "Wren", SENDER, false),
+    ] {
+        let mut edge = edge_with(request, FederationOpcode::NickChange)?;
+        let notification = ProjectedEvent::NicknameChanged {
+            old_nickname: NicknameValue::parse("sam")?,
+            view: agenc_relay_domain::federation::SessionEventView {
+                source: SourceView {
+                    user_id: SENDER,
+                    nickname: NicknameValue::parse(new_name)?,
+                    public_cloak: agenc_relay_testkit::deterministic_cloak(1)?,
+                    account_label: None,
+                },
+                home_projection: None,
+            },
+        };
+        let mut header = header(1, GENERATION);
+        header.event_kind = FederationEventKind::NicknameChanged;
+        let mut frames = vec![WireMessage::new(
+            "sam!u-a@h-b.invalid",
+            "NICK",
+            &[],
+            Some(new_name),
+        )?];
+        capture(
+            &mut edge,
+            context,
+            &header,
+            &notification,
+            (recipient, CONNECTION, Some(&capabilities)),
+            &mut frames,
+        )
+        .map_err(|violation| format!("unexpected NICK capture rejection: {violation:?}"))?;
+        assert_eq!(held(&edge)?, usize::from(matched));
+        assert_eq!(frames.is_empty(), matched);
+        if matched {
+            assert!(
+                validate_result(
+                    pending(&mut edge)?,
+                    &ResultArm::Committed {
+                        resulting_state_generation: GENERATION + 1
+                    }
+                )
+                .is_err()
+            );
+            validate_result(
+                pending(&mut edge)?,
+                &ResultArm::Committed {
+                    resulting_state_generation: GENERATION,
+                },
+            )
+            .map_err(|violation| format!("matching NICK completion rejected: {violation:?}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// The one copy the renderer produced for the sender.
 fn copy(text: &str) -> TestResult<Vec<WireMessage>> {
     Ok(vec![WireMessage::new(
