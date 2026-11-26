@@ -47,6 +47,23 @@ fn an_encrypted_channel_needs_registration_and_no_topic() -> Result<(), DomainEr
 }
 
 #[test]
+fn a_legacy_empty_topic_reopens_without_a_setter_or_timestamp() -> Result<(), DomainError> {
+    let mut value = channel(2, "#legacy")?;
+    value.topic = Some(PlaintextTopic {
+        text: TopicText::try_from_str("", agenc_relay_types::ControlPolicy::RejectAll)?,
+        message_id: MessageId::from_bytes(id(2)),
+        setter: UserId::from_bytes(id(66)),
+        set_at: UtcSecond::from_unix_seconds(11),
+    });
+    let row = DurableChannel::from_state(&value).ok_or(DomainError::InvariantViolation)?;
+    assert!(row.topic.is_some());
+    let restored = row.into_state()?;
+    assert!(restored.topic().is_none());
+    assert_eq!(restored.revision(), value.revision());
+    Ok(())
+}
+
+#[test]
 fn an_ephemeral_channel_carries_no_role_grants() -> Result<(), DomainError> {
     let mut value = channel(3, "#grants")?;
     value.role_grants.insert(account(3), Role::Owner);

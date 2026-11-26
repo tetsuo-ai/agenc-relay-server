@@ -63,6 +63,7 @@ async fn prepared_deletion(
         .get_mut(&header.request_id)
         .ok_or("pending request")?
         .kind = PendingKind::Command {
+        topic_channel: None,
         message: Box::new(message),
     };
     let (descriptor, result) = result_object(&header, &bytes, vec![final_reply(accepted)?])?;
