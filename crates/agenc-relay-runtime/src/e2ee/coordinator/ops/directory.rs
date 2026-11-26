@@ -94,13 +94,9 @@ pub fn fetch_identity(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     single(exec, bytes, EmptyKind::Identity)
 }
 
-/// Signs only the terminal committed entry for the origin which consumed this login.
-pub fn prove_root_head(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
-    use agenc_relay_e2ee::terminal_root::{
-        MAX_LIFETIME_SECONDS, TerminalRootHead, TerminalRootHeadTbs, TerminalRootIdentity,
-    };
-    let challenge = exec.params().read(|r| r.fixed::<16>())?;
-    let account = exec.account_digest()?;
+fn terminal_login(
+    exec: &Exec<'_>,
+) -> Result<agenc_relay_e2ee::terminal_root::TerminalRootLogin, Fail> {
     let login = exec
         .terminal_login
         .clone()
@@ -114,6 +110,39 @@ pub fn prove_root_head(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     {
         return Err(E2eeReplyCode::AccountRequired.into());
     }
+    Ok(login)
+}
+
+fn terminal_identity(
+    exec: &Exec<'_>,
+    account: &[u8; 32],
+) -> Result<Option<agenc_relay_e2ee::terminal_root::TerminalRootIdentity>, Fail> {
+    use agenc_relay_e2ee::terminal_root::TerminalRootIdentity;
+    let Some(head) = exec
+        .coordinator
+        .state
+        .directory
+        .account(account)
+        .and_then(|row| row.root.as_ref())
+    else {
+        return Ok(None);
+    };
+    let object_id = head.chain.last().copied().ok_or(E2eeReplyCode::Syncing)?;
+    Ok(Some(TerminalRootIdentity {
+        generation: head.generation,
+        fingerprint: head.fingerprint,
+        object_id,
+    }))
+}
+
+/// Signs only the terminal committed entry for the origin which consumed this login.
+pub fn prove_root_head(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    use agenc_relay_e2ee::terminal_root::{
+        MAX_LIFETIME_SECONDS, TerminalRootHead, TerminalRootHeadTbs,
+    };
+    let challenge = exec.params().read(|r| r.fixed::<16>())?;
+    let account = exec.account_digest()?;
+    let login = terminal_login(exec)?;
     let set = exec
         .coordinator
         .key_set
@@ -134,25 +163,14 @@ pub fn prove_root_head(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     {
         return Err(E2eeReplyCode::Syncing.into());
     }
-    let Some(head) = exec
-        .coordinator
-        .state
-        .directory
-        .account(&account)
-        .and_then(|d| d.root.as_ref())
-    else {
+    let Some(root) = terminal_identity(exec, &account)? else {
         return single(exec, None, EmptyKind::Identity);
     };
-    let object_id = head.chain.last().copied().ok_or(E2eeReplyCode::Syncing)?;
     let tbs = TerminalRootHeadTbs {
         version: 1,
         login,
         challenge,
-        root: TerminalRootIdentity {
-            generation: head.generation,
-            fingerprint: head.fingerprint,
-            object_id,
-        },
+        root,
         sequencer_set_generation: set.set_generation,
         sequencer_set_digest: set.digest,
         sequencer_credential_id: key.credential_id,

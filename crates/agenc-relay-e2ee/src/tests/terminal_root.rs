@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::*;
 use crate::test_support::{ACCOUNT, NETWORK, key, sequencer_credential};
 use agenc_relay_crypto::sign_canonical;
@@ -126,6 +128,47 @@ fn a_complete_independent_set_can_only_accept_its_current_signer_and_exact_scope
     assert!(
         proof
             .verify(&login, &competing, &challenge, &set, issued)
+            .is_err()
+    );
+    let mut wrong_version = tbs.clone();
+    wrong_version.version = 2;
+    assert!(
+        verify(&signed(
+            wrong_version,
+            &old,
+            SignatureDomain::TerminalRootHead
+        )?)
+        .is_err()
+    );
+    let mut wrong_set = tbs.clone();
+    wrong_set.sequencer_set_generation += 1;
+    assert!(verify(&signed(wrong_set, &old, SignatureDomain::TerminalRootHead)?).is_err());
+    let mut wrong_digest = tbs.clone();
+    wrong_digest.sequencer_set_digest = [0; 32];
+    assert!(
+        verify(&signed(
+            wrong_digest,
+            &old,
+            SignatureDomain::TerminalRootHead
+        )?)
+        .is_err()
+    );
+    let mut empty = set.clone();
+    empty.credentials.clear();
+    assert!(
+        proof
+            .verify(&login, &root, &challenge, &empty, issued)
+            .is_err()
+    );
+    let mut overflow = tbs.clone();
+    overflow.issued_at = u64::MAX;
+    assert!(verify(&signed(overflow, &old, SignatureDomain::TerminalRootHead)?).is_err());
+    let mut early = tbs.clone();
+    early.issued_at = 99;
+    early.expires_at = 129;
+    assert!(
+        signed(early, &old, SignatureDomain::TerminalRootHead)?
+            .verify(&login, &root, &challenge, &set, ValidationTime(101))
             .is_err()
     );
     let mut late = tbs;

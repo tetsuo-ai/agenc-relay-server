@@ -59,22 +59,20 @@ impl RegistrationRouter {
         }
     }
 
-    pub(super) fn registration_message(
+    fn private_root_capability(
         &self,
-        context: &StateCoreContext,
-        generation: ConnectionGeneration,
-        state: &mut ConnectionState,
-        message: agenc_relay_client_wire::ParsedMessage,
-    ) -> Result<Vec<RegistrationAction>, RegistrationError> {
-        let link = self.initial_root_link();
+        state: &ConnectionState,
+        requested: Option<&str>,
+        link: Option<LinkId>,
+        terminal: Option<LinkId>,
+    ) -> Option<(&'static str, &'static str)> {
         // If an edge is attached, every carrier routes through it, even on a mixed-role fixture.
         let available = if self.edge.is_some() {
             link.is_some()
         } else {
             self.accounts.is_some()
         };
-        let terminal = self.terminal_root_link();
-        let requested = match message.trailing() {
+        match requested {
             Some(INITIAL_ROOT_CAPABILITY) if available => {
                 Some((INITIAL_ROOT_CAPABILITY, INITIAL_ROOT_PROFILE_TOKEN))
             }
@@ -88,7 +86,19 @@ impl RegistrationRouter {
                 Some((TERMINAL_ROOT_CAPABILITY, TERMINAL_ROOT_PROFILE_TOKEN))
             }
             _ => None,
-        };
+        }
+    }
+
+    pub(super) fn registration_message(
+        &self,
+        context: &StateCoreContext,
+        generation: ConnectionGeneration,
+        state: &mut ConnectionState,
+        message: agenc_relay_client_wire::ParsedMessage,
+    ) -> Result<Vec<RegistrationAction>, RegistrationError> {
+        let link = self.initial_root_link();
+        let terminal = self.terminal_root_link();
+        let requested = self.private_root_capability(state, message.trailing(), link, terminal);
         let probe = state.registration.capability_state().supports_multiline()
             && message.command() == "CAP"
             && matches!(message.middle(), [verb] if verb == "REQ");

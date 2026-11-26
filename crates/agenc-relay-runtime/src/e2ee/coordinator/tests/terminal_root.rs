@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! The optional operation reads the same authoritative account head as publication.
 use super::*;
 use agenc_relay_e2ee::identity::ValidationTime;
@@ -84,6 +86,20 @@ fn terminal_root_is_signed_only_for_the_original_login_and_actual_directory_head
             .code,
         E2eeReplyCode::AccountRequired
     );
+    let mut unrelated_account = login.clone();
+    unrelated_account.account_id = [b'x'; 24];
+    let mut unrelated_network = login.clone();
+    unrelated_network.network_id = [13; 32];
+    for unrelated in [unrelated_account, unrelated_network] {
+        h.terminal_login = Some(unrelated);
+        assert_eq!(
+            h.run(Op::ProveRootHead, &challenge, None)?
+                .err()
+                .ok_or("expected scoped login refusal")?
+                .code,
+            E2eeReplyCode::AccountRequired
+        );
+    }
     h.terminal_login = Some(login);
     h.coordinator.signer = None;
     assert_eq!(
