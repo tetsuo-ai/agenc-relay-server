@@ -16,10 +16,10 @@
 //! completion is applied, which follows every event of the request in
 //! delivery order.
 
-//! A labeled NICK uses the same committed delivery boundary. Its own
-//! nickname-change notification is independent of echo-message. The held
-//! notification must name the requested new nickname and its generation
-//! must match the committed result before the original label can be sent.
+//! NICK and SETNAME use the same committed delivery boundary. Their own
+//! notifications are independent of echo-message. The requested name and
+//! the coordinator's committed generation must match before sending the label.
+//! A connection without setname receives its ordinary labeled ACK.
 
 use agenc_relay_client_wire::{CapabilityState, ParsedMessage, WireMessage};
 use agenc_relay_domain::federation::ProjectedEvent;
@@ -68,7 +68,8 @@ pub(super) fn capture(
     let (user_id, generation, capabilities) = recipient;
     let actor = match event {
         ProjectedEvent::MessageDelivered(record) => record.sender.user_id,
-        ProjectedEvent::NicknameChanged { view, .. } => view.source.user_id,
+        ProjectedEvent::NicknameChanged { view, .. }
+        | ProjectedEvent::DisplayNameChanged { view, .. } => view.source.user_id,
         _ => return Ok(()),
     };
     if actor != user_id {
@@ -157,6 +158,14 @@ fn labeled_targets(
                 .map(String::as_str)
                 .or(message.trailing())?;
             (requested == view.source.nickname.presentation()).then_some(1)
+        }
+        (FederationOpcode::Setname, ProjectedEvent::DisplayNameChanged { display_name, .. }) => {
+            // Compare the value admitted by the shared PRECIS profile, including
+            // canonical whitespace and normalization in requests from other clients.
+            let requested = agenc_relay_types::DisplayName::prepare(message.trailing()?).ok()?;
+            (capabilities.is_some_and(|state| state.enabled("setname"))
+                && requested.as_str() == display_name.as_str())
+            .then_some(1)
         }
         _ => None,
     }

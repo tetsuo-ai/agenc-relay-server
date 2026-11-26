@@ -2035,6 +2035,7 @@ fn completed_request(
                 pending.header.opcode,
                 agenc_relay_types::FederationOpcode::Message
                     | agenc_relay_types::FederationOpcode::NickChange
+                    | agenc_relay_types::FederationOpcode::Setname
             ) =>
         {
             super::message_echo::complete(

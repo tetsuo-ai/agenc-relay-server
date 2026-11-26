@@ -1635,7 +1635,39 @@ fn exercise_labeled_channel_messages(network: &Network) -> TestResult {
     let mut cora = register_when_available(&network.coordinator, "cora")?;
     cora.send("JOIN #echo")?;
     cora.read_until(|line| line.contains(" 366 cora #echo "))?;
-    verify_nickname_echo(&mut kai, &mut cora, &mut lia, "kai", "KaiTwo")
+    verify_nickname_echo(&mut kai, &mut cora, &mut lia, "kai", "KaiTwo")?;
+    for (node, name) in [
+        (&network.coordinator, "solocore"),
+        (&network.edge_a, "soloedge"),
+    ] {
+        let mut solo = register_when_available(node, name)?;
+        solo.send("CAP REQ :message-tags batch labeled-response setname")?;
+        solo.read_until(|line| line.contains(" ACK "))?;
+        let lines = labeled_exchange(&mut solo, "solo-name", "SETNAME :New  Display")?;
+        let replies: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains(" SETNAME ") || line.starts_with("@label=solo-name "))
+            .collect();
+        if !matches!(replies.as_slice(), [reply] if reply.starts_with(&format!("@label=solo-name :{name}!")) && reply.ends_with(" SETNAME :New Display"))
+        {
+            return Err(failure(format!(
+                "{name}: expected one labeled prepared SETNAME echo, received {replies:?}"
+            )));
+        }
+        solo.send("CAP REQ :-setname")?;
+        solo.read_until(|line| line.contains(" ACK "))?;
+        let lines = labeled_exchange(&mut solo, "no-name-cap", "SETNAME :Silent Change")?;
+        let replies: Vec<_> = lines
+            .iter()
+            .filter(|line| line.starts_with("@label=no-name-cap ") || line.contains(" SETNAME "))
+            .collect();
+        if !matches!(replies.as_slice(), [reply] if reply.ends_with(" ACK")) {
+            return Err(failure(format!(
+                "{name}: expected one labeled ACK, received {replies:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn verify_nickname_echo(
