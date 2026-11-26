@@ -1624,6 +1624,55 @@ fn exercise_labeled_channel_messages(network: &Network) -> TestResult {
             )));
         }
     }
+    // The same authoritative rename reaches all four sockets. Only the
+    // requester gets its negotiated label, including with echo-message off.
+    iris.send("CAP REQ :-echo-message")?;
+    iris.read_until(|line| line.contains(" ACK "))
+        .map_err(|e| failure(format!("disable echo-message: {e}")))?;
+    verify_nickname_echo(&mut iris, [&mut jon, &mut lia, &mut kai], "iris", "IrisTwo")?;
+    kai.send("CAP REQ :message-tags batch labeled-response")?;
+    kai.read_until(|line| line.contains(" ACK "))?;
+    verify_nickname_echo(&mut kai, [&mut jon, &mut lia, &mut iris], "kai", "KaiTwo")
+}
+
+fn verify_nickname_echo(
+    sender: &mut ArcClient,
+    observers: [&mut ArcClient; 3],
+    before: &str,
+    after: &str,
+) -> TestResult {
+    let lines = labeled_exchange(sender, "self-nick", &format!("NICK {after}"))
+        .map_err(|e| failure(format!("original {before} rename: {e}")))?;
+    let own: Vec<_> = lines
+        .iter()
+        .filter(|line| line.contains(" NICK "))
+        .collect();
+    let expected_source = format!(":{before}!");
+    let expected_target = |line: &str| {
+        line.split_once(" NICK ")
+            .is_some_and(|(_, target)| target.strip_prefix(':').unwrap_or(target) == after)
+    };
+    let label_count = lines
+        .iter()
+        .filter(|line| line.starts_with("@label=self-nick "))
+        .count();
+    if !matches!(own.as_slice(), [line] if line.strip_prefix("@label=self-nick ").is_some_and(|line|
+        line.starts_with(&expected_source) && expected_target(line)))
+        || label_count != 1
+    {
+        return Err(failure(format!(
+            "expected one original labeled nickname echo: {lines:?}"
+        )));
+    }
+    for (index, observer) in observers.into_iter().enumerate() {
+        let copies = observer
+            .read_until(|line| line.contains(" NICK "))
+            .map_err(|e| failure(format!("observer {index} of {before} rename: {e}")))?;
+        let copy = copies.last().ok_or("missing nickname notification")?;
+        if !copy.starts_with(&expected_source) || !expected_target(copy) {
+            return Err(failure(format!("unexpected nickname notification: {copy}")));
+        }
+    }
     Ok(())
 }
 

@@ -2031,7 +2031,11 @@ fn completed_request(
             )
         }
         (PendingKind::Command { message }, ResultArm::Committed { .. })
-            if pending.header.opcode == agenc_relay_types::FederationOpcode::Message =>
+            if matches!(
+                pending.header.opcode,
+                agenc_relay_types::FederationOpcode::Message
+                    | agenc_relay_types::FederationOpcode::NickChange
+            ) =>
         {
             super::message_echo::complete(
                 context,

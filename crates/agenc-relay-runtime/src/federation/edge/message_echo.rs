@@ -16,6 +16,11 @@
 //! completion is applied, which follows every event of the request in
 //! delivery order.
 
+//! A labeled NICK uses the same committed delivery boundary. Its own
+//! nickname-change notification is independent of echo-message. The held
+//! notification must name the requested new nickname and its generation
+//! must match the committed result before the original label can be sent.
+
 use agenc_relay_client_wire::{CapabilityState, ParsedMessage, WireMessage};
 use agenc_relay_domain::federation::ProjectedEvent;
 use agenc_relay_federation_wire::EventHeader;
@@ -61,15 +66,17 @@ pub(super) fn capture(
     frames: &mut Vec<WireMessage>,
 ) -> Result<(), Violation> {
     let (user_id, generation, capabilities) = recipient;
-    let ProjectedEvent::MessageDelivered(record) = event else {
-        return Ok(());
+    let actor = match event {
+        ProjectedEvent::MessageDelivered(record) => record.sender.user_id,
+        ProjectedEvent::NicknameChanged { view, .. } => view.source.user_id,
+        _ => return Ok(()),
     };
-    if record.sender.user_id != user_id {
+    if actor != user_id {
         return Ok(());
     }
     // A connection has one command in flight; its later commands wait.
     let Some((pending, targets)) = edge.pending.values_mut().find_map(|pending| {
-        let targets = labeled_targets(pending, generation, capabilities)?;
+        let targets = labeled_targets(pending, generation, capabilities, event)?;
         Some((pending, targets))
     }) else {
         return Ok(());
@@ -123,6 +130,7 @@ fn labeled_targets(
     pending: &PendingRequest,
     generation: ConnectionGeneration,
     capabilities: Option<&CapabilityState>,
+    event: &ProjectedEvent,
 ) -> Option<usize> {
     let PendingKind::Command { message } = &pending.kind else {
         return None;
@@ -131,17 +139,28 @@ fn labeled_targets(
         .tags()
         .iter()
         .any(|tag| tag.key() == "label" && tag.value().is_some());
-    (pending.generation == generation
-        && !pending.sink_gone
-        && pending.header.opcode == FederationOpcode::Message
-        && labeled
-        && capabilities.is_some_and(|state| state.enabled("labeled-response")))
-    .then(|| {
-        message
+    if pending.generation != generation
+        || pending.sink_gone
+        || !labeled
+        || !capabilities.is_some_and(|state| state.enabled("labeled-response"))
+    {
+        return None;
+    }
+    match (pending.header.opcode, event) {
+        (FederationOpcode::Message, ProjectedEvent::MessageDelivered(_)) => message
             .middle()
             .first()
-            .map_or(0, |targets| targets.split(',').count())
-    })
+            .map(|targets| targets.split(',').count()),
+        (FederationOpcode::NickChange, ProjectedEvent::NicknameChanged { view, .. }) => {
+            let requested = message
+                .middle()
+                .first()
+                .map(String::as_str)
+                .or(message.trailing())?;
+            (requested == view.source.nickname.presentation()).then_some(1)
+        }
+        _ => None,
+    }
 }
 
 fn commits_at(result: &ResultArm, generation: u64) -> bool {
