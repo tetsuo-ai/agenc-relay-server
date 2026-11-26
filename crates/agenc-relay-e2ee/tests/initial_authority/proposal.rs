@@ -2,14 +2,45 @@
 
 use super::support::*;
 use agenc_relay_e2ee::initial_authority::{
-    InitialAuthorityEvidence, InitialPrincipalEvidence,
-    proposal::{InitialBindingProposal, authenticate_initial_proposal},
+    ExpectedInitialAuthority, InitialAuthorityEvidence, InitialPrincipalEvidence,
+    proposal::{
+        InitialBindingProposal, InitialPlanEvidence, InitialPolicyInputs, InitialPolicyProposal,
+        InitialPolicyStage, authenticate_initial_proposal, review_initial_policy_proposal,
+    },
 };
 use agenc_relay_e2ee::objects::conversation::ArcConversationKind;
-use agenc_relay_e2ee::{ArcWireObjectKind, DecodeBudget, E2eeError, TlsVec};
+use agenc_relay_e2ee::{ArcWireObjectKind, DecodeBudget, E2eeError, TlsEncode, TlsVec};
 use agenc_relay_testkit::e2ee_client::{PolicySpec, policy, policy_id_of};
 
 fn check(f: &Fixture, budget: &mut DecodeBudget) -> Result<InitialBindingProposal, E2eeError> {
+    with_inputs(f, |expected, evidence, op| {
+        authenticate_initial_proposal(expected, evidence, op, budget)
+    })
+}
+
+fn review(
+    f: &Fixture,
+    policies: InitialPolicyInputs<'_>,
+    budget: &mut DecodeBudget,
+) -> Result<InitialPolicyProposal, E2eeError> {
+    with_inputs(f, |expected, evidence, _| {
+        review_initial_policy_proposal(
+            expected,
+            &InitialPlanEvidence::from(evidence),
+            policies,
+            budget,
+        )
+    })
+}
+
+fn with_inputs<T>(
+    f: &Fixture,
+    inspect: impl FnOnce(
+        &ExpectedInitialAuthority,
+        &InitialAuthorityEvidence<'_>,
+        &[u8],
+    ) -> Result<T, E2eeError>,
+) -> Result<T, E2eeError> {
     let material = f.encoded()?;
     let principals: Vec<_> = material
         .principals
@@ -19,7 +50,7 @@ fn check(f: &Fixture, budget: &mut DecodeBudget) -> Result<InitialBindingProposa
             roster_object: roster,
         })
         .collect();
-    authenticate_initial_proposal(
+    inspect(
         &material.expected,
         &InitialAuthorityEvidence {
             binding_object: &material.binding,
@@ -29,8 +60,92 @@ fn check(f: &Fixture, budget: &mut DecodeBudget) -> Result<InitialBindingProposa
             principals: &principals,
         },
         &object(ArcWireObjectKind::Policy, &f.operational)?,
-        budget,
     )
+}
+
+#[test]
+fn genesis_policy_review_separates_both_unsigned_subjects_and_the_approved_predecessor()
+-> TestResult {
+    for route in [ArcConversationKind::Channel, ArcConversationKind::Direct] {
+        let mut f = unsigned(route)?;
+        let bootstrap_tbs = f.policy.tbs.encode()?;
+        let operational_tbs = f.operational.tbs.encode()?;
+        let approved_bootstrap = object(ArcWireObjectKind::Policy, &f.policy)?;
+        let approved_operational = object(ArcWireObjectKind::Policy, &f.operational)?;
+        let bootstrap = || InitialPolicyInputs::Bootstrap {
+            bootstrap_tbs: &bootstrap_tbs,
+            operational_tbs: &operational_tbs,
+        };
+        let operational = |approved| InitialPolicyInputs::Operational {
+            approved_bootstrap: approved,
+            operational_tbs: &operational_tbs,
+        };
+        let zero = review(&f, bootstrap(), &mut budget())?;
+        assert_eq!(zero.stage(), InitialPolicyStage::Bootstrap);
+        assert_eq!(zero.subject(), &f.policy.tbs);
+        assert_eq!(zero.policies(), (&f.policy.tbs, &f.operational.tbs));
+        assert_eq!(zero.scope().id(), f.expected.binding_id);
+        let creator = zero
+            .scope()
+            .principals()
+            .get(&ACCOUNT)
+            .ok_or(E2eeError::InvalidValue)?
+            .0
+            .fingerprint;
+        let peer = zero
+            .scope()
+            .principals()
+            .get(&OTHER)
+            .ok_or(E2eeError::InvalidValue)?
+            .0
+            .fingerprint;
+        assert_eq!(zero.eligible_signer(&creator, &[7; 16])?.device_id, [7; 16]);
+        assert!(zero.eligible_signer(&creator, &[9; 16]).is_err());
+        assert!(zero.eligible_signer(&peer, &[9; 16]).is_err());
+        assert!(review(&f, bootstrap(), &mut DecodeBudget::new(1, 1)).is_err());
+        let next = review(&f, operational(&approved_bootstrap), &mut budget())?;
+        assert_eq!(next.stage(), InitialPolicyStage::Operational);
+        assert_eq!(next.subject(), &f.operational.tbs);
+        assert_eq!(next.eligible_signer(&creator, &[7; 16])?.device_id, [7; 16]);
+        assert!(next.eligible_signer(&peer, &[9; 16]).is_err());
+        assert!(review(&f, operational(&bootstrap_tbs), &mut budget()).is_err());
+        assert!(review(&f, operational(&approved_operational), &mut budget()).is_err());
+        assert!(
+            review(
+                &f,
+                InitialPolicyInputs::Bootstrap {
+                    bootstrap_tbs: &approved_bootstrap,
+                    operational_tbs: &operational_tbs
+                },
+                &mut budget()
+            )
+            .is_err()
+        );
+        let oversized = vec![0; agenc_relay_e2ee::limits::MAX_POLICY_BYTES + 1];
+        assert!(matches!(
+            review(
+                &f,
+                InitialPolicyInputs::Bootstrap {
+                    bootstrap_tbs: &oversized,
+                    operational_tbs: &operational_tbs
+                },
+                &mut budget()
+            ),
+            Err(E2eeError::LimitExceeded)
+        ));
+        let mut corrupt = f.policy.approvals.into_items();
+        let approval = corrupt.first_mut().ok_or(E2eeError::InvalidValue)?;
+        let first = approval
+            .device_signature
+            .first_mut()
+            .ok_or(E2eeError::InvalidValue)?;
+        *first ^= 1;
+        f.policy.approvals = TlsVec::new(corrupt)?;
+        let unauthenticated = object(ArcWireObjectKind::Policy, &f.policy)?;
+        assert!(review(&f, operational(&unauthenticated), &mut budget()).is_err());
+        assert!(check(&f, &mut budget()).is_err());
+    }
+    Ok(())
 }
 
 fn unsigned(kind: ArcConversationKind) -> Result<Fixture, E2eeError> {

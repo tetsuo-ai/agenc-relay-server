@@ -133,22 +133,41 @@ pub fn verify_policy(
     rosters: &PrincipalRosters,
     predecessor: Option<&VerifiedPolicy>,
 ) -> Result<VerifiedPolicy, E2eeError> {
-    let tbs = &policy.tbs;
     if policy.encode()?.len() > MAX_POLICY_BYTES {
         return Err(E2eeError::LimitExceeded);
     }
+    let checked = policy_subject(
+        network_id,
+        conversation_id,
+        &policy.tbs,
+        rosters,
+        predecessor,
+    )?;
+    let governing = predecessor.unwrap_or(&checked);
+    count_approvals(
+        policy,
+        &governing.controllers,
+        governing.controller_threshold,
+        rosters,
+    )?;
+    Ok(checked)
+}
+
+/// Resolve a policy subject before the endpoint can obtain controller signatures.
+/// Only the quorum-verifying public entry point releases it as an authenticated policy.
+pub(crate) fn policy_subject(
+    network_id: &[u8; 32],
+    conversation_id: &SemanticId,
+    tbs: &ArcPolicyTbs,
+    rosters: &PrincipalRosters,
+    predecessor: Option<&VerifiedPolicy>,
+) -> Result<VerifiedPolicy, E2eeError> {
     check_policy_profile(network_id, conversation_id, tbs)?;
     check_policy_lineage(tbs, predecessor)?;
     let controllers = controller_set(tbs)?;
     let council = resolve_council(tbs.finality_principals.as_slice(), rosters)?;
     let quorum = finality_quorum(council.len(), tbs.finality_fault_bound)?;
     check_policy_bounds(tbs, controllers.len())?;
-    let governing: &[SemanticId] =
-        predecessor.map_or(&controllers, |previous| &previous.controllers);
-    let threshold = predecessor.map_or(tbs.controller_threshold, |previous| {
-        previous.controller_threshold
-    });
-    count_approvals(policy, governing, threshold, rosters)?;
     Ok(VerifiedPolicy {
         policy_id: semantic_id_of(SemanticHashDomain::PolicyId, tbs)?,
         generation: tbs.policy_generation,
