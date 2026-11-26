@@ -78,6 +78,13 @@ fn a_complete_independent_set_can_only_accept_its_current_signer_and_exact_scope
     let verify = |proof: &TerminalRootHead| proof.verify(&login, &root, &challenge, &set, issued);
     let proof = signed(tbs.clone(), &old, SignatureDomain::TerminalRootHead)?;
     verify(&proof)?;
+    let canonical =
+        crate::ArcWireObject::new(crate::ArcWireObjectKind::TerminalRootHead, proof.encode()?)?
+            .encode()?;
+    assert_eq!(
+        canonical.as_slice(),
+        include_bytes!("../../../../test-data/fuzz-corpus/e2ee-object/terminal-root-head")
+    );
     let mut untrusted = tbs.clone();
     untrusted.sequencer_credential_id = next_credential.credential_id;
     assert!(
