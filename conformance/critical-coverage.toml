@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1163
-reviewed_source_sha256 = "69686cacc46fe58335f9dfe150b4be6d9d2c903d82786c15b948365491717451"
+reviewed_source_sha256 = "3a2811857a25c000c5df60e11672ad35dd433e1b2a00be9fcece879b7990ba19"
 deferred = []
 
 [[region]]
@@ -630,3 +630,15 @@ end_line = 116
 span_sha256 = "7bb4ba1e8184a09671f390c6db49109d8bbe1a37a6ecd9e1a2803448a43a05b4"
 metric = "branches"
 reason = "The origin, federation peer and shared coordinator each impose an independent bound on exact results."
+
+[[region]]
+id = "account-creation-invite-scope"
+category = "authorization-decisions"
+file = "crates/agenc-relay-auth/src/invitation.rs"
+item = "validate_scope"
+source_sha256 = "f1c810682817a30cac430007a8ad6954e798b3c67104a43f908a0492cff458b4"
+start_line = 134
+end_line = 152
+span_sha256 = "bdcf3d289e442103c44873aed70ef5efc3bed471036446ed10d1cd7f8f7a52b5"
+metric = "branches"
+reason = "Clients and coordinators must agree on the expected network, maximum lifetime and exclusive expiry of the creation invitation."
