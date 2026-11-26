@@ -161,3 +161,39 @@ fn refusal_code_and_target_shape_must_match_the_original_operand() -> Result {
     assert!(check_context("#FIRST", &target).is_ok());
     Ok(())
 }
+
+#[test]
+fn a_topic_may_withhold_its_setter_and_a_present_setter_belongs_to_the_preceding_topic() -> Result {
+    let (requester, request) = input()?;
+    let topic = || row(332, "Ada", &["#first"]);
+    let setter = || numeric_reply("edge.test", 333, "Ada", &["#first", "owner", "123"], None);
+    let encrypted = || {
+        numeric_reply(
+            "edge.test",
+            332,
+            "Ada",
+            &["#second"],
+            Some("Encrypted channel topic"),
+        )
+    };
+    let refusal = || row(403, "Ada", &["#third"]);
+    for mut permitted in [
+        vec![topic()?, setter()?, encrypted()?, refusal()?],
+        vec![topic()?, setter()?, refusal()?, encrypted()?],
+    ] {
+        requester.project_covered("edge.test", &request, &mut permitted, None)?;
+    }
+    for mut malformed in [
+        vec![setter()?, topic()?, encrypted()?, refusal()?],
+        vec![topic()?, refusal()?, setter()?, encrypted()?],
+        vec![topic()?, encrypted()?, setter()?, refusal()?],
+        vec![topic()?, setter()?, setter()?, encrypted()?, refusal()?],
+    ] {
+        assert!(
+            requester
+                .project_covered("edge.test", &request, &mut malformed, None)
+                .is_err()
+        );
+    }
+    Ok(())
+}

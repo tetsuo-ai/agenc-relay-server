@@ -100,15 +100,20 @@ impl JoinRequester {
             if !nick.eq_ignore_ascii_case(self.nickname.presentation()) {
                 return Err(RuntimeError::InvalidValue);
             }
-            if let Some(name) = metadata.take() {
-                check_metadata(frame, params, name)?;
+            let preceding_topic = metadata.take();
+            if frame.command() == "333" {
+                check_metadata(
+                    frame,
+                    params,
+                    preceding_topic.ok_or(RuntimeError::InvalidValue)?,
+                )?;
                 continue;
             }
             if is_topic(frame) {
                 let [channel] = params else {
                     return Err(RuntimeError::InvalidValue);
                 };
-                if frame.command() == "333" || frame.trailing().is_none() {
+                if frame.trailing().is_none() {
                     return Err(RuntimeError::InvalidValue);
                 }
                 let index = targets
@@ -120,13 +125,12 @@ impl JoinRequester {
                     .ok_or(RuntimeError::InvalidValue)?;
                 accepted |= 1 << index;
                 next = index + 1;
+                // An encrypted bound channel deliberately supplies only a 332 placeholder.
+                // A setter row, when present, belongs to the immediately preceding 332.
                 if frame.command() == "332" {
                     metadata = Some(channel.as_str());
                 }
             }
-        }
-        if metadata.is_some() {
-            return Err(RuntimeError::InvalidValue);
         }
         Ok(accepted)
     }
@@ -157,7 +161,6 @@ fn check_context(context: &str, first: &ChannelNameValue) -> Result<(), RuntimeE
 
 fn check_metadata(frame: &WireMessage, params: &[String], name: &str) -> Result<(), RuntimeError> {
     if matches!(params, [channel, _, _] if channel.eq_ignore_ascii_case(name))
-        && frame.command() == "333"
         && frame.trailing().is_none()
     {
         Ok(())
