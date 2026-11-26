@@ -371,12 +371,3 @@ client only compares with its pin; the `NOTE` and `900` text clarifies the
 Section 10.2 order and corrects an example of it; and a default inside an
 unchanged hard maximum is not a mandatory limit. The crate graph and the
 formatting command change no wire byte, persistent byte, or negotiated value.
-
-## Optional terminal root evidence for protected recovery
-
-A client recovering its account root needs to know whether its reviewed
-predecessor is still the directory head. The active sequencer signs the exact
-head, a fresh client challenge and the original account login's completion
-digest. The profile defines opt-in client and federation negotiation, the
-signing authority and the comparison against independently established
-installation pins. [Authenticated terminal account root](terminal-root-head-v1.md)
