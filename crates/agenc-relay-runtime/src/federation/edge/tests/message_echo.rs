@@ -152,6 +152,37 @@ fn message_echoes_and_refusals_bind_the_same_original_targets_in_either_order() 
     Ok(())
 }
 
+#[test]
+fn a_malformed_echo_and_an_extra_recipient_cannot_account_for_a_decision() -> TestResult {
+    let request = parse_message(FramedLine::new("PRIVMSG A,B,C,D,E :hi")?)?.ok_or("request")?;
+    let malformed = WireMessage::new("sam", "PRIVMSG", &["A", "B"], Some("hi"))?;
+    assert_eq!(
+        check_message_replies(&request, [&malformed].into_iter(), &[]),
+        Err(Violation::Consistency)
+    );
+    let fifth = WireMessage::new("sam", "PRIVMSG", &["E"], Some("hi"))?;
+    assert_eq!(
+        check_message_replies(&request, [&fifth].into_iter(), &[]),
+        Err(Violation::Consistency)
+    );
+    let echoes = ["A", "B", "C", "D"]
+        .map(|nick| WireMessage::new("sam", "PRIVMSG", &[nick], Some("hi")))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let refusal = agenc_relay_client_wire::numeric_reply(
+        "edge.example",
+        481,
+        "Sam",
+        &[],
+        Some("Command is unavailable"),
+    )?;
+    assert_eq!(
+        check_message_replies(&request, echoes.iter(), &[refusal]),
+        Err(Violation::Consistency)
+    );
+    Ok(())
+}
+
 /// The labeled channel message most cases send.
 fn labeled_message() -> TestResult<EdgeFederation> {
     edge_with("@label=m1 PRIVMSG #edge :hi", FederationOpcode::Message)
