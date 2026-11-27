@@ -68,11 +68,7 @@ fn apply_fixture_sizes(config: &mut String) -> TestResult {
         "memory_budget_bytes = 6442450944",
         &format!("memory_budget_bytes = {STAGE_EIGHT_MEMORY_BUDGET_BYTES}"),
     )?;
-    replace_once(
-        config,
-        "quiesce_seconds = 5\ndrain_seconds = 20\nflush_seconds = 10\nstop_seconds = 5",
-        "quiesce_seconds = 2\ndrain_seconds = 4\nflush_seconds = 4\nstop_seconds = 8",
-    )?;
+    apply_fixture_shutdown(config)?;
     replace_once(
         config,
         "database_max_bytes = 85899345920\nbackup_max_bytes = 107374182400",

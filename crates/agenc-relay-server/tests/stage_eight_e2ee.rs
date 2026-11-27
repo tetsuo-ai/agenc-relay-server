@@ -147,7 +147,8 @@ mod stage_ten_drills;
 mod stage_ten_login_index;
 #[path = "stage_eight_e2ee/welcome_recovery.rs"]
 mod welcome_recovery;
-const STOP_TIMEOUT: Duration = Duration::from_secs(20);
+/// Allow the daemon its full 24-second fixture shutdown schedule and time to exit.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// The edge registers a client only once its coordinator link is ACTIVE;
 /// registration attempts before that fail closed and are retried.
 const NETWORK_WAIT: Duration = Duration::from_secs(60);
@@ -573,6 +574,16 @@ impl NodeFixture {
 /// Only a capacity campaign restores the Appendix C.2 default.
 const STAGE_EIGHT_MEMORY_BUDGET_BYTES: u64 = 1_073_741_824;
 
+/// Loaded networks flush the same durable state as a deployed relay. Keep the
+/// production ten-second flush budget on generated and CLI-provisioned nodes.
+fn apply_fixture_shutdown(config: &mut String) -> TestResult {
+    replace_once(
+        config,
+        "quiesce_seconds = 5\ndrain_seconds = 20\nflush_seconds = 10\nstop_seconds = 5",
+        "quiesce_seconds = 2\ndrain_seconds = 4\nflush_seconds = 10\nstop_seconds = 8",
+    )
+}
+
 fn apply_common_overrides(config: &mut String, public: SocketAddr, uid: u32) -> TestResult {
     replace_once(
         config,
@@ -584,11 +595,7 @@ fn apply_common_overrides(config: &mut String, public: SocketAddr, uid: u32) -> 
         "registration = \"closed\"",
         "registration = \"open\"",
     )?;
-    replace_once(
-        config,
-        "quiesce_seconds = 5\ndrain_seconds = 20\nflush_seconds = 10\nstop_seconds = 5",
-        "quiesce_seconds = 2\ndrain_seconds = 4\nflush_seconds = 4\nstop_seconds = 8",
-    )?;
+    apply_fixture_shutdown(config)?;
     replace_once(
         config,
         "enabled = false\npurpose = \"client_tls\"\nbind = \"203.0.113.1:6697\"\nmax_connections = 50000",

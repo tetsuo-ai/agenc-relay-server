@@ -254,14 +254,18 @@ pub(super) fn run_network(
             network.edge_b.log_text()
         )));
     }
-    for (label, status) in [
-        ("edge a", stopped_a),
-        ("edge b", stopped_b),
-        ("coordinator", stopped_core),
+    for (label, node, status) in [
+        ("edge a", &network.edge_a, stopped_a),
+        ("edge b", &network.edge_b, stopped_b),
+        ("coordinator", &network.coordinator, stopped_core),
     ] {
-        let status = status.map_err(|error| failure(format!("{label}: {error}")))?;
+        let status =
+            status.map_err(|error| failure(format!("{label}: {error}\n{}", node.log_text())))?;
         if !status.success() {
-            return Err(failure(format!("{label} exited with {status}")));
+            return Err(failure(format!(
+                "{label} exited with {status}\n{}",
+                node.log_text()
+            )));
         }
     }
     Ok(())
