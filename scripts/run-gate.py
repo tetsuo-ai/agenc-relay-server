@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, NoReturn, TypedDict
@@ -23,6 +24,7 @@ from typing import Mapping, NoReturn, TypedDict
 MANIFEST_PATH = "conformance/gates.toml"
 ALLOWED_ENVIRONMENT = {"RUSTC_BOOTSTRAP"}
 ARTIFACT_ENVIRONMENT = "AGENC_RELAY_RECORD_GATE"
+HOSTED_ENVIRONMENT = "AGENC_RELAY_GATE_HOSTED"
 ARTIFACT_DIRECTORY = Path("conformance/evidence/artifacts")
 ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
 TOOLCHAIN_PROBE_TIMEOUT_SECONDS = 30
@@ -121,7 +123,7 @@ BUILD_OVERRIDE_ENVIRONMENT = (
         }
     )
 )
-CONTROL_ENVIRONMENT = frozenset({ARTIFACT_ENVIRONMENT})
+CONTROL_ENVIRONMENT = frozenset({ARTIFACT_ENVIRONMENT, HOSTED_ENVIRONMENT})
 INJECTION_ENVIRONMENT = frozenset(
     {
         "BASH_ENV",
@@ -368,8 +370,20 @@ def lane_directory(root: Path, lane: str, inherited: Mapping[str, str]) -> Path:
     return root / "target" / "lanes" / name
 
 
-def lane_environment(root: Path, lane: str, environment: dict[str, str]) -> dict[str, str]:
-    """Give a Cargo lane its own target directory and its share of the host."""
+def lane_environment(
+    root: Path, lane: str, environment: dict[str, str], *, hosted: bool = False
+) -> dict[str, str]:
+    """Set scheduling and artifact paths without changing any reviewed command."""
+    if hosted:
+        # Only one lane runs on the hosted VM. Reuse ordinary Cargo outputs across checks,
+        # Clippy and tests. Coverage and fuzz retain their own instrumented builds.
+        jobs = str(max(1, min(2, len(os.sched_getaffinity(0)) - 1)))
+        state = {**environment, "CARGO_BUILD_JOBS": jobs, "NEXTEST_TEST_THREADS": jobs,
+                 "RUST_TEST_THREADS": jobs}
+        if lane not in {"static", "fuzz"}:
+            directory = "hosted-coverage" if lane == "coverage" else "hosted"
+            state["CARGO_TARGET_DIR"] = str(root / "target" / "lanes" / directory)
+        return state
     if lane in {"static", "fuzz"}:
         return environment
     directory = lane_directory(root, lane, os.environ)
@@ -389,6 +403,7 @@ class LaneRunner:
     def __init__(self, root: Path, commands: list[dict[str, object]]) -> None:
         self.root = root
         self.commands = commands
+        self.hosted = os.environ.get(HOSTED_ENVIRONMENT) == "1"
         self.results: list[CommandResult | None] = [None] * len(commands)
         self.failure: str | None = None
         self.lock = threading.Lock()
@@ -410,7 +425,7 @@ class LaneRunner:
         argv = command["argv"]
         reviewed = command.get("environment", {})
         environment = lane_environment(
-            self.root, lane, command_environment(os.environ, reviewed)  # type: ignore[arg-type]
+            self.root, lane, command_environment(os.environ, reviewed), hosted=self.hosted  # type: ignore[arg-type]
         )
         with tempfile.TemporaryFile() as output:
             started_at = utc_timestamp()
@@ -418,6 +433,8 @@ class LaneRunner:
             with self.lock:
                 if self.failure is not None:
                     return False
+                if self.hosted:
+                    print(f"starting [{lane}] " + " ".join(argv), flush=True)  # type: ignore[arg-type]
                 process = subprocess.Popen(  # noqa: S603 - reviewed argv, no shell
                     argv,  # type: ignore[arg-type]
                     cwd=self.root,
@@ -469,14 +486,11 @@ class LaneRunner:
         for index, command in enumerate(self.commands):
             lanes.setdefault(gate_lane(command["argv"]), []).append(index)  # type: ignore[arg-type]
         exclusive = lanes.pop(EXCLUSIVE_LANE, [])
-        threads = [
-            threading.Thread(target=self.run_lane, args=(lane, indexes), name=lane)
-            for lane, indexes in lanes.items()
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        workers = 1 if self.hosted else max(1, len(lanes))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(self.run_lane, lane, indexes) for lane, indexes in lanes.items()]
+            for future in futures:
+                future.result()
         if self.failure is None:
             self.run_lane(EXCLUSIVE_LANE, exclusive)
         if self.failure is not None:
