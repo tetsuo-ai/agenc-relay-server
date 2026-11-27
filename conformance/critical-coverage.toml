@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1168
-reviewed_source_sha256 = "e7a8cb6f87da94c5244fa4beac57d835c6a5f4792f4f8117b7167a84a1ce8da4"
+reviewed_source_sha256 = "694a2549e85935b46afe17d2c9bf66b8659b8e87a83ca207634905c59edc00aa"
 deferred = []
 
 [[region]]
@@ -690,3 +690,15 @@ end_line = 160
 span_sha256 = "800e984d91eb5ef31117d065d579b7531eb49b5dfad1e2d31b5afb76b9086f30"
 metric = "branches"
 reason = "A legacy JOIN refusal can name only the original canonical first operand."
+
+[[region]]
+id = "account-creation-invite-scope"
+category = "authorization-decisions"
+file = "crates/agenc-relay-auth/src/invitation.rs"
+item = "validate_scope"
+source_sha256 = "f1c810682817a30cac430007a8ad6954e798b3c67104a43f908a0492cff458b4"
+start_line = 134
+end_line = 152
+span_sha256 = "bdcf3d289e442103c44873aed70ef5efc3bed471036446ed10d1cd7f8f7a52b5"
+metric = "branches"
+reason = "Clients and coordinators must agree on the expected network, maximum lifetime and exclusive expiry of the creation invitation."
