@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1168
-reviewed_source_sha256 = "694a2549e85935b46afe17d2c9bf66b8659b8e87a83ca207634905c59edc00aa"
+reviewed_source_files = 1169
+reviewed_source_sha256 = "1aa65becfed69ae9ae7d52a231f888c75681133c58fac102d3011ce236ffd5d4"
 deferred = []
 
 [[region]]
@@ -528,9 +528,9 @@ id = "genesis-proposal-requires-unsigned-binding"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
 item = "unsigned_package"
-source_sha256 = "42e690f6e31b91f87c52e4ccb96fc988676f8510e63a0565d6c8fb7e3e6f419a"
-start_line = 171
-end_line = 173
+source_sha256 = "249fd08e906ca48d8af24ed82b0057f25bc83359800a2cc2a49e997433d66cb7"
+start_line = 292
+end_line = 294
 span_sha256 = "8f6d00b3e48fee10dd4d545d31cd88b5ef9418a0d93f6b07822b2def68615df3"
 metric = "branches"
 reason = "Only the unsigned canonical proposal can enter the protected device and root pre-signature route."
@@ -540,9 +540,9 @@ id = "genesis-proposal-signed-plan-group-ceiling"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
 item = "check_plan"
-source_sha256 = "42e690f6e31b91f87c52e4ccb96fc988676f8510e63a0565d6c8fb7e3e6f419a"
-start_line = 275
-end_line = 277
+source_sha256 = "249fd08e906ca48d8af24ed82b0057f25bc83359800a2cc2a49e997433d66cb7"
+start_line = 396
+end_line = 398
 span_sha256 = "c14fd98352bc7b9affadf92591be333f1c3d2abc1d4ded1b98aafce728f22f4e"
 metric = "branches"
 reason = "The total device plan must fit the strictest signed policy before a binding can lock its semantic route."
@@ -630,6 +630,30 @@ end_line = 116
 span_sha256 = "7bb4ba1e8184a09671f390c6db49109d8bbe1a37a6ecd9e1a2803448a43a05b4"
 metric = "branches"
 reason = "The origin, federation peer and shared coordinator each impose an independent bound on exact results."
+
+[[region]]
+id = "genesis-policy-review-initial-policy-proposal"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/proposal/prospective.rs"
+item = "review_initial_policy_proposal"
+source_sha256 = "d595ca21b4b67126129ba5e2dfccd9907e3ad219c7d5fc98a302569c8c9162f3"
+start_line = 145
+end_line = 184
+span_sha256 = "7c8eba7eef7902fabd8dc68c34eb6a3bc809610fd681901c6c6e2b7280c3d418"
+metric = "regions"
+reason = "A pending controller approval uses the canonical unsigned policy subject or the verified predecessor required by its generation."
+
+[[region]]
+id = "genesis-policy-assemble"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/proposal/prospective.rs"
+item = "assemble"
+source_sha256 = "d595ca21b4b67126129ba5e2dfccd9907e3ad219c7d5fc98a302569c8c9162f3"
+start_line = 110
+end_line = 134
+span_sha256 = "3885f171d21f5e76ef28a995817f746dff3c15a274f64765251553945b1d28c1"
+metric = "branches"
+reason = "A manual initial policy accepts bounded original approvals only from planned active signers and checks the original governing quorum before returning a complete registered policy."
 
 [[region]]
 id = "registered-terminal-root-proof"

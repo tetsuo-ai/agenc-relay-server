@@ -1,6 +1,7 @@
 //! Conversation identity, sequencer credential, policy, binding, context,
 //! reservation, and close objects (companion Sections 9 and 11.5).
 
+use crate::limits::{MAX_POLICY_APPROVALS_BYTES, POLICY_APPROVAL_BYTES};
 use crate::tls::{Opaque, TlsVec, tls_enum, tls_struct};
 
 use super::identity::{ArcDeviceRoster, ArcRootIdentity};
@@ -156,7 +157,7 @@ tls_struct! {
         /// Signed fields.
         pub tbs: ArcPolicyTbs,
         /// Approvals, canonical.
-        pub approvals: TlsVec<ArcPolicyApproval, 144, 16_384>,
+        pub approvals: TlsVec<ArcPolicyApproval, POLICY_APPROVAL_BYTES, MAX_POLICY_APPROVALS_BYTES>,
     }
 }
 

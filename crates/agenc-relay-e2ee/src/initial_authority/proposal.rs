@@ -1,13 +1,16 @@
 //! Unsigned generation-zero binding proposals for protected endpoint review (companion 9.4, 13.2 and 13.3).
 
-use super::{ExpectedInitialAuthority, InitialAuthorityEvidence, anchors, decode_object};
+use super::{
+    ExpectedInitialAuthority, InitialAuthorityEvidence, InitialPrincipalEvidence, anchors,
+    decode_object,
+};
 use crate::context::verify_proposed_core;
 use crate::identity::{Interval, ValidationTime};
 use crate::limits::{MAX_BINDING_APPROVALS, MAX_BINDING_PRINCIPALS};
 use crate::object::ArcWireObjectKind;
 use crate::objects::conversation::{
     ArcContextCoreTbs, ArcConversationBindingPackage, ArcConversationBindingTbs,
-    ArcInitialMemberPlan, ArcMembershipPolicy, ArcPolicy,
+    ArcInitialMemberPlan, ArcMembershipPolicy, ArcPolicy, ArcPolicyTbs,
 };
 use crate::policy::{VerifiedPolicy, active_device, verify_policy};
 use crate::route::{
@@ -22,19 +25,25 @@ use crate::{DecodeBudget, E2eeError, TlsDecode};
 /// exact independently pinned directory. It cannot satisfy an API requiring
 /// a verified binding or initial authority.
 pub struct InitialBindingProposal {
+    scope: InitialProposalScope,
+    initial: VerifiedPolicy,
+    operational: VerifiedPolicy,
+}
+
+/// Checked route, plan, directory and sequencer shared by the two genesis review stages.
+/// The scope alone carries no policy quorum or binding approvals.
+pub struct InitialProposalScope {
     binding_id: [u8; 32],
     binding: ArcConversationBindingTbs,
     plan: ArcInitialMemberPlan,
     route: SemanticRoute,
     core: ArcContextCoreTbs,
     principals: PrincipalRosters,
-    initial: VerifiedPolicy,
-    operational: VerifiedPolicy,
     sequencer: VerifiedSequencerCredential,
     validity: Interval,
 }
 
-impl InitialBindingProposal {
+impl InitialProposalScope {
     /// Independent semantic binding ID checked before processing the proposal.
     pub fn id(&self) -> [u8; 32] {
         self.binding_id
@@ -59,6 +68,45 @@ impl InitialBindingProposal {
     pub fn principals(&self) -> &PrincipalRosters {
         &self.principals
     }
+    /// Sequencer credential committed by this proposal.
+    pub fn sequencer(&self) -> &VerifiedSequencerCredential {
+        &self.sequencer
+    }
+    /// Interval of the named directories, binding devices, policy signers, councils and sequencer.
+    pub fn validity(&self) -> Interval {
+        self.validity
+    }
+}
+
+impl InitialBindingProposal {
+    /// Common public context, portable as an input to a reservation or plan check.
+    pub fn scope(&self) -> &InitialProposalScope {
+        &self.scope
+    }
+    /// Independently checked semantic binding ID.
+    pub fn id(&self) -> [u8; 32] {
+        self.scope.id()
+    }
+    /// The unsigned, exact conversation binding.
+    pub fn binding(&self) -> &ArcConversationBindingTbs {
+        self.scope.binding()
+    }
+    /// Stable device and capability identities.
+    pub fn plan(&self) -> &ArcInitialMemberPlan {
+        self.scope.plan()
+    }
+    /// The verified semantic route.
+    pub fn route(&self) -> &SemanticRoute {
+        self.scope.route()
+    }
+    /// Committed context core.
+    pub fn core(&self) -> &ArcContextCoreTbs {
+        self.scope.core()
+    }
+    /// Independently pinned root and roster heads.
+    pub fn principals(&self) -> &PrincipalRosters {
+        self.scope.principals()
+    }
     /// Authenticated generation-zero policy.
     pub fn initial_policy(&self) -> &VerifiedPolicy {
         &self.initial
@@ -69,12 +117,60 @@ impl InitialBindingProposal {
     }
     /// Sequencer credential committed by this proposal.
     pub fn sequencer(&self) -> &VerifiedSequencerCredential {
-        &self.sequencer
+        self.scope.sequencer()
     }
-    /// Interval of the named directories, binding devices, policy signers, councils and sequencer.
+    /// Inclusive intersection of the checked authorities' validity intervals.
     pub fn validity(&self) -> Interval {
-        self.validity
+        self.scope.validity()
     }
+}
+
+mod prospective;
+pub use prospective::{
+    InitialPolicyInputs, InitialPolicyProposal, InitialPolicyStage, review_initial_policy_proposal,
+};
+
+/// Public route evidence shared by prospective policy and binding review.
+pub struct InitialPlanEvidence<'a> {
+    /// Registered conversation binding envelope with its approval and root-lock vectors empty.
+    pub binding_object: &'a [u8],
+    /// Exact committed context core.
+    pub context_core: &'a [u8],
+    /// Complete sequencer credential committed by the context.
+    pub sequencer_credential: &'a [u8],
+    /// All named roots and rosters in binding order.
+    pub principals: &'a [InitialPrincipalEvidence<'a>],
+}
+
+impl<'a> From<&InitialAuthorityEvidence<'a>> for InitialPlanEvidence<'a> {
+    fn from(source: &InitialAuthorityEvidence<'a>) -> Self {
+        Self {
+            binding_object: source.binding_object,
+            context_core: source.context_core,
+            sequencer_credential: source.sequencer_credential,
+            principals: source.principals,
+        }
+    }
+}
+
+enum PolicyInput<'a> {
+    Approved(&'a [u8]),
+    Subject(&'a [u8]),
+}
+
+struct PolicyMaterial {
+    subject: ArcPolicyTbs,
+    // Unsigned subjects also need their fields resolved for local plan and council checks.
+    // Only authenticate_initial_proposal, which requires two Approved inputs, returns
+    // these summaries to a caller as authenticated policies.
+    checked: VerifiedPolicy,
+}
+
+struct ProposalMaterial {
+    scope: InitialProposalScope,
+    creator: [u8; 32],
+    initial: PolicyMaterial,
+    operational: PolicyMaterial,
 }
 
 /// Checks an ordinary incarnation-zero proposal under a binding ID supplied by
@@ -94,6 +190,27 @@ pub fn authenticate_initial_proposal(
     operational_policy_object: &[u8],
     budget: &mut DecodeBudget,
 ) -> Result<InitialBindingProposal, E2eeError> {
+    let material = check_proposal(
+        expected,
+        &InitialPlanEvidence::from(evidence),
+        PolicyInput::Approved(evidence.initial_policy_object),
+        PolicyInput::Approved(operational_policy_object),
+        budget,
+    )?;
+    Ok(InitialBindingProposal {
+        scope: material.scope,
+        initial: material.initial.checked,
+        operational: material.operational.checked,
+    })
+}
+
+fn check_proposal(
+    expected: &ExpectedInitialAuthority,
+    evidence: &InitialPlanEvidence<'_>,
+    bootstrap: PolicyInput<'_>,
+    next: PolicyInput<'_>,
+    budget: &mut DecodeBudget,
+) -> Result<ProposalMaterial, E2eeError> {
     let package = unsigned_package(expected, evidence, budget)?;
     let binding = &package.binding.tbs;
     let route = verify_semantic_route(&expected.network_id, &binding.semantic_route)?;
@@ -110,54 +227,58 @@ pub fn authenticate_initial_proposal(
     check_principals(binding, &route, &principals)?;
     let sequencer = anchors::sequencer(expected, evidence.sequencer_credential, &core, budget)?;
     let mut validity = directory_validity(&principals, sequencer.interval)?;
-    let initial = policy(
-        binding,
-        &principals,
-        evidence.initial_policy_object,
-        None,
-        &mut validity,
-        budget,
-    )?;
-    anchors::bootstrap(&package, &initial, &principals)?;
+    let initial = policy(binding, &principals, bootstrap, None, &mut validity, budget)?;
+    anchors::bootstrap(&package, &initial.checked, &principals)?;
     let operational = policy(
         binding,
         &principals,
-        operational_policy_object,
-        Some(&initial),
+        next,
+        Some(&initial.checked),
         &mut validity,
         budget,
     )?;
-    check_governance(&route.key, &principals, &initial, &operational)?;
+    let creator = check_governance(
+        &route.key,
+        &principals,
+        &initial.checked,
+        &operational.checked,
+    )?;
     check_plan(
         &package.initial_member_plan,
         &route.key,
         &principals,
-        &initial,
-        &operational,
+        &initial.checked,
+        &operational.checked,
         &mut validity,
     )?;
-    if !council_is_planned(&operational, &principals, &package.initial_member_plan)
-        || !validity.covers(time)
+    if !council_is_planned(
+        &operational.checked,
+        &principals,
+        &package.initial_member_plan,
+    ) || !validity.covers(time)
     {
         return Err(E2eeError::InvalidValue);
     }
-    Ok(InitialBindingProposal {
-        binding_id: expected.binding_id,
-        binding: package.binding.tbs,
-        plan: package.initial_member_plan,
-        route,
-        core,
-        principals,
+    Ok(ProposalMaterial {
+        scope: InitialProposalScope {
+            binding_id: expected.binding_id,
+            binding: package.binding.tbs,
+            plan: package.initial_member_plan,
+            route,
+            core,
+            principals,
+            sequencer,
+            validity,
+        },
         initial,
         operational,
-        sequencer,
-        validity,
+        creator,
     })
 }
 
 fn unsigned_package(
     expected: &ExpectedInitialAuthority,
-    evidence: &InitialAuthorityEvidence<'_>,
+    evidence: &InitialPlanEvidence<'_>,
     budget: &mut DecodeBudget,
 ) -> Result<ArcConversationBindingPackage, E2eeError> {
     if evidence.principals.is_empty() || evidence.principals.len() > MAX_BINDING_PRINCIPALS {
@@ -203,7 +324,7 @@ fn check_governance(
     principals: &PrincipalRosters,
     initial: &VerifiedPolicy,
     operational: &VerifiedPolicy,
-) -> Result<(), E2eeError> {
+) -> Result<[u8; 32], E2eeError> {
     let creator = initial.council.first().ok_or(E2eeError::InvalidValue)?;
     let creator_only = initial.controllers.as_slice() == [creator.root_fingerprint]
         && initial.controller_threshold == 1;
@@ -222,7 +343,7 @@ fn check_governance(
         }
     };
     if creator_only && agreed {
-        Ok(())
+        Ok(creator.root_fingerprint)
     } else {
         Err(E2eeError::InvalidValue)
     }
@@ -308,19 +429,38 @@ fn intersect(result: &mut Interval, interval: Interval) {
 fn policy(
     binding: &ArcConversationBindingTbs,
     principals: &PrincipalRosters,
-    bytes: &[u8],
+    input: PolicyInput<'_>,
     previous: Option<&VerifiedPolicy>,
     validity: &mut Interval,
     budget: &mut DecodeBudget,
-) -> Result<VerifiedPolicy, E2eeError> {
-    let signed: ArcPolicy = decode_object(bytes, ArcWireObjectKind::Policy, budget)?;
-    let checked = verify_policy(
-        &binding.network_id,
-        &binding.conversation_id,
-        &signed,
-        principals,
-        previous,
-    )?;
+) -> Result<PolicyMaterial, E2eeError> {
+    let (subject, checked, approvals) = match input {
+        PolicyInput::Approved(bytes) => {
+            let signed: ArcPolicy = decode_object(bytes, ArcWireObjectKind::Policy, budget)?;
+            let verified = verify_policy(
+                &binding.network_id,
+                &binding.conversation_id,
+                &signed,
+                principals,
+                previous,
+            )?;
+            (signed.tbs, verified, signed.approvals.into_items())
+        }
+        PolicyInput::Subject(bytes) => {
+            if bytes.len() > crate::limits::MAX_POLICY_BYTES {
+                return Err(E2eeError::LimitExceeded);
+            }
+            let tbs = ArcPolicyTbs::decode_exact(bytes, budget)?;
+            let resolved = crate::policy::policy_subject(
+                &binding.network_id,
+                &binding.conversation_id,
+                &tbs,
+                principals,
+                previous,
+            )?;
+            (tbs, resolved, Vec::new())
+        }
+    };
     let expected = if previous.is_some() {
         binding.required_operational_policy_id
     } else {
@@ -336,9 +476,7 @@ fn policy(
     {
         return Err(E2eeError::InvalidValue);
     }
-    for (root, device) in signed
-        .approvals
-        .as_slice()
+    for (root, device) in approvals
         .iter()
         .map(|a| (&a.signer_root_fingerprint, &a.signer_device_id))
         .chain(
@@ -350,5 +488,5 @@ fn policy(
     {
         intersect(validity, active_device(principals, root, device)?.interval);
     }
-    Ok(checked)
+    Ok(PolicyMaterial { subject, checked })
 }
