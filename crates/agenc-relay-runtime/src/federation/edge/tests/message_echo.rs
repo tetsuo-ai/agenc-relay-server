@@ -215,6 +215,22 @@ fn departure_backing_charges_both_allocations_before_the_request_can_be_sent() -
         reserve_departure_backing(context, 1, usize::MAX),
         Err(agenc_relay_domain::DomainError::ServerBusy)
     ));
+    #[cfg(target_pointer_width = "64")]
+    {
+        // The ID byte count fits independently; its allocator bookkeeping does not.
+        let largest_id_array = usize::MAX / size_of::<ChannelInstanceId>();
+        assert!(matches!(
+            reserve_departure_backing(context, largest_id_array, 0),
+            Err(agenc_relay_domain::DomainError::ServerBusy)
+        ));
+        // Both rounded allocations fit separately but their aggregate exceeds u64.
+        let half = usize::MAX / 2;
+        assert!(matches!(
+            reserve_departure_backing(context, half / size_of::<ChannelInstanceId>(), half),
+            Err(agenc_relay_domain::DomainError::ServerBusy)
+        ));
+        assert_eq!(charged(context), before);
+    }
     let available = context.backing_budget_for_test().available();
     let all = context.reserve_kept_output(available)?;
     assert!(matches!(

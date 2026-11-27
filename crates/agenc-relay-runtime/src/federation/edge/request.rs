@@ -891,7 +891,8 @@ pub(super) fn reserve_departure_backing(
         .checked_mul(size_of::<agenc_relay_types::ChannelInstanceId>())
         .ok_or(DomainError::ServerBusy)?;
     let allocation = |capacity: usize| {
-        let bytes = u64::try_from(capacity).map_err(|_| DomainError::ServerBusy)?;
+        // The maximum capacity also fails the allocator's checked bookkeeping charge.
+        let bytes = u64::try_from(capacity).unwrap_or(u64::MAX);
         MemoryCharge::allocation(bytes).map_err(|_| DomainError::ServerBusy)
     };
     let plan = BoundedMemoryCharges::new(&[allocation(channels)?, allocation(reason_capacity)?])
