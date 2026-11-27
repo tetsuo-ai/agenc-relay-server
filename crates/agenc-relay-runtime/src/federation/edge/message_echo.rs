@@ -91,6 +91,7 @@ pub(super) fn capture(
         ProjectedEvent::TopicChanged { actor, .. } => actor.user_id,
         ProjectedEvent::MemberParted { source, .. } => source.user_id,
         ProjectedEvent::Invited { inviter, .. } => inviter.user_id,
+        ProjectedEvent::UserModesChanged(record) => record.user_id,
         ProjectedEvent::NicknameChanged { view, .. }
         | ProjectedEvent::DisplayNameChanged { view, .. } => view.source.user_id,
         _ => return Ok(()),
@@ -229,6 +230,9 @@ fn labeled_targets(
         (FederationOpcode::Invite, ProjectedEvent::Invited {channel_id, named_target, ..}) => {
             matches!(echo_channels, Some(EchoChannels::Invite(original)) if original.matches(*channel_id, message, &named_target.nickname)).then_some(1)
         }
+        (FederationOpcode::UserMode, ProjectedEvent::UserModesChanged(record)) => {
+            original_user_mode(message, echo_channels.as_ref(), record).then_some(1)
+        }
         (FederationOpcode::NickChange, ProjectedEvent::NicknameChanged { view, .. }) => {
             let requested = message
                 .middle()
@@ -247,6 +251,34 @@ fn labeled_targets(
         }
         _ => None,
     }
+}
+
+// agenc-review: focus owner=runtime reviewed=2026-11-27 reason=an edge holds a MODE echo only for the original registered session, advanced revision, current nickname and requested operator notice setting
+fn original_user_mode(
+    message: &ParsedMessage,
+    original: Option<&EchoChannels>,
+    record: &agenc_relay_domain::federation::SessionRecord,
+) -> bool {
+    let Some(EchoChannels::UserMode { session, revision }) = original else {
+        return false;
+    };
+    let mut params = message
+        .middle()
+        .iter()
+        .map(String::as_str)
+        .chain(message.trailing());
+    let expected = if record.user_mode_bits & 2 == 0 {
+        "-w"
+    } else {
+        "+w"
+    };
+    record.session_id == *session
+        && record.session_revision.get() > *revision
+        && params
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case(record.nickname.presentation()))
+        && params.next() == Some(expected)
+        && params.next().is_none()
 }
 
 fn label_negotiated(message: &ParsedMessage, capabilities: Option<&CapabilityState>) -> bool {
