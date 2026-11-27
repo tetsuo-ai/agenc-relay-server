@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 use super::{
     DeferredCarrier, DeferredCommand, EdgeFederation, MAX_DEFERRED_COMMANDS, Phase, Violation,
 };
+use crate::budget::{BoundedMemoryCharges, MemoryCharge, MemoryPermitBatch};
 use crate::connection::ConnectionGeneration;
 use crate::federation::codec::operations::{
     FederatedOperation, JoinTarget, MessageTargetArg, ModeChangeArg, USER_MODE_CODE_WALLOPS,
@@ -170,6 +171,16 @@ pub enum EdgeCompletion {
     },
 }
 
+/// Physical channels selected when the originating command was admitted.
+pub(crate) enum EchoChannels {
+    Topic(agenc_relay_types::ChannelInstanceId),
+    Part {
+        channels: Vec<agenc_relay_types::ChannelInstanceId>,
+        reason: String,
+        _backing: MemoryPermitBatch,
+    },
+}
+
 /// Why a request was sent.
 pub(crate) enum PendingKind {
     SessionOpen {
@@ -189,8 +200,8 @@ pub(crate) enum PendingKind {
     },
     Command {
         message: Box<ParsedMessage>,
-        /// Channel instance selected at admission for the original public topic change.
-        topic_channel: Option<agenc_relay_types::ChannelInstanceId>,
+        /// Original channel instances for correlated membership and topic notifications.
+        echo_channels: Option<EchoChannels>,
     },
     Join {
         message: Box<ParsedMessage>,
@@ -200,14 +211,28 @@ pub(crate) enum PendingKind {
 }
 
 impl PendingKind {
-    fn for_operation(message: Box<ParsedMessage>, operation: &FederatedOperation) -> Self {
-        let topic_channel = match operation {
-            FederatedOperation::Topic { channel_id, .. } => Some(*channel_id),
+    fn for_operation(
+        message: Box<ParsedMessage>,
+        operation: FederatedOperation,
+        part_backing: Option<MemoryPermitBatch>,
+    ) -> Self {
+        let echo_channels = match operation {
+            FederatedOperation::Topic { channel_id, .. } => Some(EchoChannels::Topic(channel_id)),
+            FederatedOperation::Part {
+                all_channels: false,
+                channels,
+                reason,
+                ..
+            } => part_backing.map(|backing| EchoChannels::Part {
+                channels,
+                reason,
+                _backing: backing,
+            }),
             _ => None,
         };
         Self::Command {
             message,
-            topic_channel,
+            echo_channels,
         }
     }
 }
@@ -822,15 +847,59 @@ fn forward_command(
         Ok(requester) => requester,
         Err(error) => return Err((message, error)),
     };
+    // Acquire both retained allocations before encoding consumes the origin sequence.
+    let part_backing = match &operation {
+        FederatedOperation::Part {
+            all_channels: false,
+            channels,
+            reason,
+            ..
+        } if message
+            .tags()
+            .iter()
+            .any(|tag| tag.key() == "label" && tag.value().is_some())
+            && context
+                .sessions()
+                .capabilities_for_user(user_id)
+                .is_some_and(|caps| caps.enabled("labeled-response")) =>
+        {
+            match reserve_departure_backing(context, channels.capacity(), reason.capacity()) {
+                Ok(permit) => Some(permit),
+                Err(error) => return Err((message, error)),
+            }
+        }
+        _ => None,
+    };
     let Ok(prepared) = prepare_request(edge, context, generation, &operation) else {
         return Err((message, DomainError::ServerBusy));
     };
     let pending = match requester {
         Some(requester) => PendingKind::Join { message, requester },
-        None => PendingKind::for_operation(message, &operation),
+        None => PendingKind::for_operation(message, operation, part_backing),
     };
     register_request(edge, context, generation, prepared, pending);
     Ok(Routed::Forwarded)
+}
+
+/// Charge the actual Vec and String capacities separately under the process budget.
+pub(super) fn reserve_departure_backing(
+    context: &StateCoreContext,
+    channel_capacity: usize,
+    reason_capacity: usize,
+) -> Result<MemoryPermitBatch, DomainError> {
+    let channels = channel_capacity
+        .checked_mul(size_of::<agenc_relay_types::ChannelInstanceId>())
+        .ok_or(DomainError::ServerBusy)?;
+    let allocation = |capacity: usize| {
+        // The maximum capacity also fails the allocator's checked bookkeeping charge.
+        let bytes = u64::try_from(capacity).unwrap_or(u64::MAX);
+        MemoryCharge::allocation(bytes).map_err(|_| DomainError::ServerBusy)
+    };
+    let plan = BoundedMemoryCharges::new(&[allocation(channels)?, allocation(reason_capacity)?])
+        .map_err(|_| DomainError::ServerBusy)?;
+    context
+        .reserve_kept_output(plan.total())
+        .map_err(|_| DomainError::ServerBusy)
 }
 
 fn join_requester(
@@ -2135,14 +2204,19 @@ fn completed_request(
                 pending.replies,
             )
         }
-        (PendingKind::Command { message, .. }, ResultArm::Committed { .. })
-            if matches!(
-                pending.header.opcode,
-                agenc_relay_types::FederationOpcode::Message
-                    | agenc_relay_types::FederationOpcode::NickChange
-                    | agenc_relay_types::FederationOpcode::Setname
-                    | agenc_relay_types::FederationOpcode::Topic
-            ) =>
+        (
+            PendingKind::Command {
+                message,
+                echo_channels,
+            },
+            ResultArm::Committed { .. },
+        ) if matches!(
+            pending.header.opcode,
+            agenc_relay_types::FederationOpcode::Message
+                | agenc_relay_types::FederationOpcode::NickChange
+                | agenc_relay_types::FederationOpcode::Setname
+                | agenc_relay_types::FederationOpcode::Topic
+        ) || matches!(echo_channels, Some(EchoChannels::Part { .. })) =>
         {
             super::message_echo::complete(
                 context,
@@ -2306,7 +2380,7 @@ fn send_directory_query(
         prepared,
         PendingKind::Command {
             message,
-            topic_channel: None,
+            echo_channels: None,
         },
     );
     true
@@ -2349,7 +2423,7 @@ pub(super) fn continue_join_names(
         prepared,
         PendingKind::Command {
             message,
-            topic_channel: None,
+            echo_channels: None,
         },
     );
     true

@@ -22,13 +22,15 @@
 //! A connection without setname receives its ordinary labeled ACK.
 //! A public TOPIC notification must match the instance selected at admission,
 //! the original actor and the exact topic bytes (including an explicit clear).
+//! An explicit PART may name several channels. Each correlated departure must match
+//! one of their original instances, the departing user, and the admitted reason.
 
 use agenc_relay_client_wire::{CapabilityState, ParsedMessage, WireMessage};
 use agenc_relay_domain::federation::ProjectedEvent;
 use agenc_relay_federation_wire::EventHeader;
-use agenc_relay_types::{EventId, FederationOpcode, UserId};
+use agenc_relay_types::{ChannelInstanceId, EventId, FederationOpcode, UserId};
 
-use super::request::{PendingKind, PendingRequest};
+use super::request::{EchoChannels, PendingKind, PendingRequest};
 use super::{EdgeCompletion, EdgeFederation, Violation};
 use crate::budget::MemoryPermit;
 use crate::connection::ConnectionGeneration;
@@ -50,6 +52,8 @@ pub(super) struct MessageEcho {
     event: EventId,
     /// The coordinator state generation of that event.
     state_generation: u64,
+    /// One explicit PART can remove the user from each admitted instance only once.
+    parted_channel: Option<ChannelInstanceId>,
     frame: WireMessage,
     permit: MemoryPermit,
 }
@@ -71,6 +75,7 @@ pub(super) fn capture(
     let actor = match event {
         ProjectedEvent::MessageDelivered(record) => record.sender.user_id,
         ProjectedEvent::TopicChanged { actor, .. } => actor.user_id,
+        ProjectedEvent::MemberParted { source, .. } => source.user_id,
         ProjectedEvent::NicknameChanged { view, .. }
         | ProjectedEvent::DisplayNameChanged { view, .. } => view.source.user_id,
         _ => return Ok(()),
@@ -88,6 +93,21 @@ pub(super) fn capture(
     let Some(frame) = frames.pop() else {
         return Ok(());
     };
+    let parted_channel = match event {
+        ProjectedEvent::MemberParted { channel_id, .. } => Some(*channel_id),
+        _ => None,
+    };
+    hold_echo(pending, context, header, parted_channel, targets, frame)
+}
+
+fn hold_echo(
+    pending: &mut PendingRequest,
+    context: &StateCoreContext,
+    header: &EventHeader,
+    parted_channel: Option<ChannelInstanceId>,
+    targets: usize,
+    frame: WireMessage,
+) -> Result<(), Violation> {
     let state_generation = header.coordinator_state_generation;
     if pending.completion_generation.is_some()
         || pending.completion_coverage.is_some()
@@ -107,8 +127,19 @@ pub(super) fn capture(
         .iter_mut()
         .find(|echo| echo.event == header.event_id)
     {
+        if held.parted_channel != parted_channel {
+            return Err(Violation::Consistency);
+        }
         held.frame = frame;
         return Ok(());
+    }
+    if parted_channel.is_some()
+        && pending
+            .message_echoes
+            .iter()
+            .any(|echo| echo.parted_channel == parted_channel)
+    {
+        return Err(Violation::Consistency);
     }
     if pending.message_echoes.len() >= targets {
         return Err(Violation::Ceiling);
@@ -121,6 +152,7 @@ pub(super) fn capture(
     pending.message_echoes.push(MessageEcho {
         event: header.event_id,
         state_generation,
+        parted_channel,
         frame,
         permit,
     });
@@ -137,7 +169,7 @@ fn labeled_targets(
 ) -> Option<usize> {
     let PendingKind::Command {
         message,
-        topic_channel,
+        echo_channels,
     } = &pending.kind
     else {
         return None;
@@ -165,9 +197,16 @@ fn labeled_targets(
             },
         ) => {
             let committed = topic.as_ref().map_or("", |(text, _, _)| text.as_str());
-            (topic_channel.as_ref() == Some(channel_id) && message.trailing() == Some(committed))
-                .then_some(1)
+            (matches!(echo_channels, Some(EchoChannels::Topic(original)) if original == channel_id)
+                && message.trailing() == Some(committed))
+            .then_some(1)
         }
+        (
+            FederationOpcode::Part,
+            ProjectedEvent::MemberParted {
+                channel_id, reason, ..
+            },
+        ) => departure_targets(echo_channels.as_ref(), channel_id, reason),
         (FederationOpcode::NickChange, ProjectedEvent::NicknameChanged { view, .. }) => {
             let requested = message
                 .middle()
@@ -186,6 +225,22 @@ fn labeled_targets(
         }
         _ => None,
     }
+}
+
+fn departure_targets(
+    original: Option<&EchoChannels>,
+    channel_id: &ChannelInstanceId,
+    reason: &str,
+) -> Option<usize> {
+    let Some(EchoChannels::Part {
+        channels,
+        reason: requested,
+        ..
+    }) = original
+    else {
+        return None;
+    };
+    (channels.contains(channel_id) && requested == reason).then_some(channels.len())
 }
 
 fn commits_at(result: &ResultArm, generation: u64) -> bool {

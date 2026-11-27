@@ -46,7 +46,7 @@ fn edge_with(command: &str, opcode: FederationOpcode) -> TestResult<EdgeFederati
             generation: CONNECTION,
             sink_gone: false,
             kind: PendingKind::Command {
-                topic_channel: None,
+                echo_channels: None,
                 message: Box::new(message),
             },
             header: RequestHeader {
@@ -140,10 +140,10 @@ fn only_the_original_topic_instance_actor_and_text_are_held() -> TestResult {
             &format!("@label=t TOPIC #test :{requested}"),
             FederationOpcode::Topic,
         )?;
-        let PendingKind::Command { topic_channel, .. } = &mut pending(&mut edge)?.kind else {
+        let PendingKind::Command { echo_channels, .. } = &mut pending(&mut edge)?.kind else {
             return Err("missing original command".into());
         };
-        *topic_channel = Some(channel);
+        *echo_channels = Some(EchoChannels::Topic(channel));
         let value = if observed.is_empty() {
             None
         } else {
@@ -183,6 +183,136 @@ fn only_the_original_topic_instance_actor_and_text_are_held() -> TestResult {
         .map_err(|e| format!("topic capture: {e:?}"))?;
         assert_eq!(frames.is_empty(), matched);
         assert_eq!(held(&edge)?, usize::from(matched));
+    }
+    Ok(())
+}
+
+#[test]
+fn departure_backing_charges_both_allocations_before_the_request_can_be_sent() -> TestResult {
+    use super::super::request::reserve_departure_backing;
+    use crate::budget::MemoryCharge;
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let before = charged(context);
+    let channel_charge =
+        MemoryCharge::allocation(20 * size_of::<ChannelInstanceId>() as u64)?.bytes();
+    let reason_charge = MemoryCharge::allocation(256)?.bytes();
+    let permits = reserve_departure_backing(context, 20, 256)?;
+    assert_eq!(charged(context), before + channel_charge + reason_charge);
+    drop(permits);
+    assert_eq!(charged(context), before);
+    let empty_reason = reserve_departure_backing(context, 1, 0)?;
+    assert_eq!(
+        charged(context),
+        before + MemoryCharge::allocation(size_of::<ChannelInstanceId>() as u64)?.bytes()
+    );
+    drop(empty_reason);
+    assert!(matches!(
+        reserve_departure_backing(context, usize::MAX, 0),
+        Err(agenc_relay_domain::DomainError::ServerBusy)
+    ));
+    assert!(matches!(
+        reserve_departure_backing(context, 1, usize::MAX),
+        Err(agenc_relay_domain::DomainError::ServerBusy)
+    ));
+    #[cfg(target_pointer_width = "64")]
+    {
+        // The ID byte count fits independently; its allocator bookkeeping does not.
+        let largest_id_array = usize::MAX / size_of::<ChannelInstanceId>();
+        assert!(matches!(
+            reserve_departure_backing(context, largest_id_array, 0),
+            Err(agenc_relay_domain::DomainError::ServerBusy)
+        ));
+        // Both rounded allocations fit separately but their aggregate exceeds u64.
+        let half = usize::MAX / 2;
+        assert!(matches!(
+            reserve_departure_backing(context, half / size_of::<ChannelInstanceId>(), half),
+            Err(agenc_relay_domain::DomainError::ServerBusy)
+        ));
+        assert_eq!(charged(context), before);
+    }
+    let available = context.backing_budget_for_test().available();
+    let all = context.reserve_kept_output(available)?;
+    assert!(matches!(
+        reserve_departure_backing(context, 20, 0),
+        Err(agenc_relay_domain::DomainError::ServerBusy)
+    ));
+    drop(all);
+    let guard = context.reserve_kept_output(available - channel_charge)?;
+    let held = charged(context);
+    assert!(matches!(
+        reserve_departure_backing(context, 20, 256),
+        Err(agenc_relay_domain::DomainError::ServerBusy)
+    ));
+    assert_eq!(charged(context), held);
+    drop(guard);
+    assert_eq!(charged(context), before);
+    Ok(())
+}
+
+#[test]
+fn a_departure_echo_belongs_to_one_original_instance_actor_and_reason() -> TestResult {
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let capabilities = labeled()?;
+    let first = ChannelInstanceId::from_bytes([7; 16]);
+    let second = ChannelInstanceId::from_bytes([8; 16]);
+    let foreign = ChannelInstanceId::from_bytes([9; 16]);
+    for reason in ["", "requested"] {
+        let mut edge = edge_with(
+            &format!("@label=p PART #one,#two :{reason}"),
+            FederationOpcode::Part,
+        )?;
+        let PendingKind::Command { echo_channels, .. } = &mut pending(&mut edge)?.kind else {
+            return Err("missing original command".into());
+        };
+        *echo_channels = Some(EchoChannels::Part {
+            channels: vec![first, second],
+            reason: reason.to_owned(),
+            _backing: super::super::request::reserve_departure_backing(context, 2, reason.len())?,
+        });
+        for (id, channel, actor, observed, expected, held_count) in [
+            (1, foreign, SENDER, reason, Ok(false), 0),
+            (1, first, SENDER, "different", Ok(false), 0),
+            (1, first, UserId::from_bytes([19; 16]), reason, Ok(false), 0),
+            (1, first, SENDER, reason, Ok(true), 1),
+            (1, first, SENDER, reason, Ok(true), 1),
+            (1, second, SENDER, reason, Err(Violation::Consistency), 1),
+            (2, first, SENDER, reason, Err(Violation::Consistency), 1),
+            (2, second, SENDER, reason, Ok(true), 2),
+        ] {
+            let event = ProjectedEvent::MemberParted {
+                channel_id: channel,
+                source: SourceView {
+                    user_id: actor,
+                    nickname: NicknameValue::parse("sam")?,
+                    public_cloak: agenc_relay_testkit::deterministic_cloak(1)?,
+                    account_label: None,
+                },
+                resulting_revision: Revision::new(3)?,
+                home_session_revision: Some(Revision::new(4)?),
+                reason: observed.to_owned(),
+            };
+            let mut header = header(id, GENERATION);
+            header.event_kind = FederationEventKind::MemberParted;
+            let name = if channel == first { "#one" } else { "#two" };
+            let mut frames = vec![WireMessage::new(
+                "sam!u-a@h-b.invalid",
+                "PART",
+                &[name],
+                Some(observed),
+            )?];
+            let result = capture(
+                &mut edge,
+                context,
+                &header,
+                &event,
+                (SENDER, CONNECTION, Some(&capabilities)),
+                &mut frames,
+            );
+            assert_eq!(result.map(|()| frames.is_empty()), expected);
+            assert_eq!(held(&edge)?, held_count);
+        }
     }
     Ok(())
 }
