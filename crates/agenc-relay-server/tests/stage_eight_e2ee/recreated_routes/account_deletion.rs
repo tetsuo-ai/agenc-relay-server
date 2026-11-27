@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Architecture §14.6 against two original, independently authenticated accounts.
 
 use super::*;

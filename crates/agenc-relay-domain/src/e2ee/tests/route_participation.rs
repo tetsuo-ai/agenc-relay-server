@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Section 14.6 participation is derived from each current fixed pair, including recovery.
 
 use super::*;

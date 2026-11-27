@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! A verified initial binding and an account retirement are ordered by the same state core.
 use super::*;
 use crate::e2ee::coordinator::execute::{BaseView, OriginFacts, Staged};
