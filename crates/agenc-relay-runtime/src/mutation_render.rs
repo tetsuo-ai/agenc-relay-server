@@ -1441,16 +1441,11 @@ fn render_channel_control(
         .ok_or(RuntimeError::InvalidValue)?;
     let name = ChannelName::parse(channel.name().presentation())
         .map_err(|_| RuntimeError::InvalidValue)?;
-    let frame = standard_reply(
+    let frame = crate::client_render::channel_setting_updated(
         reply.capabilities,
         builder.context.server_prefix(),
-        ReplyKind::Note,
-        "CHANCTL",
-        PublicErrorCode::UPDATED,
-        &[SafeReplyContext::Channel(&name)],
-        description("Channel setting updated")?,
-    )
-    .map_err(|_| RuntimeError::InvalidValue)?;
+        &name,
+    )?;
     builder.push_origin(frame)
 }
 

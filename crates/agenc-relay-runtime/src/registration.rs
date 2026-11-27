@@ -2159,9 +2159,6 @@ impl RegistrationRouter {
             return;
         };
         let capabilities = state.registration.capability_state();
-        if !capabilities.enabled("standard-replies") {
-            return;
-        }
         let Some(name) = message
             .middle()
             .get(1)
@@ -2169,23 +2166,31 @@ impl RegistrationRouter {
         else {
             return;
         };
-        let Ok(description) =
-            agenc_relay_client_wire::SafeReplyDescription::new("Channel setting updated")
-        else {
-            return;
+        let semantic = if capabilities.enabled("standard-replies") {
+            let Ok(frame) = crate::client_render::channel_setting_updated(
+                capabilities,
+                &self.config.server_prefix,
+                &name,
+            ) else {
+                return;
+            };
+            vec![frame]
+        } else {
+            Vec::new()
         };
-        let Ok(frame) = agenc_relay_client_wire::standard_reply(
-            capabilities,
+        let logical = crate::client_render::logical_frames(
             &self.config.server_prefix,
-            agenc_relay_client_wire::ReplyKind::Note,
-            "CHANCTL",
-            agenc_relay_types::PublicErrorCode::UPDATED,
-            &[agenc_relay_client_wire::SafeReplyContext::Channel(&name)],
-            description,
-        ) else {
+            capabilities,
+            message,
+            semantic,
+        );
+        let Ok(frames) = logical else {
+            close_transport(context, generation);
             return;
         };
-        let _sent = self.send_one(context, generation, frame);
+        if !frames.is_empty() && context.send_to(generation, frames).is_err() {
+            close_transport(context, generation);
+        }
     }
 
     fn reserve_nickname(
