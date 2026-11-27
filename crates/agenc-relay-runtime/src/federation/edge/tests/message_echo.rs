@@ -211,6 +211,10 @@ fn departure_backing_charges_both_allocations_before_the_request_can_be_sent() -
         reserve_departure_backing(context, usize::MAX, 0),
         Err(agenc_relay_domain::DomainError::ServerBusy)
     ));
+    assert!(matches!(
+        reserve_departure_backing(context, 1, usize::MAX),
+        Err(agenc_relay_domain::DomainError::ServerBusy)
+    ));
     let available = context.backing_budget_for_test().available();
     let all = context.reserve_kept_output(available)?;
     assert!(matches!(
