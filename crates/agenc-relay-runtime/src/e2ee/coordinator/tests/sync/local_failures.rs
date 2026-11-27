@@ -14,10 +14,11 @@ use agenc_relay_e2ee::tls::{DecodeBudget, TlsDecode};
 use super::*;
 use crate::e2ee::coordinator::execute::{BaseView, OriginFacts, Staged, run};
 
-/// Runs `EKEY PUBLISH IDENTITY`, whose completion event targets the
-/// requester's edge, through the executor and returns the code of the
-/// failed result it staged.
-fn failed_code(harness: &mut Harness) -> TestResult<String> {
+/// Stages the original signed publication and checks which account the pending outcome holds.
+fn stage_root_publication(
+    harness: &mut Harness,
+    holds_owner: bool,
+) -> TestResult<ArcFederationResult> {
     let root = wire(ArcWireObjectKind::RootIdentity, &harness.principal.root)?;
     let complete = harness.request(super::super::Op::PublishIdentity, &[], Some(&root))?;
     let mut fixture = crate::test_support::StateCoreFixture::new(vec![0; 65_536])?;
@@ -71,6 +72,32 @@ fn failed_code(harness: &mut Harness) -> TestResult<String> {
         &mut budget,
     )?;
     let result = ArcFederationResult::decode_exact(object.body(), &mut budget)?;
+    assert_eq!(
+        harness
+            .coordinator
+            .blocks_account_deletion(fixture.context_mut()?, account),
+        holds_owner
+    );
+    let other = agenc_relay_types::AccountId::parse_wire_bytes(&super::super::account_bytes(17)?)?;
+    assert!(
+        !harness
+            .coordinator
+            .blocks_account_deletion(fixture.context_mut()?, other)
+    );
+    Ok(result)
+}
+
+#[test]
+fn pending_identity_publication_holds_only_its_authenticated_account_deletion() -> TestResult {
+    let mut harness = Harness::new()?;
+    initial_ready_peer(&mut harness.coordinator, ServerId::from_bytes(HOME))?;
+    let result = stage_root_publication(&mut harness, true)?;
+    assert_eq!(result.result_kind, ArcFederationResultKind::Stored);
+    Ok(())
+}
+
+fn failed_code(harness: &mut Harness) -> TestResult<String> {
+    let result = stage_root_publication(harness, false)?;
     assert_eq!(result.result_kind, ArcFederationResultKind::Failed);
     let encoded = result.encoded_result.as_slice();
     let length = usize::from(*encoded.first().ok_or("code length")?);
