@@ -183,6 +183,8 @@ fn result_must_match_every_original_recipient_target_and_failure() -> TestResult
             Err(Violation::Consistency)
         );
     }
+    let missing_operand = numeric(401, "Sam", &[], "No such nick")?;
+    assert_eq!(covered_error(&missing_operand, "Sam", "Cat"), None);
     let empty = WireMessage::new("hub.example", "ACK", &[], None)?;
     assert_eq!(covered_error(&empty, "Sam", "Cat"), None);
     assert!(ReplyRequester::new(&"X".repeat(33), &CapabilityState::default()).is_err());
