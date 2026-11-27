@@ -3690,17 +3690,58 @@ impl DomainState {
             plan.charges = charges;
             return Ok(PlanDecision::Mutation(plan));
         }
+        self.rejected_account_deletion(user_id, session.session_id, charges)
+            .map(PlanDecision::Mutation)
+    }
+
+    /// Refuses an otherwise authorized deletion at the companion authority boundary.
+    /// The original confirmation consumes its challenge and pays the same admission charges.
+    pub fn refuse_account_deletion(&self, plan: MutationPlan) -> Result<MutationPlan, DomainError> {
+        if plan.expected_revision != self.revision {
+            return Err(DomainError::StaleRevision);
+        }
+        let [
+            Mutation::DeleteAccount {
+                account_id,
+                user_ids,
+            },
+        ] = plan.mutations.as_slice()
+        else {
+            return Err(DomainError::InvalidArgument);
+        };
+        let [user_id] = user_ids.as_slice() else {
+            return Err(DomainError::InvariantViolation);
+        };
+        let session = self.sessions.get(user_id).ok_or(DomainError::NotFound)?;
+        if !self
+            .account_deletion_challenges
+            .get(&session.session_id)
+            .is_some_and(|challenge| {
+                challenge.account_id == *account_id && challenge.user_id == *user_id
+            })
+        {
+            return Err(DomainError::BadState);
+        }
+        self.rejected_account_deletion(*user_id, session.session_id, plan.charges)
+    }
+
+    fn rejected_account_deletion(
+        &self,
+        user_id: UserId,
+        session_id: SessionId,
+        charges: Vec<RateCharge>,
+    ) -> Result<MutationPlan, DomainError> {
         let mut recipients = RecipientSet::new();
         recipients.insert(user_id);
-        self.command_plan(
-            vec![Mutation::ConsumeAccountDeletionChallenge(
-                session.session_id,
-            )],
-            vec![DomainEvent::AccountDeletionConfirmationRejected(user_id)],
+        self.assemble_plan(PlanParts {
+            mutations: vec![Mutation::ConsumeAccountDeletionChallenge(session_id)],
+            events: vec![DomainEvent::AccountDeletionConfirmationRejected(user_id)],
             recipients,
+            failures: Vec::new(),
+            message_batch: None,
             charges,
-            StorageClass::Ephemeral,
-        )
+            storage: StorageClass::Ephemeral,
+        })
     }
 
     fn plan_channel(
@@ -10442,6 +10483,52 @@ mod tests {
         assert!(state.account_deletion_challenges.is_empty());
         state.validate()?;
         Ok(())
+    }
+
+    #[test]
+    fn companion_deletion_refusal_consumes_the_original_challenge_and_preserves_account()
+    -> Result<(), DomainError> {
+        let (mut state, user, account) = private_auth_session()?;
+        let token = bytes(233);
+        let start = mutation_of(state.plan_account_deletion_start(
+            user,
+            account,
+            Vec::new(),
+            ExternalInputs {
+                monotonic_now: Some(MonotonicTick::from_ticks(101)),
+                deletion_tokens: vec![AccountDeletionToken::from_bytes(token)],
+                ..ExternalInputs::default()
+            },
+        )?)?;
+        let prepared = state.prepare_mutation(start)?;
+        state.apply_prepared(prepared)?;
+        let confirm = |state: &DomainState| {
+            state.plan_account_deletion_confirm(
+                user,
+                account,
+                AccountDeletionToken::from_bytes(token),
+                Vec::new(),
+                ExternalInputs {
+                    monotonic_now: Some(MonotonicTick::from_ticks(102)),
+                    ..ExternalInputs::default()
+                },
+            )
+        };
+        let permitted = mutation_of(confirm(&state)?)?;
+        assert_eq!(permitted.events(), &[DomainEvent::AccountDeleted(account)]);
+        let refused = state.refuse_account_deletion(permitted)?;
+        assert_eq!(
+            refused.events(),
+            &[DomainEvent::AccountDeletionConfirmationRejected(user)]
+        );
+        assert_eq!(refused.storage_class(), StorageClass::Ephemeral);
+        assert!(refused.durable_writes().is_empty());
+        let prepared = state.prepare_mutation(refused)?;
+        state.apply_prepared(prepared)?;
+        assert!(matches!(confirm(&state), Err(DomainError::BadState)));
+        assert!(state.account(account).is_some());
+        assert!(state.session(user).is_some());
+        state.validate()
     }
 
     fn private_auth_session() -> Result<(DomainState, UserId, AccountId), DomainError> {

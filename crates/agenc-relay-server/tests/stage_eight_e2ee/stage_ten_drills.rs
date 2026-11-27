@@ -1054,7 +1054,7 @@ fn open_deletion_session(
 /// durable state or opens the next session never races this connection's
 /// teardown. A dropped connection is torn down as `transport_loss` instead,
 /// after the drill has moved on.
-fn quit_and_drain(client: &mut ArcClient, reason: &str) -> TestResult {
+pub(super) fn quit_and_drain(client: &mut ArcClient, reason: &str) -> TestResult {
     client.send(&format!("QUIT :{reason}"))?;
     let deadline = Instant::now() + REPLY_DEADLINE;
     for _ in 0..TRANSCRIPT_LINES {
@@ -1073,7 +1073,7 @@ fn quit_and_drain(client: &mut ArcClient, reason: &str) -> TestResult {
 }
 
 /// Reads the one reply an `ACCT` line draws, whichever arm answers it.
-fn acct_reply(client: &mut ArcClient) -> TestResult<String> {
+pub(super) fn acct_reply(client: &mut ArcClient) -> TestResult<String> {
     let lines = client.read_until(|line| {
         line.contains(" NOTE ACCT ") || line.contains(" FAIL ACCT ") || line.contains(" 481 ")
     })?;
@@ -1100,7 +1100,7 @@ fn refuse_unissued_deletion(
 }
 
 /// Read the token privately from the registered response specified by section 14.6.
-fn issue_deletion_challenge(client: &mut ArcClient) -> TestResult<String> {
+pub(super) fn issue_deletion_challenge(client: &mut ArcClient) -> TestResult<String> {
     client.send("ACCT DELETE START")?;
     let reply = acct_reply(client)?;
     reply
@@ -1137,7 +1137,9 @@ fn delete_account(
     read_deleted_connection_closure(&mut client.reader)
 }
 
-fn read_deleted_connection_closure(reader: &mut impl BufRead) -> TestResult<Vec<String>> {
+pub(super) fn read_deleted_connection_closure(
+    reader: &mut impl BufRead,
+) -> TestResult<Vec<String>> {
     let deadline = Instant::now() + REPLY_DEADLINE;
     let mut lines = Vec::<String>::new();
     for _ in 0..TRANSCRIPT_LINES {

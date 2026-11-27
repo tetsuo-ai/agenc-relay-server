@@ -26,7 +26,7 @@ type Id = [u8; 16];
 pub(super) type Deadline = (u64, Id);
 
 // Covers the stored lease and its B-tree entries during assembly and service.
-const ENTRY_BACKING: usize = 768;
+const ENTRY_BACKING: usize = 1024;
 
 /// Direct creators are always the smaller account. Historic rows commit to
 /// their peer using a per-grant nonce, so their stable lookup scope is the
@@ -171,13 +171,16 @@ pub(super) struct Leases {
     by_predecessor: BTreeMap<[u8; 32], Id>,
     deadlines: BTreeSet<Deadline>,
     scopes: BTreeSet<(Scope, u64, Id)>,
+    owners: BTreeSet<([u8; 32], u64, Id)>,
 }
 
 impl Leases {
     pub(super) fn insert(&mut self, lease: Lease) {
+        self.remove(lease.id);
         if let Some(binding) = lease.predecessor {
             self.by_predecessor.insert(binding, lease.id);
         }
+        self.owners.insert((lease.owner, lease.expires, lease.id));
         self.scopes.insert((lease.scope(), lease.expires, lease.id));
         self.deadlines.insert((lease.expires, lease.id));
         self.by_id.insert(lease.id, lease);
@@ -189,10 +192,19 @@ impl Leases {
             {
                 self.by_predecessor.remove(&binding);
             }
+            self.owners.remove(&(lease.owner, lease.expires, id));
             self.scopes.remove(&(lease.scope(), lease.expires, id));
             self.deadlines.remove(&(lease.expires, id));
         }
     }
+    /// Live leases block deletion of their issuing account, independent of the expiry sweep.
+    pub(super) fn live_for_owner(&self, owner: [u8; 32], now: u64) -> bool {
+        self.owners
+            .range((owner, 0, [0; 16])..=(owner, u64::MAX, [u8::MAX; 16]))
+            .next_back()
+            .is_some_and(|(_, expiry, _)| *expiry > now)
+    }
+
     pub(super) fn for_predecessor(&self, binding: &[u8; 32]) -> Option<Id> {
         self.by_predecessor.get(binding).copied()
     }
@@ -504,6 +516,33 @@ impl Rows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_observes_only_the_owners_live_reservations() {
+        let mut leases = Leases::default();
+        let lease = |id, owner, expires| Lease {
+            id: [id; 16],
+            owner: [owner; 32],
+            device: [7; 16],
+            expires,
+            predecessor: None,
+            target: Target::Channel(ChannelInstanceId::from_bytes([id; 16])),
+            _backing: None,
+        };
+        leases.insert(lease(1, 10, 50));
+        leases.insert(lease(2, 10, 90));
+        leases.insert(lease(3, 20, 70));
+        assert!(!leases.live_for_owner([11; 32], 0));
+        assert!(leases.live_for_owner([10; 32], 89));
+        assert!(!leases.live_for_owner([10; 32], 90));
+        leases.remove([2; 16]);
+        assert!(!leases.live_for_owner([10; 32], 50));
+        assert!(leases.live_for_owner([20; 32], 50));
+        leases.insert(lease(1, 30, 100));
+        assert!(!leases.live_for_owner([10; 32], 0));
+        assert!(leases.live_for_owner([30; 32], 99));
+        assert!(!leases.live_for_owner([30; 32], u64::MAX));
+    }
 
     #[test]
     fn a_scope_over_the_expiry_write_limit_waits_for_bounded_maintenance()

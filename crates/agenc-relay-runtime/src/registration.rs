@@ -1069,7 +1069,9 @@ impl RegistrationRouter {
                         &mut state.nickname,
                         handoff,
                         observation,
-                        encrypted_routes(self.federation.as_deref()),
+                        self.federation
+                            .as_deref()
+                            .and_then(FederationCoordinator::companion_executor),
                     )
                     .map(ActionStep::from);
             }
@@ -3196,17 +3198,6 @@ impl RegistrationRouter {
             }
         }
     }
-}
-
-/// The coordinator's encrypted route table, which decides its own clients'
-/// plaintext to the members of an encrypted direct pair; none on an edge or
-/// a node without the encrypted profile.
-fn encrypted_routes(
-    federation: Option<&FederationCoordinator>,
-) -> Option<&agenc_relay_domain::e2ee::RouteTable> {
-    federation
-        .and_then(FederationCoordinator::companion_executor)
-        .map(|executor| &executor.state.routes)
 }
 
 fn charge_preauth(

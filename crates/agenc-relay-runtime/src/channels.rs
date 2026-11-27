@@ -36,6 +36,7 @@ use crate::bridge::crypto::{
 };
 use crate::bridge::{CryptoCompletionMessage, CryptoJobId};
 use crate::connection::sink::ConnectionGeneration;
+use crate::e2ee::coordinator::CompanionCoordinator;
 use crate::observe::metrics::ResultClass;
 use crate::purpose::ListenerPurpose;
 use crate::state_core::inbox::CloseReason;
@@ -62,6 +63,7 @@ struct ClientReply<'a> {
 }
 
 struct SessionCommandInput<'a> {
+    companion: Option<&'a CompanionCoordinator>,
     reply: Option<ClientReply<'a>>,
     command: CanonicalCommand,
     close_reason: Option<&'a str>,
@@ -469,7 +471,7 @@ impl RegisteredCommandExecutor {
         current_nickname: &mut Option<String>,
         handoff: RegisteredCommandHandoff,
         observation: CommandObservation,
-        encrypted_routes: Option<&agenc_relay_domain::e2ee::RouteTable>,
+        companion: Option<&CompanionCoordinator>,
     ) -> Result<RouteOutcome, RuntimeError> {
         // The response floor of a concealed target is measured from here:
         // the start of one parsed, admitted command's processing.
@@ -503,10 +505,10 @@ impl RegisteredCommandExecutor {
         // The coordinator's own clients meet the same refusal of plaintext
         // between the accounts of an encrypted direct pair as every edge's
         // (companion 11.4 and 12.5).
-        if encrypted_routes.is_some_and(|routes| {
+        if companion.is_some_and(|executor| {
             crate::e2ee::downgrade::refused_direct_target(
                 context.domain(),
-                routes,
+                &executor.state.routes,
                 bound.user_id,
                 &command,
             )
@@ -547,6 +549,7 @@ impl RegisteredCommandExecutor {
             accounts,
             bound,
             SessionCommandInput {
+                companion,
                 reply: Some(reply),
                 command,
                 close_reason: None,
@@ -986,6 +989,7 @@ pub(crate) fn close_registered(context: &mut StateCoreContext, bound: BoundSessi
         None,
         bound,
         SessionCommandInput {
+            companion: None,
             reply: None,
             command: CanonicalCommand::quit(reason),
             close_reason: Some(&wire_reason),
@@ -1003,6 +1007,7 @@ fn execute_session_command(
     observation: &mut Option<CommandObservation>,
 ) -> Result<CommandExecution, RuntimeError> {
     let SessionCommandInput {
+        companion,
         reply,
         command,
         close_reason,
@@ -1025,6 +1030,9 @@ fn execute_session_command(
             Err(SessionCommandError::Internal(error)) => return Err(error),
         };
     let decision = match planned {
+        PlannedCommand::Ready(PlanDecision::Mutation(plan)) => {
+            PlanDecision::Mutation(check_companion_deletion(context, companion, plan)?)
+        }
         PlannedCommand::Ready(decision) => decision,
         PlannedCommand::Crypto(plan) => return Ok(CommandExecution::Crypto(plan)),
     };
@@ -1269,6 +1277,25 @@ fn durable_command_origin(
         StagedOrigin::with_rejection_frames(reply.generation, frames)
             .with_observation(observation.take()),
     ))
+}
+
+/// Checks the coordinator's committed companion authority before rendering or staging
+/// a valid confirmation. Refusal uses the same single-use decision as the base checks.
+pub(crate) fn check_companion_deletion(
+    context: &StateCoreContext,
+    companion: Option<&CompanionCoordinator>,
+    plan: MutationPlan,
+) -> Result<MutationPlan, RuntimeError> {
+    if let Some(companion) = companion
+        && let Some(account) = deleted_account(&plan)?
+        && companion.blocks_account_deletion(context, account)
+    {
+        return context
+            .domain()
+            .refuse_account_deletion(plan)
+            .map_err(|_| RuntimeError::InvalidValue);
+    }
+    Ok(plan)
 }
 
 fn deleted_account(plan: &MutationPlan) -> Result<Option<AccountId>, RuntimeError> {

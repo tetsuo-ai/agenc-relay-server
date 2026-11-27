@@ -229,7 +229,9 @@ impl RegistrationRouter {
                 &mut state.nickname,
                 deferred.handoff,
                 deferred.observation,
-                super::encrypted_routes(self.federation.as_deref()),
+                self.federation
+                    .as_deref()
+                    .and_then(super::FederationCoordinator::companion_executor),
             )?;
             if matches!(outcome, RouteOutcome::Close(_)) {
                 return Err(RuntimeError::InvalidValue);

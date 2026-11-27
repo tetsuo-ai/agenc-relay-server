@@ -459,6 +459,9 @@ impl FederationCoordinator {
         if !self.link_is_live(link, peer) {
             return Err(Violation::Phase);
         }
+        let plan =
+            crate::channels::check_companion_deletion(context, self.companion_executor(), *plan)
+                .map_err(|_| Violation::Codec)?;
         let result = account_result(context, &fresh, &plan)?;
         let fanout = crate::state_core::fanout::FanoutRequest::new(Vec::new(), Vec::new())
             .map_err(|_| Violation::Ceiling)?;
@@ -478,7 +481,7 @@ impl FederationCoordinator {
             |(owner, writes)| (Some(owner), writes),
         );
         let staged = super::request::stage_with_plan_and_writes(
-            self, context, link, peer, *fresh, result, *plan, fanout, writes,
+            self, context, link, peer, *fresh, result, plan, fanout, writes,
         );
         if let Some(owner) = owner {
             if matches!(staged, Ok(true)) {
