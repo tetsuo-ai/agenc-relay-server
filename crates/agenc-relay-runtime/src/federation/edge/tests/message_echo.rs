@@ -76,6 +76,113 @@ fn edge_with(command: &str, opcode: FederationOpcode) -> TestResult<EdgeFederati
     Ok(edge)
 }
 
+#[test]
+fn message_echoes_and_refusals_bind_the_same_original_targets_in_either_order() -> TestResult {
+    let request = parse_message(FramedLine::new("PRIVMSG bob,#Room :hi")?)?.ok_or("request")?;
+    let echo = |name, text| WireMessage::new("sam!u-a@h-b.invalid", "PRIVMSG", &[name], Some(text));
+    let tagged = parse_message(FramedLine::new(
+        "@label=x;+sample/typing=on;+empty TAGMSG #room",
+    )?)?
+    .ok_or("original tagged request")?;
+    let frame = WireMessage::new("sam", "TAGMSG", &["#room"], None)?;
+    let tags = [
+        ("+empty".to_owned(), String::new()),
+        ("+sample/typing".to_owned(), "on".to_owned()),
+    ];
+    assert!(original_message_echo(&tagged, &frame, &tags));
+    assert!(!original_message_echo(&tagged, &frame, &tags[..1]));
+    let changed = [tags[0].clone(), (tags[1].0.clone(), "off".to_owned())];
+    assert!(!original_message_echo(&tagged, &frame, &changed));
+    let room = echo("#room", "hi")?;
+    let bob = echo("Bob", "hi")?;
+    let other = echo("#other", "hi")?;
+    let denied = agenc_relay_client_wire::numeric_reply(
+        "edge.example",
+        482,
+        "Sam",
+        &["#ROOM"],
+        Some("Permission denied for channel"),
+    )?;
+    let missing = agenc_relay_client_wire::numeric_reply(
+        "edge.example",
+        401,
+        "Sam",
+        &["bob"],
+        Some("No such nick"),
+    )?;
+    let private = agenc_relay_client_wire::numeric_reply(
+        "edge.example",
+        481,
+        "Sam",
+        &[],
+        Some("Command is unavailable"),
+    )?;
+    assert!(original_message_echo(&request, &room, &[]));
+    for unmatched in [
+        &other,
+        &echo("#room", "other")?,
+        &WireMessage::new("sam", "NOTICE", &["#room"], Some("hi"))?,
+    ] {
+        assert!(!original_message_echo(&request, unmatched, &[]));
+    }
+    assert_eq!(
+        check_message_replies(&request, [&room, &bob].into_iter(), &[]),
+        Ok(())
+    );
+    assert_eq!(
+        check_message_replies(
+            &request,
+            [&room].into_iter(),
+            std::slice::from_ref(&private)
+        ),
+        Ok(())
+    );
+    for (frames, refusals) in [
+        (vec![&room, &room], vec![]),
+        (vec![&other], vec![]),
+        (vec![&room], vec![denied]),
+        (vec![&bob], vec![missing]),
+        (vec![&bob], vec![private]),
+    ] {
+        assert_eq!(
+            check_message_replies(&request, frames.into_iter(), &refusals),
+            Err(Violation::Consistency)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_malformed_echo_and_an_extra_recipient_cannot_account_for_a_decision() -> TestResult {
+    let request = parse_message(FramedLine::new("PRIVMSG A,B,C,D,E :hi")?)?.ok_or("request")?;
+    let malformed = WireMessage::new("sam", "PRIVMSG", &["A", "B"], Some("hi"))?;
+    assert_eq!(
+        check_message_replies(&request, [&malformed].into_iter(), &[]),
+        Err(Violation::Consistency)
+    );
+    let fifth = WireMessage::new("sam", "PRIVMSG", &["E"], Some("hi"))?;
+    assert_eq!(
+        check_message_replies(&request, [&fifth].into_iter(), &[]),
+        Err(Violation::Consistency)
+    );
+    let echoes = ["A", "B", "C", "D"]
+        .map(|nick| WireMessage::new("sam", "PRIVMSG", &[nick], Some("hi")))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let refusal = agenc_relay_client_wire::numeric_reply(
+        "edge.example",
+        481,
+        "Sam",
+        &[],
+        Some("Command is unavailable"),
+    )?;
+    assert_eq!(
+        check_message_replies(&request, echoes.iter(), &[refusal]),
+        Err(Violation::Consistency)
+    );
+    Ok(())
+}
+
 /// The labeled channel message most cases send.
 fn labeled_message() -> TestResult<EdgeFederation> {
     edge_with("@label=m1 PRIVMSG #edge :hi", FederationOpcode::Message)

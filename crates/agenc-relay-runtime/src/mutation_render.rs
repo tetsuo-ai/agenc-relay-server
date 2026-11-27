@@ -28,11 +28,13 @@ const NAMES_CHUNK_BYTES: usize = 8_000;
 
 mod join;
 mod local_join;
+mod message_result;
 pub(crate) use join::{
     JoinRequester, join_result_frames, join_result_replies, membership_failure_replies,
     original_channel_targets,
 };
 pub(crate) use local_join::render_local_join_start;
+pub(crate) use message_result::message_failure_replies;
 
 mod away;
 pub(crate) use away::away_result_replies;
@@ -52,6 +54,9 @@ pub(crate) fn mutation_result_replies(
             agenc_relay_types::FederationOpcode::Part,
             plan.failures(),
         ),
+        CanonicalCommandView::Message(message) => {
+            message_failure_replies(context, bound, message.kind(), plan.failures())
+        }
         CanonicalCommandView::Presence(PresenceCommand::Away(_)) => {
             away_result_replies(context, bound, command, plan)
         }

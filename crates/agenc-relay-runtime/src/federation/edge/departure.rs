@@ -3,7 +3,7 @@
 //! connection, response label and completion with every authoritative decision.
 use super::*;
 use crate::federation::codec::results::failure_code;
-use agenc_relay_client_wire::{CapabilityState, StandardReplies, WireMessage};
+use agenc_relay_client_wire::{CapabilityState, WireMessage};
 use agenc_relay_domain::{ChannelNameValue, FailedTarget};
 
 #[cfg(test)]
@@ -11,11 +11,7 @@ use agenc_relay_domain::{ChannelNameValue, FailedTarget};
 mod tests;
 
 pub(crate) struct PartRequester {
-    // IRC nicknames are at most 32 ASCII bytes. Keeping these inline needs no
-    // additional allocation on the pending request.
-    nickname: [u8; 32],
-    nickname_len: usize,
-    dialect: StandardReplies,
+    origin: ReplyRequester,
     absent: u32,
 }
 
@@ -25,24 +21,10 @@ impl PartRequester {
         caps: &CapabilityState,
         absent: u32,
     ) -> Result<Self, DomainError> {
-        let mut nickname = [0; 32];
-        nickname
-            .get_mut(..nick.len())
-            .ok_or(DomainError::InvariantViolation)?
-            .copy_from_slice(nick.as_bytes());
         Ok(Self {
-            nickname,
-            nickname_len: nick.len(),
-            dialect: StandardReplies::negotiated(caps),
+            origin: ReplyRequester::new(nick, caps)?,
             absent,
         })
-    }
-
-    fn nickname(&self) -> Result<&str, Violation> {
-        self.nickname
-            .get(..self.nickname_len)
-            .and_then(|bytes| str::from_utf8(bytes).ok())
-            .ok_or(Violation::Consistency)
     }
 
     fn refusal(
@@ -53,9 +35,9 @@ impl PartRequester {
         error: DomainError,
     ) -> Result<WireMessage, Violation> {
         crate::client_render::projected_failure(
-            self.dialect,
+            self.origin.dialect,
             prefix,
-            self.nickname()?,
+            self.origin.nickname()?,
             request,
             error,
             Some(&FailedTarget::Channel(target.clone())),
@@ -145,7 +127,7 @@ impl PartRequester {
         let [nick, target] = frame.middle() else {
             return Err(Violation::Consistency);
         };
-        if !nick.eq_ignore_ascii_case(self.nickname()?) {
+        if !nick.eq_ignore_ascii_case(self.origin.nickname()?) {
             return Err(Violation::Consistency);
         }
         let error = match (frame.command(), frame.trailing()) {
