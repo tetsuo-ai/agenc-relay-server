@@ -1744,6 +1744,95 @@ fn verify_labeled_departures(network: &Network) -> TestResult {
                 )));
             }
         }
+        verify_mixed_departures(&mut member, &mut observer, nick, channels)?;
+    }
+    Ok(())
+}
+
+fn verify_mixed_departures(
+    member: &mut ArcClient,
+    observer: &mut ArcClient,
+    nick: &str,
+    [joined, unjoined]: [&str; 2],
+) -> TestResult {
+    member.send(&format!("JOIN {joined}"))?;
+    member.read_until(|line| line.contains(&format!(" 366 {nick} {joined} ")))?;
+    let absent = format!("#never{nick}");
+    let other_absent = format!("#other{nick}");
+    // Put the absent name first on the client wire, where the previous fallback attributed
+    // an error to the wrong target and prevented the authorized departure.
+    let frames = labeled_exchange(
+        member,
+        "mixedleave",
+        &format!("PART {absent},{unjoined},{joined} :together"),
+    )?;
+    verify_departure_batch(
+        &frames,
+        "mixedleave",
+        &[
+            format!(" PART {joined} :together"),
+            format!(" 482 {nick} {unjoined} :Permission denied for channel"),
+            format!(" 403 {nick} {absent} :No such channel"),
+        ],
+    )?;
+    let suffix = format!(" PART {joined} :together");
+    let observed = observer.read_until(|line| line.ends_with(&suffix))?;
+    if !observed
+        .iter()
+        .any(|line| line.starts_with(&format!(":{nick}!")) && line.ends_with(&suffix))
+    {
+        return Err(failure("observer missed the original accepted departure"));
+    }
+
+    let refused = labeled_exchange(member, "refusedleave", &format!("PART {unjoined},{absent}"))?;
+    verify_departure_batch(
+        &refused,
+        "refusedleave",
+        &[
+            format!(" 482 {nick} {unjoined} :Permission denied for channel"),
+            format!(" 403 {nick} {absent} :No such channel"),
+        ],
+    )?;
+    let absent_only = labeled_exchange(
+        member,
+        "absentleave",
+        &format!("PART {other_absent},{absent}"),
+    )?;
+    verify_departure_batch(
+        &absent_only,
+        "absentleave",
+        &[
+            format!(" 403 {nick} {absent} :No such channel"),
+            format!(" 403 {nick} {other_absent} :No such channel"),
+        ],
+    )?;
+    Ok(())
+}
+
+fn verify_departure_batch(frames: &[String], label: &str, outcomes: &[String]) -> TestResult {
+    let expected_label = format!("@label={label}");
+    let batch = frames
+        .iter()
+        .find_map(|frame| {
+            let mut fields = frame.split_ascii_whitespace();
+            (fields.next()? == expected_label && fields.nth(1)? == "BATCH")
+                .then(|| fields.next()?.strip_prefix('+'))
+                .flatten()
+        })
+        .ok_or_else(|| failure(format!("missing original batch for {label}: {frames:?}")))?;
+    let tag = format!("@batch={batch} ");
+    let scoped: Vec<_> = frames
+        .iter()
+        .filter(|frame| frame.starts_with(&tag))
+        .collect();
+    if scoped.len() != outcomes.len()
+        || !outcomes
+            .iter()
+            .all(|suffix| scoped.iter().filter(|line| line.ends_with(suffix)).count() == 1)
+    {
+        return Err(failure(format!(
+            "wrong target decisions for {label}: {scoped:?}"
+        )));
     }
     Ok(())
 }

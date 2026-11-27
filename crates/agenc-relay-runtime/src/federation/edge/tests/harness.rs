@@ -3162,6 +3162,7 @@ fn a_drained_deferred_queue_keeps_its_capacity_charged_until_the_owner_drops() -
     ));
     origin.pending_updates.clear();
     origin.join_names_pending = true;
+    admit_queue_test_session(fixture.context_mut()?, UserId::from_bytes([46; 16]))?;
     let baseline = fixture_backing_available(fixture.context_mut()?);
     fill_deferred_query_queue(&mut edge, fixture.context_mut()?, generation)?;
     let queue = edge.deferred.get_mut(&generation).ok_or("missing queue")?;
@@ -3180,6 +3181,19 @@ fn a_drained_deferred_queue_keeps_its_capacity_charged_until_the_owner_drops() -
     );
     edge.deferred.remove(&generation);
     assert_eq!(fixture_backing_available(fixture.context_mut()?), baseline);
+    Ok(())
+}
+
+fn admit_queue_test_session(context: &mut StateCoreContext, user: UserId) -> TestResult {
+    // The longest queue-capacity test fills 32 slots twice at one clock tick.
+    // Instantiate the session bucket before measuring queue-owned memory.
+    let mut limits = crate::admission::RateLimits::defaults();
+    limits.set(
+        crate::admission::BucketKind::RegisteredCommand,
+        crate::admission::BucketRate::new(4, 1, 66)?,
+    )?;
+    context.buckets_mut().reload(limits);
+    crate::registration::charge_registered_command(context, user)?;
     Ok(())
 }
 

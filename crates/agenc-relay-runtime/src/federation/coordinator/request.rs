@@ -1177,12 +1177,21 @@ fn finish_rejected(
         .failures()
         .first()
         .map_or(DomainError::BadState, |failure| failure.error());
-    if fresh.header.opcode != agenc_relay_types::FederationOpcode::Join {
+    let opcode = fresh.header.opcode;
+    if !matches!(
+        opcode,
+        agenc_relay_types::FederationOpcode::Join | agenc_relay_types::FederationOpcode::Part
+    ) {
         return finish_failed(coordinator, context, link, peer, fresh, error);
     }
     let bound = fresh.bound.ok_or(Violation::Codec)?;
-    let replies = crate::mutation_render::refused_join_replies(context, bound, rejected)
-        .map_err(|_| Violation::Codec)?;
+    let replies = crate::mutation_render::membership_failure_replies(
+        context,
+        bound,
+        opcode,
+        rejected.failures(),
+    )
+    .map_err(|_| Violation::Codec)?;
     let code = if error == DomainError::LimitExceeded {
         "SERVER_BUSY"
     } else {

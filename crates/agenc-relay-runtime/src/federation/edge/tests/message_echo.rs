@@ -253,6 +253,7 @@ fn a_departure_echo_belongs_to_one_original_instance_actor_and_reason() -> TestR
         *echo_channels = Some(EchoChannels::Part {
             channels: vec![first, second],
             reason: reason.to_owned(),
+            requester: super::super::request::PartRequester::new("sender", &capabilities, 0)?,
             _backing: super::super::request::reserve_departure_backing(context, 2, reason.len())?,
         });
         for (id, channel, actor, observed, expected, held_count) in [
@@ -297,6 +298,44 @@ fn a_departure_echo_belongs_to_one_original_instance_actor_and_reason() -> TestR
             assert_eq!(result.map(|()| frames.is_empty()), expected);
             assert_eq!(held(&edge)?, held_count);
         }
+        let denied = agenc_relay_client_wire::numeric_reply(
+            "edge.example",
+            482,
+            "sam",
+            &["#ONE"],
+            Some("Permission denied for channel"),
+        )?;
+        let unrelated = agenc_relay_client_wire::numeric_reply(
+            "edge.example",
+            403,
+            "sam",
+            &["#elsewhere"],
+            Some("No such channel"),
+        )?;
+        let original = pending(&mut edge)?;
+        assert_eq!(validate_departure_replies(original, &[unrelated]), Ok(()));
+        assert_eq!(
+            validate_departure_replies(original, std::slice::from_ref(&denied)),
+            Err(Violation::Consistency)
+        );
+        let missing_target = WireMessage::new("edge.example", "ACK", &[], None)?;
+        assert_eq!(
+            check_departure_reply(Some(first), &missing_target, &[]),
+            Err(Violation::Consistency)
+        );
+        original.replies = vec![denied];
+        let echo = WireMessage::new("sam!u-a@h-b.invalid", "PART", &["#one"], Some(reason))?;
+        assert_eq!(
+            hold_echo(
+                original,
+                context,
+                &header(1, GENERATION),
+                Some(first),
+                2,
+                echo
+            ),
+            Err(Violation::Consistency)
+        );
     }
     Ok(())
 }

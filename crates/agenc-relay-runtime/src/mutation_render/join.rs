@@ -1,10 +1,11 @@
-//! Bounded JOIN replies carried by the membership's committed result.
+//! Origin-scoped replies for federated JOIN and PART membership decisions.
 
 use super::*;
-use agenc_relay_domain::{DomainError, RejectedPlan, TargetFailure};
+use agenc_relay_domain::{DomainError, TargetFailure};
+use agenc_relay_types::FederationOpcode;
 
 mod refusal;
-pub(crate) use refusal::JoinRequester;
+pub(crate) use refusal::{JoinRequester, original_targets as original_channel_targets};
 
 pub(crate) fn join_result_replies(
     context: &StateCoreContext,
@@ -47,7 +48,12 @@ pub(crate) fn join_result_frames(
             .iter()
             .find(|failure| usize::from(failure.target_index()) == index)
         {
-            frames.push(failure_frame(context, &nickname, failure)?);
+            frames.push(failure_frame(
+                context,
+                &nickname,
+                FederationOpcode::Join,
+                failure,
+            )?);
             continue;
         }
         let channel_id = joined.next().ok_or(RuntimeError::InvalidValue)?;
@@ -69,17 +75,18 @@ pub(crate) fn join_result_frames(
     Ok(frames)
 }
 
-/// B.6 carries a complete failure vector even when no channel was joined.
-pub(crate) fn refused_join_replies(
+/// B.6 carries each canonical membership failure atomically with the request result.
+pub(crate) fn membership_failure_replies(
     context: &StateCoreContext,
     bound: BoundSession,
-    plan: &RejectedPlan,
+    opcode: FederationOpcode,
+    failures: &[TargetFailure],
 ) -> Result<Vec<agenc_relay_federation_wire::SchemaObject>, RuntimeError> {
     let nickname = crate::client_render::requester_nickname(context, bound.user_id);
-    plan.failures()
+    failures
         .iter()
         .map(|failure| {
-            let frame = failure_frame(context, &nickname, failure)?;
+            let frame = failure_frame(context, &nickname, opcode, failure)?;
             crate::federation::codec::results::reply_object(&frame)
                 .map_err(|_| RuntimeError::InvalidValue)
         })
@@ -89,23 +96,27 @@ pub(crate) fn refused_join_replies(
 fn failure_frame(
     context: &StateCoreContext,
     nickname: &str,
+    opcode: FederationOpcode,
     failure: &TargetFailure,
 ) -> Result<WireMessage, RuntimeError> {
-    // These are the independently identifiable target-local v1 JOIN outcomes. A new
-    // semantic outcome needs a lossless representation before it can enter this vector.
-    match failure.error() {
-        DomainError::SecretUnavailable
-        | DomainError::Forbidden
-        | DomainError::BadState
-        | DomainError::LimitExceeded
-        | DomainError::EncryptedRoute => {}
+    // Only target-local errors with an unambiguous public reply can enter this vector.
+    let operation = match (opcode, failure.error()) {
+        (
+            FederationOpcode::Join,
+            DomainError::SecretUnavailable
+            | DomainError::Forbidden
+            | DomainError::BadState
+            | DomainError::LimitExceeded
+            | DomainError::EncryptedRoute,
+        ) => "JOIN",
+        (FederationOpcode::Part, DomainError::NotFound | DomainError::Forbidden) => "PART",
         _ => return Err(RuntimeError::InvalidValue),
-    }
+    };
     let name = failure
         .target()
         .channel()
         .ok_or(RuntimeError::InvalidValue)?;
-    let line = format!("JOIN {}", name.presentation());
+    let line = format!("{operation} {}", name.presentation());
     let framed =
         agenc_relay_client_wire::FramedLine::new(&line).map_err(|_| RuntimeError::InvalidValue)?;
     let request = agenc_relay_client_wire::parse_message(framed)

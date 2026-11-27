@@ -560,7 +560,7 @@ impl RegistrationRouter {
             state
                 .bound
                 .ok_or(RuntimeError::InvalidValue)
-                .and_then(|bound| charge_registered_control(context, bound.user_id))
+                .and_then(|bound| charge_registered_command(context, bound.user_id))
         } else {
             Ok(())
         };
@@ -3235,7 +3235,7 @@ fn authority_fence_exempt(message: &agenc_relay_client_wire::ParsedMessage) -> b
     matches!(message.command(), "PING" | "PONG" | "QUIT")
 }
 
-fn charge_registered_control(
+pub(crate) fn charge_registered_command(
     context: &mut StateCoreContext,
     user_id: UserId,
 ) -> Result<(), RuntimeError> {

@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1165
-reviewed_source_sha256 = "89c95a70b8e6193479300cbbd83caab0e3bc0059c31172be2229a3db19153212"
+reviewed_source_files = 1167
+reviewed_source_sha256 = "e7324ef7d4aee5197671f9b60823622e458708a8029b58144955e37b64b0a508"
 deferred = []
 
 [[region]]
@@ -636,9 +636,9 @@ id = "runtime-federated-join-target-error"
 category = "protocol-enum-arms"
 file = "crates/agenc-relay-runtime/src/mutation_render/join/refusal.rs"
 item = "target_error"
-source_sha256 = "61330ec424843d7a9bd22d6973dd256d6c54e932e61d8ac6d567986f945cdc0b"
-start_line = 176
-end_line = 201
+source_sha256 = "af1c761f2f8061ea5033c3a8b9b18c29a4bdeb6e87747ccb71a2cd600b0ec9b3"
+start_line = 178
+end_line = 203
 span_sha256 = "1868b52c1c91d861a6232e2b3008689be5bcf4f539a081b2fdae84e9faf1faf6"
 metric = "branches"
 reason = "Each v1 JOIN refusal must carry a registered decision and the proper operands for its original target."
@@ -648,9 +648,9 @@ id = "runtime-federated-join-check-context"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/mutation_render/join/refusal.rs"
 item = "check_context"
-source_sha256 = "61330ec424843d7a9bd22d6973dd256d6c54e932e61d8ac6d567986f945cdc0b"
-start_line = 154
-end_line = 160
+source_sha256 = "af1c761f2f8061ea5033c3a8b9b18c29a4bdeb6e87747ccb71a2cd600b0ec9b3"
+start_line = 156
+end_line = 162
 span_sha256 = "800e984d91eb5ef31117d065d579b7531eb49b5dfad1e2d31b5afb76b9086f30"
 metric = "branches"
 reason = "A legacy JOIN refusal can name only the original canonical first operand."
@@ -660,9 +660,45 @@ id = "runtime-edge-original-departure-backing"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/federation/edge/request.rs"
 item = "reserve_departure_backing"
-source_sha256 = "4a8a868d1e591b3fc79bb85c34d6271eb989c9c9c6d1cd32cb56fa2949d738d8"
-start_line = 885
-end_line = 902
+source_sha256 = "8a3e535e60815666477dcfbba6b2b9ab7f1b01a8ee5f15c4c88fe018c77092e1"
+start_line = 901
+end_line = 918
 span_sha256 = "be1c352fe18bbb9534e3807cbc3e2056561ba1e8e2b0b0cfe7ecb8312daf83ce"
 metric = "branches"
 reason = "Before consuming an origin sequence, reserve both retained PART allocations by capacity. One checked batch charges both allocations atomically and releases them together with their original request."
+
+[[region]]
+id = "runtime-part-result-scope"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/federation/edge/departure.rs"
+item = "validate_result"
+source_sha256 = "ab926213a9ee1f5afe4c092ce167899a78c465c39b976b2b26681fb047d9606a"
+start_line = 93
+end_line = 138
+span_sha256 = "8d44c9e4225868156076a672d880f134ded1d71558b3678f91269d9fa5a7bc60"
+metric = "branches"
+reason = "A PART result may identify only ordered, admitted physical targets. Mixed and wholly refused results have distinct bounded coverage, and older results expose only the one explicit decision."
+
+[[region]]
+id = "runtime-part-result-recipient"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/federation/edge/departure.rs"
+item = "covered_target"
+source_sha256 = "ab926213a9ee1f5afe4c092ce167899a78c465c39b976b2b26681fb047d9606a"
+start_line = 140
+end_line = 161
+span_sha256 = "e5b22139aef17cc56c4ab28f251176869a241223fb5f5a9284d875d5dc6840e2"
+metric = "branches"
+reason = "A covered PART error must name the original physical requester, a canonical requested channel and the registered error shape."
+
+[[region]]
+id = "runtime-part-incompatible-echo"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/federation/edge/message_echo.rs"
+item = "check_departure_reply"
+source_sha256 = "747bc518896b37e072fb591896067be55f30ea7973d7dbf9e33bfc84656570d1"
+start_line = 258
+end_line = 276
+span_sha256 = "be1fa846daea4a6e5f6c7f0920083e647e1465e92151a242a68b19c924cb9ceb"
+metric = "branches"
+reason = "A successful departure event and a refusal cannot claim the same canonical channel in either delivery order."
