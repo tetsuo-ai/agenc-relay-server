@@ -93,6 +93,21 @@ pub(super) fn capture(
     let Some(frame) = frames.pop() else {
         return Ok(());
     };
+    let parted_channel = match event {
+        ProjectedEvent::MemberParted { channel_id, .. } => Some(*channel_id),
+        _ => None,
+    };
+    hold_echo(pending, context, header, parted_channel, targets, frame)
+}
+
+fn hold_echo(
+    pending: &mut PendingRequest,
+    context: &StateCoreContext,
+    header: &EventHeader,
+    parted_channel: Option<ChannelInstanceId>,
+    targets: usize,
+    frame: WireMessage,
+) -> Result<(), Violation> {
     let state_generation = header.coordinator_state_generation;
     if pending.completion_generation.is_some()
         || pending.completion_coverage.is_some()
@@ -107,10 +122,6 @@ pub(super) fn capture(
     {
         return Err(Violation::Consistency);
     }
-    let parted_channel = match event {
-        ProjectedEvent::MemberParted { channel_id, .. } => Some(*channel_id),
-        _ => None,
-    };
     if let Some(held) = pending
         .message_echoes
         .iter_mut()
@@ -195,17 +206,7 @@ fn labeled_targets(
             ProjectedEvent::MemberParted {
                 channel_id, reason, ..
             },
-        ) => {
-            let Some(EchoChannels::Part {
-                channels,
-                reason: requested,
-                ..
-            }) = echo_channels
-            else {
-                return None;
-            };
-            (channels.contains(channel_id) && requested == reason).then_some(channels.len())
-        }
+        ) => departure_targets(echo_channels.as_ref(), channel_id, reason),
         (FederationOpcode::NickChange, ProjectedEvent::NicknameChanged { view, .. }) => {
             let requested = message
                 .middle()
@@ -224,6 +225,22 @@ fn labeled_targets(
         }
         _ => None,
     }
+}
+
+fn departure_targets(
+    original: Option<&EchoChannels>,
+    channel_id: &ChannelInstanceId,
+    reason: &str,
+) -> Option<usize> {
+    let Some(EchoChannels::Part {
+        channels,
+        reason: requested,
+        ..
+    }) = original
+    else {
+        return None;
+    };
+    (channels.contains(channel_id) && requested == reason).then_some(channels.len())
 }
 
 fn commits_at(result: &ResultArm, generation: u64) -> bool {

@@ -11,7 +11,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1165
-reviewed_source_sha256 = "46d6805a0aa7c01eb8198aaae751ebf5c170866876d644f4f5138f4e7266006f"
+reviewed_source_sha256 = "89c95a70b8e6193479300cbbd83caab0e3bc0059c31172be2229a3db19153212"
 deferred = []
 
 [[region]]
@@ -15811,10 +15811,10 @@ id = "runtime-edge-labeled-message-echo-owner"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/federation/edge/message_echo.rs"
 item = "capture"
-source_sha256 = "2bca10da3f7fa0cec58b06affb22fdfede21b6b2928efd26cf7860e66764aefb"
+source_sha256 = "8e1a65151b8f9ddb6fca5bf530fb63a024114e5ec9c7c3fcc40e2d8a2264972c"
 start_line = 66
-end_line = 149
-span_sha256 = "e46f28765449ace80450aa3ae0e783d8943416aa5e1f813085cf48f79bd2bac5"
+end_line = 101
+span_sha256 = "23411db1c21ce635a65011dfd48b99374425113ced31c367b2cecb308d32553b"
 metric = "branches"
 reason = "The edge holds only the original user’s matching notification until the correct connection and generation commit. Event replay replaces the same charged copy within the request’s target limit."
 
@@ -15823,21 +15823,45 @@ id = "runtime-edge-labeled-message-request"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/federation/edge/message_echo.rs"
 item = "labeled_targets"
-source_sha256 = "2bca10da3f7fa0cec58b06affb22fdfede21b6b2928efd26cf7860e66764aefb"
-start_line = 153
-end_line = 227
-span_sha256 = "b1f44d9343fcca213120cfdeb6352743a7bd8fa76784051d94a5220bb0d3224b"
+source_sha256 = "8e1a65151b8f9ddb6fca5bf530fb63a024114e5ec9c7c3fcc40e2d8a2264972c"
+start_line = 164
+end_line = 228
+span_sha256 = "6cf95034fc316f2618ef01c99cdc4da7cb28f30da52a8558874bc36aa8857cb9"
 metric = "branches"
 reason = "A live connection must negotiate the label on the pending command. A message has one echo per target and each identity change must match the original requested name, with SETNAME using the negotiated capability and shared text preparation. A public topic must name the original channel instance and exact topic bytes. A departure must name an admitted instance and the original reason."
+
+[[region]]
+id = "runtime-edge-labeled-echo-replay"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/federation/edge/message_echo.rs"
+item = "hold_echo"
+source_sha256 = "8e1a65151b8f9ddb6fca5bf530fb63a024114e5ec9c7c3fcc40e2d8a2264972c"
+start_line = 103
+end_line = 160
+span_sha256 = "37e5d02007396b647cebba7c1776d828a65d9b31cf0ddafa2ad4f3254855dc24"
+metric = "branches"
+reason = "A held notification must agree with the original committed generation, event and channel. A replay replaces its own frame, and each newly retained frame consumes its own bounded reservation."
+
+[[region]]
+id = "runtime-edge-labeled-departure-target"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/federation/edge/message_echo.rs"
+item = "departure_targets"
+source_sha256 = "8e1a65151b8f9ddb6fca5bf530fb63a024114e5ec9c7c3fcc40e2d8a2264972c"
+start_line = 230
+end_line = 244
+span_sha256 = "92f5805ea31c41979844cc064ac8ce70f4fe5577b2c66c40a623f62c67179aa1"
+metric = "branches"
+reason = "A departure event must match an original instance and the original canonical reason before it can use the requester’s label."
 
 [[region]]
 id = "runtime-edge-labeled-message-echo-result"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/federation/edge/message_echo.rs"
 item = "validate_result"
-source_sha256 = "2bca10da3f7fa0cec58b06affb22fdfede21b6b2928efd26cf7860e66764aefb"
-start_line = 236
-end_line = 248
+source_sha256 = "8e1a65151b8f9ddb6fca5bf530fb63a024114e5ec9c7c3fcc40e2d8a2264972c"
+start_line = 253
+end_line = 265
 span_sha256 = "c67a41d5e020b9554c5d82a795fe2a77abca96d37890cf8bcaf6b34f76f25c53"
 metric = "branches"
 reason = "A result cannot contradict a held echo: the request must commit at the generation of every copy it holds."
