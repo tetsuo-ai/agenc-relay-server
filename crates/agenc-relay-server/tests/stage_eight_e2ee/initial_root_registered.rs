@@ -100,7 +100,7 @@ fn claim(
     Ok(result.state())
 }
 
-fn await_directory_account(client: &mut ArcClient, account: AccountId) -> TestResult {
+pub(super) fn await_directory_account(client: &mut ArcClient, account: AccountId) -> TestResult {
     let expected = format!(
         " EKEY ACCOUNT {} 0",
         URL_SAFE_NO_PAD.encode(account.to_text().as_bytes())

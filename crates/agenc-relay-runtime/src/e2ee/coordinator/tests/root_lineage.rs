@@ -300,6 +300,41 @@ fn a_rotated_root_starts_its_roster_and_capability_lineages_at_zero() -> TestRes
 }
 
 #[test]
+fn an_account_cannot_retire_while_its_first_or_rotated_root_awaits_a_roster() -> TestResult {
+    let mut harness = Harness::new()?;
+    let account = AccountId::parse_wire_bytes(&harness.account)?;
+    let other = AccountId::parse_wire_bytes(&account_bytes(17)?)?;
+    let mut fixture = crate::test_support::StateCoreFixture::new(vec![0; 65_536])?;
+    let context = fixture.context_mut()?;
+    let check = |harness: &Harness, held: bool| {
+        assert_eq!(
+            harness
+                .coordinator
+                .blocks_account_deletion(context, account),
+            held
+        );
+        assert!(!harness.coordinator.blocks_account_deletion(context, other));
+    };
+    let first = AccountRoot::first(&harness);
+    let successor = first.next(&harness, NEXT_ROOT_SEED)?;
+    let first_roster = harness.principal.roster.clone();
+    let new_roster = successor.roster(0, [0; 32], &[(DEVICE, 0)])?;
+
+    check(&harness, false);
+    for (root, roster) in [(&first, &first_roster), (&successor, &new_roster)] {
+        Publication::Root(&root.root).stored(&mut harness)?;
+        check(&harness, true);
+        let mut restored = restarted_alike(&mut harness)?;
+        check(&restored, true);
+        Publication::Roster(roster).stored(&mut restored)?;
+        check(&restored, false);
+        harness = restarted_alike(&mut restored)?;
+        check(&harness, false);
+    }
+    Ok(())
+}
+
+#[test]
 fn a_restart_at_each_step_of_a_rotation_rebuilds_the_live_state() -> TestResult {
     let (harness, first) = provisioned(&[DEVICE])?;
     let old = AccountRoot::first(&harness);

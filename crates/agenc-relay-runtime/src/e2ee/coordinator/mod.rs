@@ -1354,6 +1354,11 @@ impl CompanionCoordinator {
         ) else {
             return true;
         };
+        // A published identity awaits its first verified roster, including
+        // across restart and while an older root's roster is still usable.
+        if self.state.pending_roots.contains_key(&owner) {
+            return true;
+        }
         if self.state.routes.has_unclosed_direct(account) {
             return true;
         }

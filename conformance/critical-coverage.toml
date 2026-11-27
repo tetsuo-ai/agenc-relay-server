@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1180
-reviewed_source_sha256 = "d884fe5bd71c30a35e19a7b123bbc91348989019e5b0aeaf0edd4efb5a95947b"
+reviewed_source_sha256 = "ba1fe3b65d1e84096314636c225c08d296ffb67f55b644993b6f12d6f0bd006b"
 deferred = []
 
 [[region]]
@@ -864,9 +864,9 @@ id = "pending-companion-security-account"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/mod.rs"
 item = "blocks_account_deletion"
-source_sha256 = "912b6fc15f93e99e941ccd92f1002477e8f8278bc72b5acc07a977ca68404265"
-start_line = 1360
-end_line = 1364
+source_sha256 = "ff2a85a918a6cac6e0304bece9dc9e7c8554ca3185ff0f29cf4bb751d22cc1c2"
+start_line = 1365
+end_line = 1369
 span_sha256 = "ac6f1a53060042e1e06665766ddfb8a9d85b7c0debd2f0fddf84802e7721ec69"
 metric = "branches"
 reason = "A staged security transition holds its authenticated account. A staged Direct binding also holds the other verified participant."
@@ -894,3 +894,15 @@ end_line = 421
 span_sha256 = "bc78021937bbaaa6642f7e5014ae775a2e15b808274a68312737e5931cd1cf39"
 metric = "branches"
 reason = "A signed initial Direct binding requires both original accounts at its authoritative staging revision."
+
+[[region]]
+id = "pending-root-at-account-deletion"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/mod.rs"
+item = "blocks_account_deletion"
+source_sha256 = "ff2a85a918a6cac6e0304bece9dc9e7c8554ca3185ff0f29cf4bb751d22cc1c2"
+start_line = 1359
+end_line = 1359
+span_sha256 = "f734f72c7c82391a96aa4f1da7aa404a865d2d75274a5d4f9e6a398f187055b9"
+metric = "branches"
+reason = "A published pending identity holds its own account until the new root has an accepted roster, including after recovery."
