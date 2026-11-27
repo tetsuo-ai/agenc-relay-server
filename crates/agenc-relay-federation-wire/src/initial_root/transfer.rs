@@ -110,7 +110,7 @@ fn copy_bytes(bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, CodecError> {
     Ok(copy)
 }
 fn check_profile(profile: FederationProfile, bytes: &[u8]) -> Result<(), CodecError> {
-    if profile != FederationProfile::InitialRoot || read_tag(bytes, 0)? != V2 {
+    if !profile.supports_initial_root() || read_tag(bytes, 0)? != V2 {
         return Err(CodecError::CrossReference);
     }
     Ok(())
@@ -160,7 +160,7 @@ pub struct InitialRootRequest<'a> {
 impl<'a> InitialRootRequest<'a> {
     /// Encodes the agreed v2 operation without changing any HPKE byte.
     pub fn encode(&self, profile: FederationProfile) -> Result<Vec<u8>, CodecError> {
-        if profile != FederationProfile::InitialRoot
+        if !profile.supports_initial_root()
             || self.layout.opcode != self.operation.base_layout()
             || self.session.is_some() != (self.operation == InitialRootOperation::Claim)
         {
@@ -285,7 +285,7 @@ impl<'a> InitialRootResult<'a> {
         operation: InitialRootOperation,
         response: &[u8],
     ) -> Result<Vec<u8>, CodecError> {
-        if profile != FederationProfile::InitialRoot
+        if !profile.supports_initial_root()
             || header.result_kind != FederationResultKind::AuthChallenge
             || header.completion_event_id.is_some()
         {
@@ -327,7 +327,7 @@ impl<'a> InitialRootResult<'a> {
         arm: &SchemaObject,
         replies: Vec<SchemaObject>,
     ) -> Result<Vec<u8>, CodecError> {
-        if profile != FederationProfile::InitialRoot
+        if !profile.supports_initial_root()
             || header.result_kind != FederationResultKind::Failed
             || header.completion_event_id.is_some()
         {

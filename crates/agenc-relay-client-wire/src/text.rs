@@ -672,6 +672,16 @@ impl E2eeObjectKind {
         Ok(Self(value))
     }
 
+    /// Parses the single optional object kind on a negotiated terminal-root response.
+    /// Other commands and unsolicited projections use the closed base registry.
+    pub fn terminal_root_response(token: &str) -> Result<Self, TextCarrierError> {
+        if token == "ROOT-HEAD" {
+            Ok(Self("ROOT-HEAD"))
+        } else {
+            Err(TextCarrierError::UnknownToken)
+        }
+    }
+
     /// Returns the exact registered token.
     #[must_use]
     pub const fn as_str(self) -> &'static str {

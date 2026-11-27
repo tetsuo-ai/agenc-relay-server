@@ -57,6 +57,8 @@ pub enum SignatureDomain {
     LeafAuthorization,
     /// Prior-sequencer continuity proof.
     SequencerContinuity,
+    /// Active sequencer's challenge-bound attestation of the terminal account root.
+    TerminalRootHead,
     /// Device policy approval.
     PolicyApproval,
     /// Device conversation binding.
@@ -131,6 +133,7 @@ impl SignatureDomain {
             Self::DeviceCapabilities => b"ARC-MLS/1 device capabilities",
             Self::LeafAuthorization => b"ARC-MLS/1 leaf authorization",
             Self::SequencerContinuity => b"ARC-MLS/1 sequencer continuity",
+            Self::TerminalRootHead => b"ARC-MLS/1 terminal root head",
             Self::PolicyApproval => b"ARC-MLS/1 policy approval",
             Self::ConversationBinding => b"ARC-MLS/1 conversation binding",
             Self::RootBindingLock => b"ARC-MLS/1 root binding lock",
@@ -170,6 +173,7 @@ impl SignatureDomain {
             | Self::DeviceCapabilities
             | Self::LeafAuthorization
             | Self::SequencerContinuity
+            | Self::TerminalRootHead
             | Self::PolicyApproval
             | Self::ConversationBinding
             | Self::RootBindingLock

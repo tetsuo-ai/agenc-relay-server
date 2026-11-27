@@ -97,6 +97,7 @@ pub mod reinit_target;
 pub mod route;
 pub mod sequencer;
 pub mod signature;
+pub mod terminal_root;
 pub mod tls;
 pub mod welcome;
 pub mod wire;

@@ -65,6 +65,14 @@ struct HostView<'a> {
 }
 
 impl CompanionHost for HostView<'_> {
+    fn terminal_root_profile(&self) -> bool {
+        self.peers
+            .get(&self.peer)
+            .and_then(|p| p.live.as_ref())
+            .is_some_and(|live| {
+                live.handle.profile == agenc_relay_federation_wire::FederationProfile::TerminalRoot
+            })
+    }
     fn trusted_ack_unix_seconds(&self) -> Option<u64> {
         self.trusted_ack_unix_seconds
     }
@@ -578,6 +586,14 @@ pub(super) fn run_with_object(
         return Err(Violation::Companion(CompanionViolation::Unsupported));
     };
     let view = BaseView {
+        terminal_root_profile: peer_states
+            .get(&peer)
+            .and_then(|state| state.live.as_ref())
+            .is_some_and(|live| {
+                live.link == link
+                    && live.handle.profile
+                        == agenc_relay_federation_wire::FederationProfile::TerminalRoot
+            }),
         context,
         peers,
         base_capacity,

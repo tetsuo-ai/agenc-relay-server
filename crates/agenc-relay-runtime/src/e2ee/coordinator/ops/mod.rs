@@ -129,6 +129,8 @@ pub struct Exec<'a> {
     pub plan_binding: &'a PlanBinding<'a>,
     /// The account's ordinary or guarded publication gate from the base state owner.
     pub(super) plan_root: &'a PlanRoot<'a>,
+    /// Process-local authority for the original registered root-head request.
+    pub(super) terminal_login: Option<agenc_relay_e2ee::terminal_root::TerminalRootLogin>,
     /// The coordinator state generation the batch will commit.
     pub state_generation: u64,
     /// The encoded base source view of the requesting origin.
@@ -326,6 +328,7 @@ pub fn execute(exec: &mut Exec<'_>) -> Result<Prepared, Fail> {
         Op::FetchReceipts => sequence::fetch_receipts(exec),
         Op::FetchIdentity => directory::fetch_identity(exec),
         Op::FetchRootChain => directory::fetch_root_chain(exec),
+        Op::ProveRootHead => directory::prove_root_head(exec),
         Op::PublishIdentity => directory::publish_identity(exec),
         Op::FetchRoster => directory::fetch_roster(exec),
         Op::PublishRoster => directory::publish_roster(exec),

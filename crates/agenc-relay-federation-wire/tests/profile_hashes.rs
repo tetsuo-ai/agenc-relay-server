@@ -67,3 +67,18 @@ fn one_changed_source_byte_changes_raw_and_profile_hashes() {
     assert_ne!(digest(&[&e2ee]), E2EE_DOCUMENT_SHA256);
     assert_ne!(digest(&[E2EE_LABEL, &e2ee]), E2EE_PROFILE_SHA256);
 }
+
+#[test]
+fn the_optional_root_head_builds_on_the_exact_initial_root_profile() {
+    let doc = include_bytes!("../../../docs/terminal-root-head-v1.md");
+    let hash = digest(&[
+        b"agenc-chat terminal root head profile v1",
+        &agenc_relay_types::INITIAL_ROOT_PROFILE_SHA256,
+        &digest(&[doc]),
+    ]);
+    assert_eq!(hash, agenc_relay_types::TERMINAL_ROOT_PROFILE_SHA256);
+    assert_eq!(
+        URL_SAFE_NO_PAD.encode(hash),
+        agenc_relay_types::TERMINAL_ROOT_PROFILE_TOKEN
+    );
+}

@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1165
-reviewed_source_sha256 = "89c95a70b8e6193479300cbbd83caab0e3bc0059c31172be2229a3db19153212"
+reviewed_source_files = 1169
+reviewed_source_sha256 = "c0bcb8276c0ce8c4bf7550db3996c700a2679eb471449a6b5a33dbfbfdc09b02"
 deferred = []
 
 [[region]]
@@ -36,9 +36,9 @@ id = "domain-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-relay-domain/src/decision.rs"
 item = "validate_session_seed"
-source_sha256 = "6a0f1cd0ae2037e59bf3d0db797e120dfb744a058e61c34e9298c2bbf710a797"
-start_line = 2153
-end_line = 2422
+source_sha256 = "457b241ea8eded5283fe62fb17074cd995b028992ebf34423b688dddeefd1d0f"
+start_line = 2193
+end_line = 2462
 span_sha256 = "7f01e89dd0becb331f4f18bb3416a111d255167cc580353efa5a9f7fae8f7985"
 metric = "branches"
 reason = "Session fences, admission, and command authority are security decisions."
@@ -60,10 +60,10 @@ id = "domain-state-invariant-checks"
 category = "section-27-invariant-checkers"
 file = "crates/agenc-relay-domain/src/model.rs"
 item = "validate"
-source_sha256 = "a0efe74e335158a6df63de5d90c056e2c0a7ce03e16bf2e45eba0fefdae390b6"
-start_line = 1996
-end_line = 2181
-span_sha256 = "1678f0776eb9079e330bb50a96f1f818f39c5085ec1d3031c4cdb59dd54d765a"
+source_sha256 = "34b72d0b18523683cc48f6d2cd2991e5a14c442b06366eb9ea64cd545a6eaddf"
+start_line = 2020
+end_line = 2206
+span_sha256 = "6ee795042f52a816a199626121d065615e0f6556d1136d561a1f197d6aa4c808"
 metric = "branches"
 reason = "Every current domain cross-index and authority-fence check must take both outcomes."
 
@@ -84,9 +84,9 @@ id = "history-command-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-relay-domain/src/decision.rs"
 item = "authorize_history"
-source_sha256 = "6a0f1cd0ae2037e59bf3d0db797e120dfb744a058e61c34e9298c2bbf710a797"
-start_line = 2448
-end_line = 2469
+source_sha256 = "457b241ea8eded5283fe62fb17074cd995b028992ebf34423b688dddeefd1d0f"
+start_line = 2488
+end_line = 2509
 span_sha256 = "1ff392e30f0941e478445d2d53980c75cc49b516905653ebf94d9ccbc7ab2584"
 metric = "branches"
 reason = "History requests require current membership, plaintext content, enabled retention, and an eligible channel."
@@ -168,9 +168,9 @@ id = "mode-mask-lookup-after-authorization"
 category = "authorization-decisions"
 file = "crates/agenc-relay-domain/src/decision.rs"
 item = "entry_for_mask"
-source_sha256 = "6a0f1cd0ae2037e59bf3d0db797e120dfb744a058e61c34e9298c2bbf710a797"
-start_line = 5060
-end_line = 5080
+source_sha256 = "457b241ea8eded5283fe62fb17074cd995b028992ebf34423b688dddeefd1d0f"
+start_line = 5106
+end_line = 5126
 span_sha256 = "8674272a6fecd5827275e7a17fcef846a0ea4a82bdaf0a116360812bf27566df"
 metric = "branches"
 reason = "Authorized mask removal resolves original entries and ordered additions while respecting earlier removals."
@@ -528,9 +528,9 @@ id = "genesis-proposal-requires-unsigned-binding"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
 item = "unsigned_package"
-source_sha256 = "42e690f6e31b91f87c52e4ccb96fc988676f8510e63a0565d6c8fb7e3e6f419a"
-start_line = 171
-end_line = 173
+source_sha256 = "249fd08e906ca48d8af24ed82b0057f25bc83359800a2cc2a49e997433d66cb7"
+start_line = 292
+end_line = 294
 span_sha256 = "8f6d00b3e48fee10dd4d545d31cd88b5ef9418a0d93f6b07822b2def68615df3"
 metric = "branches"
 reason = "Only the unsigned canonical proposal can enter the protected device and root pre-signature route."
@@ -540,9 +540,9 @@ id = "genesis-proposal-signed-plan-group-ceiling"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
 item = "check_plan"
-source_sha256 = "42e690f6e31b91f87c52e4ccb96fc988676f8510e63a0565d6c8fb7e3e6f419a"
-start_line = 275
-end_line = 277
+source_sha256 = "249fd08e906ca48d8af24ed82b0057f25bc83359800a2cc2a49e997433d66cb7"
+start_line = 396
+end_line = 398
 span_sha256 = "c14fd98352bc7b9affadf92591be333f1c3d2abc1d4ded1b98aafce728f22f4e"
 metric = "branches"
 reason = "The total device plan must fit the strictest signed policy before a binding can lock its semantic route."
@@ -600,9 +600,9 @@ id = "guarded-federation-link-consent"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/registration/initial_root.rs"
 item = "lost_initial_root_link"
-source_sha256 = "9cc4ffea1866774b91727554557b3913362b767fb63ac5fec2d7d606ab4580e3"
-start_line = 8
-end_line = 10
+source_sha256 = "de5b4fe8f7b783a585f0f5ee25a80bca6cef0e68c54a0362eb17b12489af1940"
+start_line = 11
+end_line = 13
 span_sha256 = "5a29e605166da5fd8f18b92ba026c72160408feafea12232fed724a2f0864e93"
 metric = "branches"
 reason = "The explicit client capability expires when its exact authenticated coordinator link ceases to be active."
@@ -632,6 +632,66 @@ metric = "branches"
 reason = "The origin, federation peer and shared coordinator each impose an independent bound on exact results."
 
 [[region]]
+id = "genesis-policy-review-initial-policy-proposal"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/proposal/prospective.rs"
+item = "review_initial_policy_proposal"
+source_sha256 = "d595ca21b4b67126129ba5e2dfccd9907e3ad219c7d5fc98a302569c8c9162f3"
+start_line = 145
+end_line = 184
+span_sha256 = "7c8eba7eef7902fabd8dc68c34eb6a3bc809610fd681901c6c6e2b7280c3d418"
+metric = "regions"
+reason = "A pending controller approval uses the canonical unsigned policy subject or the verified predecessor required by its generation."
+
+[[region]]
+id = "genesis-policy-assemble"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/proposal/prospective.rs"
+item = "assemble"
+source_sha256 = "d595ca21b4b67126129ba5e2dfccd9907e3ad219c7d5fc98a302569c8c9162f3"
+start_line = 110
+end_line = 134
+span_sha256 = "3885f171d21f5e76ef28a995817f746dff3c15a274f64765251553945b1d28c1"
+metric = "branches"
+reason = "A manual initial policy accepts bounded original approvals only from planned active signers and checks the original governing quorum before returning a complete registered policy."
+
+[[region]]
+id = "registered-terminal-root-proof"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/terminal_root.rs"
+item = "verify"
+source_sha256 = "873c8dbe493eb282cc01e46a7f2a1f9d58aaa85c093802b035de670278363a12"
+start_line = 83
+end_line = 117
+span_sha256 = "74161f8086e8ad63baa955c9de61940afe651b72dea758e0b3830d26ea8a92cf"
+metric = "regions"
+reason = "Only a fresh, challenge-bound directory head signed by the current installed sequencer authenticates the registered account."
+
+[[region]]
+id = "coordinator-terminal-root-origin"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/ops/directory.rs"
+item = "terminal_login"
+source_sha256 = "b883f480b0245a6c5eec598b2884ddfa3e624477993f57b05c55a6e9629194e7"
+start_line = 97
+end_line = 114
+span_sha256 = "3371a4617ab0fcf0a906f271d3ffc1918d613c29f90960fd15fbec0761f731a2"
+metric = "branches"
+reason = "The signed terminal root belongs to the original authenticated account, network and recovery epoch."
+
+[[region]]
+id = "terminal-root-canonical-verification-input"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/signature.rs"
+item = "verify_encoded"
+source_sha256 = "768a9d53f909f84ab3d821b094186a052a3442130d6eb8cf2dfa3d9acb1de831"
+start_line = 127
+end_line = 135
+span_sha256 = "93a2d9fd31c8983d1987e719ceb069eaa31ae10d6f2b97d12f2b3d19a7c6fb86"
+metric = "regions"
+reason = "A failed canonical encoding cannot reach the purpose-bound signature verifier."
+
+[[region]]
 id = "runtime-federated-join-target-error"
 category = "protocol-enum-arms"
 file = "crates/agenc-relay-runtime/src/mutation_render/join/refusal.rs"
@@ -654,6 +714,18 @@ end_line = 160
 span_sha256 = "800e984d91eb5ef31117d065d579b7531eb49b5dfad1e2d31b5afb76b9086f30"
 metric = "branches"
 reason = "A legacy JOIN refusal can name only the original canonical first operand."
+
+[[region]]
+id = "account-creation-invite-scope"
+category = "authorization-decisions"
+file = "crates/agenc-relay-auth/src/invitation.rs"
+item = "validate_scope"
+source_sha256 = "f1c810682817a30cac430007a8ad6954e798b3c67104a43f908a0492cff458b4"
+start_line = 134
+end_line = 152
+span_sha256 = "bdcf3d289e442103c44873aed70ef5efc3bed471036446ed10d1cd7f8f7a52b5"
+metric = "branches"
+reason = "Clients and coordinators must agree on the expected network, maximum lifetime and exclusive expiry of the creation invitation."
 
 [[region]]
 id = "runtime-edge-original-departure-backing"

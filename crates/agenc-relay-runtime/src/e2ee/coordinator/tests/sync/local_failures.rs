@@ -44,6 +44,7 @@ fn failed_code(harness: &mut Harness) -> TestResult<String> {
     let session_plan = context.domain().plan_session_opened(registered)?;
     crate::test_support::apply_live_plan(context, session_plan)?;
     let view = BaseView {
+        terminal_root_profile: false,
         context,
         peers: vec![ServerId::from_bytes(HOME)],
         base_capacity: Box::new(|_, _, _| true),

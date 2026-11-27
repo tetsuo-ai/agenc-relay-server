@@ -694,6 +694,7 @@ enum Mutation {
     SetFreshAuthDeadline {
         user_id: UserId,
         deadline: MonotonicTick,
+        login: Option<crate::LoginCompletion>,
     },
     StartAccountDeletion(AccountDeletionChallengeState),
     ConsumeAccountDeletionChallenge(SessionId),
@@ -1550,7 +1551,7 @@ impl DomainState {
 
     /// Plans insertion of one session after Stage 02 and later auth acceptance.
     pub fn plan_session_opened(&self, seed: SessionSeed) -> Result<MutationPlan, DomainError> {
-        self.plan_session_opened_at_authentication(seed, None)
+        self.plan_session_opened_at_authentication(seed, None, None)
     }
 
     /// Plans an authenticated session with its original, process-local OPAQUE
@@ -1563,17 +1564,33 @@ impl DomainState {
         if seed.account_id.is_none() {
             return Err(DomainError::BadState);
         }
-        self.plan_session_opened_at_authentication(seed, Some(authenticated_at))
+        self.plan_session_opened_at_authentication(seed, Some(authenticated_at), None)
+    }
+
+    /// Opens the original authenticated session with its successful, process-local
+    /// login receipt. The durable insertion only persists ordinary session state.
+    pub fn plan_session_opened_with_login(
+        &self,
+        seed: SessionSeed,
+        authenticated_at: MonotonicTick,
+        login: crate::LoginCompletion,
+    ) -> Result<MutationPlan, DomainError> {
+        if seed.account_id.is_none() {
+            return Err(DomainError::BadState);
+        }
+        self.plan_session_opened_at_authentication(seed, Some(authenticated_at), Some(login))
     }
 
     fn plan_session_opened_at_authentication(
         &self,
         seed: SessionSeed,
         authenticated_at: Option<MonotonicTick>,
+        login: Option<crate::LoginCompletion>,
     ) -> Result<MutationPlan, DomainError> {
         self.validate_session_seed(&seed)?;
         let user_id = seed.user_id;
         let mut session = SessionState::from_seed(seed);
+        session.login_completion = login;
         session.fresh_auth_deadline = authenticated_at
             .map(|instant| instant.checked_add(FRESH_AUTH_WINDOW_MILLIS))
             .transpose()?;
@@ -1767,6 +1784,25 @@ impl DomainState {
         expected_session_generation: agenc_relay_types::Generation,
         authenticated_at: MonotonicTick,
     ) -> Result<MutationPlan, DomainError> {
+        self.plan_session_login(
+            user_id,
+            account_id,
+            expected_session_generation,
+            authenticated_at,
+            None,
+        )
+    }
+
+    /// Refreshes the same process-local authority and its optional actual
+    /// sealed response together. A later successful login replaces the previous receipt.
+    pub fn plan_session_login(
+        &self,
+        user_id: UserId,
+        account_id: AccountId,
+        expected_session_generation: agenc_relay_types::Generation,
+        authenticated_at: MonotonicTick,
+        login: Option<crate::LoginCompletion>,
+    ) -> Result<MutationPlan, DomainError> {
         let session = self.sessions.get(&user_id).ok_or(DomainError::NotFound)?;
         if session.account_id != Some(account_id) {
             return Err(DomainError::Forbidden);
@@ -1785,7 +1821,11 @@ impl DomainState {
         let mut recipients = RecipientSet::new();
         recipients.insert(user_id);
         self.assemble_plan(PlanParts {
-            mutations: vec![Mutation::SetFreshAuthDeadline { user_id, deadline }],
+            mutations: vec![Mutation::SetFreshAuthDeadline {
+                user_id,
+                deadline,
+                login,
+            }],
             events: Vec::new(),
             recipients,
             failures: Vec::new(),
@@ -3899,11 +3939,16 @@ impl DomainState {
             } => {
                 self.apply_display_name(user_id, display_name, revision);
             }
-            Mutation::SetFreshAuthDeadline { user_id, deadline } => {
+            Mutation::SetFreshAuthDeadline {
+                user_id,
+                deadline,
+                login,
+            } => {
                 // Process-local authentication state has no session projection.
                 if let Some(session) = self.sessions.get_mut(&user_id) {
                     self.account_deletion_challenges.remove(&session.session_id);
                     session.fresh_auth_deadline = Some(deadline);
+                    session.login_completion = login;
                 }
             }
             Mutation::StartAccountDeletion(challenge) => {
@@ -4043,6 +4088,7 @@ impl DomainState {
             session.account_session_generation = account_session_generation;
             session.generation = session_generation;
             session.fresh_auth_deadline = None;
+            session.login_completion = None;
             session.revision = revision;
         }
         if let Some(session_id) = session_id {
@@ -5730,6 +5776,7 @@ mod projection_tests {
             Mutation::SetFreshAuthDeadline {
                 user_id,
                 deadline: MonotonicTick::from_ticks(1),
+                login: None,
             },
             Mutation::ConsumeAccountDeletionChallenge(agenc_relay_types::SessionId::from_bytes(
                 [2; 16],
@@ -10294,6 +10341,43 @@ mod tests {
             Some(MonotonicTick::from_ticks(300_200))
         );
         state.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_root_login_is_replaced_by_new_authentication_and_absent_from_restarts()
+    -> Result<(), DomainError> {
+        let (mut state, user, account) = private_auth_session()?;
+        let original = public_session_record(&state, user)?;
+        let generation = state
+            .session(user)
+            .ok_or(DomainError::NotFound)?
+            .generation();
+        for n in [1, 2] {
+            let login = crate::LoginCompletion {
+                epoch: agenc_relay_types::RecoveryEpoch::from_bytes([9; 16]),
+                digest: [n; 32],
+            };
+            let plan = state.plan_session_login(
+                user,
+                account,
+                generation,
+                MonotonicTick::from_ticks(200 + u64::from(n)),
+                Some(login),
+            )?;
+            assert!(plan.events().is_empty());
+            let prepared = state.prepare_mutation(plan)?;
+            state.apply_prepared(prepared)?;
+            let current = state.session(user).ok_or(DomainError::NotFound)?;
+            assert_eq!(current.login_completion(), Some(login));
+            assert_eq!(
+                crate::DurableSession::from_state(current)
+                    .into_state()?
+                    .login_completion(),
+                None
+            );
+            assert!(original == public_session_record(&state, user)?);
+        }
         Ok(())
     }
 

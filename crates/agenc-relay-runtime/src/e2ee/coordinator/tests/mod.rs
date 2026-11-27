@@ -47,6 +47,7 @@ mod root_lineage;
 mod sequence;
 pub(crate) mod support;
 pub(crate) mod sync;
+mod terminal_root;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -112,6 +113,7 @@ fn origin_key() -> CompanionOriginKey {
 }
 
 struct Harness {
+    terminal_login: Option<agenc_relay_e2ee::terminal_root::TerminalRootLogin>,
     query_sessions: crate::state_core::session::SessionTable,
     query_limits: crate::runtime_config::RuntimeResourceLimits,
     backing: crate::budget::BackingReservationPort,
@@ -209,6 +211,7 @@ impl Harness {
             fenced: false,
         });
         Ok(Self {
+            terminal_login: None,
             query_sessions: crate::state_core::session::SessionTable::new(),
             query_limits: crate::runtime_config::RuntimeResourceLimits::HARD_MAX,
             monotonic_millis: NOW * 1_000,
@@ -404,6 +407,7 @@ impl Harness {
                     .map(|(_, facts)| *facts)
             },
             plan_binding: &plan_binding,
+            terminal_login: self.terminal_login.clone(),
             plan_root: &|_, _| Ok(None),
             state_generation: STATE_GENERATION,
             source_view: Vec::new(),
