@@ -94,6 +94,105 @@ pub fn fetch_identity(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
     single(exec, bytes, EmptyKind::Identity)
 }
 
+fn terminal_login(
+    exec: &Exec<'_>,
+) -> Result<agenc_relay_e2ee::terminal_root::TerminalRootLogin, Fail> {
+    let login = exec
+        .terminal_login
+        .clone()
+        .ok_or(E2eeReplyCode::AccountRequired)?;
+    if login.account_id != exec.account_id()?
+        || login.network_id != exec.coordinator.network_id
+        || !exec
+            .coordinator
+            .delivery_identity
+            .is_some_and(|local| *local.recovery_epoch().as_bytes() == login.recovery_epoch)
+    {
+        return Err(E2eeReplyCode::AccountRequired.into());
+    }
+    Ok(login)
+}
+
+fn terminal_identity(
+    exec: &Exec<'_>,
+    account: &[u8; 32],
+) -> Result<Option<agenc_relay_e2ee::terminal_root::TerminalRootIdentity>, Fail> {
+    use agenc_relay_e2ee::terminal_root::TerminalRootIdentity;
+    let Some(head) = exec
+        .coordinator
+        .state
+        .directory
+        .account(account)
+        .and_then(|row| row.root.as_ref())
+    else {
+        return Ok(None);
+    };
+    let object_id = head.chain.last().copied().ok_or(E2eeReplyCode::Syncing)?;
+    Ok(Some(TerminalRootIdentity {
+        generation: head.generation,
+        fingerprint: head.fingerprint,
+        object_id,
+    }))
+}
+
+/// Signs only the terminal committed entry for the origin which consumed this login.
+pub fn prove_root_head(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
+    use agenc_relay_e2ee::terminal_root::{
+        MAX_LIFETIME_SECONDS, TerminalRootHead, TerminalRootHeadTbs,
+    };
+    let challenge = exec.params().read(|r| r.fixed::<16>())?;
+    let account = exec.account_digest()?;
+    let login = terminal_login(exec)?;
+    let set = exec
+        .coordinator
+        .key_set
+        .as_ref()
+        .ok_or(E2eeReplyCode::Syncing)?;
+    let key = set.current().ok_or(E2eeReplyCode::Syncing)?;
+    let signer = &exec
+        .coordinator
+        .signer
+        .as_ref()
+        .ok_or(E2eeReplyCode::Syncing)?
+        .active;
+    if !key
+        .interval
+        .covers(agenc_relay_e2ee::identity::ValidationTime(exec.now))
+        || signer.credential_id != key.credential_id
+        || signer.key.public_key().as_bytes() != key.key.as_bytes()
+    {
+        return Err(E2eeReplyCode::Syncing.into());
+    }
+    let Some(root) = terminal_identity(exec, &account)? else {
+        return single(exec, None, EmptyKind::Identity);
+    };
+    let tbs = TerminalRootHeadTbs {
+        version: 1,
+        login,
+        challenge,
+        root,
+        sequencer_set_generation: set.set_generation,
+        sequencer_set_digest: set.digest,
+        sequencer_credential_id: key.credential_id,
+        issued_at: exec.now,
+        expires_at: exec
+            .now
+            .checked_add(MAX_LIFETIME_SECONDS)
+            .ok_or(E2eeReplyCode::Syncing)?
+            .min(key.interval.not_after),
+    };
+    let signature = signer
+        .sign(SignatureDomain::TerminalRootHead, &tbs)
+        .map_err(|_| E2eeReplyCode::Syncing)?;
+    let body = TerminalRootHead { tbs, signature }
+        .encode()
+        .map_err(|_| E2eeReplyCode::Syncing)?;
+    let object = ArcWireObject::new(ArcWireObjectKind::TerminalRootHead, body)
+        .and_then(|object| object.encode())
+        .map_err(|_| E2eeReplyCode::Syncing)?;
+    single(exec, Some(object), EmptyKind::Identity)
+}
+
 /// `fetch_root_chain`: one `root_identity_chain` object holding the
 /// contiguous page of an immutable cut of the account's roots from the
 /// requested generation (companion 11.6, 11.7).

@@ -2051,7 +2051,7 @@ impl FederationCoordinator {
         }
         let protected;
         let encoded = if encoded.starts_with(&2u16.to_be_bytes()) {
-            if live.handle.profile != agenc_relay_federation_wire::FederationProfile::InitialRoot {
+            if !live.handle.profile.supports_initial_root() {
                 return;
             }
             match initial_root_results::authorized_output(

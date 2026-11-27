@@ -65,6 +65,32 @@ fn initial_root_hello_uses_only_its_exact_version_and_pinned_hash() -> TestResul
     Ok(())
 }
 
+#[test]
+fn terminal_root_hello_requires_both_peers_to_select_version_three_and_its_hash() -> TestResult {
+    use crate::FederationProfile::{Base, InitialRoot, TerminalRoot};
+    for profile in [Base, InitialRoot, TerminalRoot] {
+        let mut greeting = hello();
+        greeting.tbs.profile_hash = profile.hash();
+        let wire = profile.encode_hello(&greeting)?;
+        assert_eq!(
+            wire.get(..2),
+            Some(profile.version().to_be_bytes().as_slice())
+        );
+        assert_eq!(
+            wire.get(..196),
+            Some(profile.hello_tbs(&greeting.tbs)?.as_slice())
+        );
+        for decoder in [Base, InitialRoot, TerminalRoot] {
+            assert_eq!(decoder.decode_hello(wire).is_ok(), decoder == profile);
+        }
+        if profile != TerminalRoot {
+            assert!(TerminalRoot.encode_hello(&greeting).is_err());
+        }
+    }
+    assert!(TerminalRoot.supports_initial_root());
+    Ok(())
+}
+
 fn max_fragment() -> Result<FederationFragment, Box<dyn Error>> {
     Ok(FederationFragment::new(
         FederationHash32::from_bytes([0xff; 32]),

@@ -48,7 +48,7 @@ fn the_completion_table_is_closed() -> Result<(), PlanError> {
         Completion::None
     );
     assert_eq!(
-        completion_for(Opcode(45), ResultKind::Failed),
+        completion_for(Opcode(46), ResultKind::Failed),
         Err(PlanError::UnknownOpcode)
     );
     assert!(Opcode::all().any(|opcode| opcode == Opcode::SUBMIT_MEMBERSHIP));

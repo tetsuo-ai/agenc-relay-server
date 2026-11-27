@@ -47,6 +47,7 @@ pub const fn expected_signer(domain: SignatureDomain) -> Option<SignerRole> {
         | SignatureDomain::LeafMembership
         | SignatureDomain::RecoverySubmission => Some(SignerRole::Device),
         SignatureDomain::SequencerContinuity
+        | SignatureDomain::TerminalRootHead
         | SignatureDomain::Reservation
         | SignatureDomain::DeviceAttachChallenge
         | SignatureDomain::CandidateReceipt
@@ -119,6 +120,18 @@ impl RoleKey {
             Ed25519Signature::from_bytes(*signature),
         )
         .map_err(|_| E2eeError::SignatureInvalid)
+    }
+
+    /// Verifies the exact canonical encoding of a typed input. Encoding failures
+    /// propagate before the original key can accept any signature over that input.
+    pub(crate) fn verify_encoded(
+        &self,
+        domain: SignatureDomain,
+        tbs: &impl crate::tls::TlsEncode,
+        signature: &[u8; 64],
+    ) -> Result<(), E2eeError> {
+        let encoded = tbs.encode()?;
+        self.verify(domain, &encoded, signature)
     }
 
     /// Verifies a suite-encoded signature: the enabled suites use Ed25519,

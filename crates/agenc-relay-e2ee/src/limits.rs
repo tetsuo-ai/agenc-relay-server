@@ -65,6 +65,10 @@ pub const MAX_CREDENTIAL_BUNDLE: usize = 8_192;
 pub const MAX_POLICY_BYTES: usize = 32_768;
 /// `MAX_POLICY_OBJECT`: a published policy with its six-byte envelope.
 pub const MAX_POLICY_OBJECT: usize = 32_774;
+/// Fixed size of one canonical ARC policy approval (companion 9.3).
+pub const POLICY_APPROVAL_BYTES: usize = 144;
+/// Encoded body limit of the approval vector in an ARC policy (companion 9.3).
+pub const MAX_POLICY_APPROVALS_BYTES: usize = 16_384;
 /// `MAX_BINDING_OBJECT`.
 pub const MAX_BINDING_OBJECT: usize = 262_144;
 /// `MAX_BINDING_CHAIN_BYTES`.

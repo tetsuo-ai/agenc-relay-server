@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 
 use agenc_relay_types::{CAPABILITIES, INITIAL_ROOT_CAPABILITY, INITIAL_ROOT_PROFILE_TOKEN};
+use agenc_relay_types::{TERMINAL_ROOT_CAPABILITY, TERMINAL_ROOT_PROFILE_TOKEN};
 
 pub(crate) const MAX_CAPABILITIES: usize = CAPABILITIES.len() + 1;
 
@@ -36,7 +37,9 @@ pub struct CapabilitySpec {
 impl CapabilitySpec {
     /// Creates a known bare capability name and optional advertised value.
     pub fn new(name: &str, value: Option<&str>) -> Result<Self, CapError> {
-        if !(CAPABILITIES.contains(&name) || name == INITIAL_ROOT_CAPABILITY) {
+        if !(CAPABILITIES.contains(&name)
+            || matches!(name, INITIAL_ROOT_CAPABILITY | TERMINAL_ROOT_CAPABILITY))
+        {
             return Err(CapError::UnknownCapability);
         }
         if value.is_some_and(|value| {
@@ -622,6 +625,9 @@ fn validate_profile_value(name: &str, value: Option<&str>) -> Result<(), CapErro
         INITIAL_ROOT_CAPABILITY => {
             value.and_then(|v| v.strip_prefix("v1.")) == Some(INITIAL_ROOT_PROFILE_TOKEN)
         }
+        TERMINAL_ROOT_CAPABILITY => {
+            value.and_then(|v| v.strip_prefix("v1.")) == Some(TERMINAL_ROOT_PROFILE_TOKEN)
+        }
         "sasl" => value == Some("AGENC-OPAQUE"),
         "sts" => value == Some("duration=31536000"),
         _ => value.is_none(),
@@ -636,7 +642,10 @@ fn validate_profile_value(name: &str, value: Option<&str>) -> Result<(), CapErro
 fn reconnects_on_value_change(name: &str) -> bool {
     matches!(
         name,
-        "agenc.ag/recovery" | "agenc.ag/e2ee-mls" | INITIAL_ROOT_CAPABILITY
+        "agenc.ag/recovery"
+            | "agenc.ag/e2ee-mls"
+            | INITIAL_ROOT_CAPABILITY
+            | TERMINAL_ROOT_CAPABILITY
     )
 }
 

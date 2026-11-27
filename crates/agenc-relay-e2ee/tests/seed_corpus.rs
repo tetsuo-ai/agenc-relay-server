@@ -37,6 +37,7 @@ fn every_object_seed_decodes_to_its_declared_kind() -> TestResult {
             ArcWireObjectKind::DeviceAttachChallenge,
         ),
         ("commit-ack", ArcWireObjectKind::CommitAck),
+        ("terminal-root-head", ArcWireObjectKind::TerminalRootHead),
         ("federation-origin", ArcWireObjectKind::FederationOrigin),
         ("application-mls", ArcWireObjectKind::ApplicationMls),
         ("commit-mls", ArcWireObjectKind::CommitMls),

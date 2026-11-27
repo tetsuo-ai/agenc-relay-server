@@ -389,7 +389,14 @@ impl<'a> RequestResultCursor<'a> {
 struct AuthenticatedBinding {
     transaction_id: TransactionId,
     grant: AuthenticationGrant,
-    authenticated_at: MonotonicTick,
+    login: RegistrationLogin,
+}
+
+/// The coordinator's process-local evidence from the grant consumed at registration.
+#[derive(Clone, Copy)]
+pub(crate) struct RegistrationLogin {
+    pub(crate) authenticated_at: MonotonicTick,
+    pub(crate) completion: agenc_relay_domain::LoginCompletion,
 }
 
 impl AuthenticatedBinding {
@@ -1793,7 +1800,7 @@ impl AccountServiceCoordinator {
         &self,
         generation: ConnectionGeneration,
         now: MonotonicTick,
-    ) -> Result<Option<(AccountId, Generation, MonotonicTick)>, RuntimeError> {
+    ) -> Result<Option<(AccountId, Generation, RegistrationLogin)>, RuntimeError> {
         let Some((account, session_generation)) = self.authenticated_binding(generation, now)?
         else {
             return Ok(None);
@@ -1803,11 +1810,7 @@ impl AccountServiceCoordinator {
             .get(&generation)
             .and_then(|connection| connection.authenticated.as_ref())
             .ok_or(RuntimeError::InvalidValue)?;
-        Ok(Some((
-            account,
-            session_generation,
-            binding.authenticated_at,
-        )))
+        Ok(Some((account, session_generation, binding.login)))
     }
 
     /// The account, session generation, and grant identifier of a live
@@ -1964,11 +1967,12 @@ impl AccountServiceCoordinator {
         if home == SessionHome::Local {
             let plan = context
                 .domain()
-                .plan_session_fresh_authentication(
+                .plan_session_login(
                     user_id,
                     binding.account_id(),
                     session.generation(),
-                    binding.authenticated_at,
+                    binding.login.authenticated_at,
+                    Some(binding.login.completion),
                 )
                 .map_err(|_| RuntimeError::InvalidValue)?;
             let fanout = FanoutRequest::new(Vec::new(), Vec::new())?;
@@ -5947,6 +5951,15 @@ impl AccountServiceCoordinator {
         {
             return CarrierCompletion::closed(generation, carrier_generation);
         }
+        let mut hash = agenc_relay_crypto::Sha256Stream::new();
+        hash.update(sealed.response_intent().response().as_bytes());
+        let login = RegistrationLogin {
+            authenticated_at,
+            completion: agenc_relay_domain::LoginCompletion {
+                epoch: self.config.recovery_epoch,
+                digest: *hash.finish().as_bytes(),
+            },
+        };
         let Ok(result) = sealed.into_result_after_commit(committed_count) else {
             return CarrierCompletion::closed(generation, carrier_generation);
         };
@@ -5973,7 +5986,7 @@ impl AccountServiceCoordinator {
                 generation,
                 transaction_id,
                 grant,
-                authenticated_at,
+                login,
                 fresh_auth_session,
             ),
             _ => false,
@@ -5996,23 +6009,19 @@ impl AccountServiceCoordinator {
         generation: ConnectionGeneration,
         transaction_id: TransactionId,
         grant: AuthenticationGrant,
-        authenticated_at: MonotonicTick,
+        login: RegistrationLogin,
         fresh_auth_session: Option<(agenc_relay_types::UserId, Generation, AccountId)>,
     ) -> bool {
         match fresh_auth_session {
             Some(session) => self.install_registered_fresh_authentication(
-                context,
-                generation,
-                grant,
-                authenticated_at,
-                session,
+                context, generation, grant, login, session,
             ),
             None => self.install_preregistration_grant(
                 context,
                 generation,
                 transaction_id,
                 grant,
-                authenticated_at,
+                login,
             ),
         }
     }
@@ -6022,17 +6031,18 @@ impl AccountServiceCoordinator {
         context: &mut StateCoreContext,
         generation: ConnectionGeneration,
         grant: AuthenticationGrant,
-        authenticated_at: MonotonicTick,
+        login: RegistrationLogin,
         session: (agenc_relay_types::UserId, Generation, AccountId),
     ) -> bool {
         let (user_id, session_generation, account_id) = session;
         let applied = context
             .domain()
-            .plan_session_fresh_authentication(
+            .plan_session_login(
                 user_id,
                 account_id,
                 session_generation,
-                authenticated_at,
+                login.authenticated_at,
+                Some(login.completion),
             )
             .ok()
             .and_then(|plan| {
@@ -6059,7 +6069,7 @@ impl AccountServiceCoordinator {
         generation: ConnectionGeneration,
         transaction_id: TransactionId,
         grant: AuthenticationGrant,
-        authenticated_at: MonotonicTick,
+        login: RegistrationLogin,
     ) -> bool {
         let preregistered = context
             .sessions()
@@ -6078,7 +6088,7 @@ impl AccountServiceCoordinator {
         connection.authenticated = Some(AuthenticatedBinding {
             transaction_id,
             grant,
-            authenticated_at,
+            login,
         });
         if self
             .install_transaction_timer(
