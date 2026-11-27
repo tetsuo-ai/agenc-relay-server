@@ -98,6 +98,60 @@ fn admit(
     Ok((requester, Some(operation)))
 }
 
+/// The B.6 failure code and first numeric must describe the same public outcome.
+fn first_failure(code: &str, context: &str, frame: &WireMessage) -> bool {
+    match frame.command() {
+        "401" => {
+            code == "STALE_STATE"
+                && (context.is_empty()
+                    || frame
+                        .middle()
+                        .last()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(context)))
+        }
+        "481" => matches!(code, "NOT_ALLOWED" | "BAD_STATE") && context.is_empty(),
+        _ => false,
+    }
+}
+
+fn covered_result(
+    known: usize,
+    arm: &ResultArm,
+    replies: &[WireMessage],
+) -> Result<bool, Violation> {
+    match arm {
+        // An old result or command-wide error has no authoritative target dispositions.
+        ResultArm::Failed { .. } if replies.is_empty() => Ok(false),
+        ResultArm::Failed { code, context }
+            if replies.len() == known
+                && replies
+                    .first()
+                    .is_some_and(|first| first_failure(code, context, first)) =>
+        {
+            Ok(true)
+        }
+        ResultArm::Committed { .. } if replies.len() < known => Ok(true),
+        _ => Err(Violation::Consistency),
+    }
+}
+
+fn confirmed_target<'a>(
+    original: &str,
+    reason: Option<&str>,
+    frame: &'a WireMessage,
+) -> Result<&'a str, Violation> {
+    let [channel, name] = frame.middle() else {
+        return Err(Violation::Consistency);
+    };
+    if frame.command() != "KICK"
+        || !channel.eq_ignore_ascii_case(original)
+        || frame.trailing().unwrap_or("") != reason.unwrap_or("")
+    {
+        return Err(Violation::Consistency);
+    }
+    Ok(name)
+}
+
 /// The B.5 body sorts by UserId, while a client attributes outcomes by original nickname.
 fn physical_targets(
     names: &str,
@@ -219,47 +273,32 @@ impl KickRequester {
         replies: &mut Vec<WireMessage>,
     ) -> Result<(), Violation> {
         let known = self.targets.iter().flatten().count();
-        match arm {
-            // An old result or command-wide error has no authoritative target dispositions.
-            ResultArm::Failed { .. } if replies.is_empty() => return Ok(()),
-            ResultArm::Failed { code, context } if replies.len() == known => {
-                let first = replies.first().ok_or(Violation::Consistency)?;
-                let valid = match first.command() {
-                    "401" => {
-                        code == "STALE_STATE"
-                            && (context.is_empty()
-                                || first
-                                    .middle()
-                                    .last()
-                                    .is_some_and(|name| context.eq_ignore_ascii_case(name)))
-                    }
-                    "481" => {
-                        matches!(code.as_str(), "NOT_ALLOWED" | "BAD_STATE") && context.is_empty()
-                    }
-                    _ => false,
-                };
-                if !valid {
-                    return Err(Violation::Consistency);
-                }
-            }
-            ResultArm::Committed { .. } if replies.len() < known => {}
-            _ => return Err(Violation::Consistency),
+        if !covered_result(known, arm, replies)? {
+            return Ok(());
         }
         let names = message.middle().get(1).ok_or(Violation::Consistency)?;
         let recipient = self.origin.nickname()?;
-        for frame in replies.iter() {
-            match (frame.command(), frame.middle(), frame.trailing()) {
-                ("401", [nick, target], Some("No such nick"))
-                    if recipient.eq_ignore_ascii_case(nick)
-                        && names.split(',').zip(self.targets).any(|(name, id)| {
-                            id.is_some() && name.eq_ignore_ascii_case(target)
-                        }) => {}
-                ("481", [nick], Some("Command is unavailable"))
-                    if recipient.eq_ignore_ascii_case(nick) => {}
-                _ => return Err(Violation::Consistency),
-            }
+        if !replies
+            .iter()
+            .all(|frame| self.original_refusal(names, recipient, frame))
+        {
+            return Err(Violation::Consistency);
         }
         self.add_missing(prefix, message, replies)
+    }
+
+    fn original_refusal(&self, names: &str, recipient: &str, frame: &WireMessage) -> bool {
+        match (frame.command(), frame.middle(), frame.trailing()) {
+            ("401", [nick, target], Some("No such nick")) => {
+                recipient.eq_ignore_ascii_case(nick)
+                    && names
+                        .split(',')
+                        .zip(self.targets)
+                        .any(|(name, id)| id.is_some() && name.eq_ignore_ascii_case(target))
+            }
+            ("481", [nick], Some("Command is unavailable")) => recipient.eq_ignore_ascii_case(nick),
+            _ => false,
+        }
     }
 
     /// Check positive and negative per-target decisions in either delivery order.
@@ -289,16 +328,10 @@ impl KickRequester {
             Ok(())
         };
         for frame in echoes {
-            let [channel, name] = frame.middle() else {
-                return Err(Violation::Consistency);
-            };
-            if frame.command() != "KICK"
-                || !channel.eq_ignore_ascii_case(original_channel)
-                || frame.trailing().unwrap_or("") != message.trailing().unwrap_or("")
-            {
-                return Err(Violation::Consistency);
-            }
-            mark(name, true)?;
+            mark(
+                confirmed_target(original_channel, message.trailing(), frame)?,
+                true,
+            )?;
         }
         let mut generic = 0;
         for reply in replies {

@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1183
-reviewed_source_sha256 = "49eb27a672ae0e93cf52bd27dc6271e6096d7093d44fd482b5dd22ec4456ef6b"
+reviewed_source_sha256 = "335c02e324d451d6724c386aa64d1b91568ab3d23ac44ba8ab62050d7bd3b232"
 deferred = []
 
 [[region]]
@@ -960,21 +960,45 @@ id = "runtime-original-kick-target"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/federation/edge/kick.rs"
 item = "echo_targets"
-source_sha256 = "6ee19731848dbf2dfed16656887c353acf5a48d36be4d02c9c8b8a7119b7e5c8"
-start_line = 134
-end_line = 154
+source_sha256 = "e1ebba539e7a6fdc83f9d14ae713fcb280db1a98ba6f7026791526d730eae86b"
+start_line = 188
+end_line = 208
 span_sha256 = "a14f73540f70f0a49d364067f4d38dae5d8a5e80e16afdf918ba919cd8aa416e"
 metric = "branches"
 reason = "An original KICK notification binds the advanced physical channel, original target ID and nickname, and the admitted public reason."
+
+[[region]]
+id = "runtime-original-kick-frame"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/federation/edge/kick.rs"
+item = "confirmed_target"
+source_sha256 = "e1ebba539e7a6fdc83f9d14ae713fcb280db1a98ba6f7026791526d730eae86b"
+start_line = 138
+end_line = 153
+span_sha256 = "8d4ee9a9f28a111f840c144be5b77cc941f709dbc501120305f54123cfccf840"
+metric = "branches"
+reason = "A positive receipt requires a KICK frame for the original channel and public reason before its named target can be marked."
+
+[[region]]
+id = "runtime-original-kick-refusal"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/federation/edge/kick.rs"
+item = "original_refusal"
+source_sha256 = "e1ebba539e7a6fdc83f9d14ae713fcb280db1a98ba6f7026791526d730eae86b"
+start_line = 290
+end_line = 302
+span_sha256 = "f42a7331fbffd0dfdf21fdbb919975cac6d36abb1ab86cc2d8a5fa8750ab3c59"
+metric = "branches"
+reason = "A rejection must carry the original requester and a permitted public numeric with the admitted nickname or the precise unscoped policy refusal."
 
 [[region]]
 id = "runtime-original-kick-dispositions"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/federation/edge/kick.rs"
 item = "check_evidence"
-source_sha256 = "6ee19731848dbf2dfed16656887c353acf5a48d36be4d02c9c8b8a7119b7e5c8"
-start_line = 267
-end_line = 315
-span_sha256 = "3d07a7068bcf0d2ebb5b057129d0088ce3705e70166771f3d8d52e05ebffe523"
+source_sha256 = "e1ebba539e7a6fdc83f9d14ae713fcb280db1a98ba6f7026791526d730eae86b"
+start_line = 306
+end_line = 348
+span_sha256 = "c2802df8ede858ce851aea6ff5b5201978eaf89a0dd8a9491daceebcfba101a6"
 metric = "branches"
 reason = "A labeled removal can claim only its original targets; contradictory successes, scoped failures, and unscoped failures beyond the remaining targets are refused."
