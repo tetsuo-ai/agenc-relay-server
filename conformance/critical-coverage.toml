@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1171
-reviewed_source_sha256 = "aff3427d42371fc39fbba601057167c31a61815142ca13fdaabba2f16748fb72"
+reviewed_source_sha256 = "821774ac64f94b3a3e720b7186cbea2ebf4d58830f963733dc47ea20c9c565c8"
 deferred = []
 
 [[region]]
@@ -732,11 +732,11 @@ id = "runtime-edge-original-departure-backing"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/federation/edge/request.rs"
 item = "reserve_departure_backing"
-source_sha256 = "8a3e535e60815666477dcfbba6b2b9ab7f1b01a8ee5f15c4c88fe018c77092e1"
+source_sha256 = "ab7d1e602e34a2bf494a6469440d6e622972676e4630f1ba2eeb724d47133c28"
 start_line = 901
-end_line = 918
-span_sha256 = "be1c352fe18bbb9534e3807cbc3e2056561ba1e8e2b0b0cfe7ecb8312daf83ce"
-metric = "branches"
+end_line = 919
+span_sha256 = "2eb6477d9d6546576f63c7837a6acefcd7fcf02d8602af413179e6970bd63553"
+metric = "regions"
 reason = "Before consuming an origin sequence, reserve both retained PART allocations by capacity. One checked batch charges both allocations atomically and releases them together with their original request."
 
 [[region]]
