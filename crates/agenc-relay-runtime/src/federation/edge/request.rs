@@ -36,6 +36,8 @@ mod requester;
 use requester::ReplyRequester;
 #[path = "invitation.rs"]
 mod invitation;
+#[path = "kick.rs"]
+mod kick;
 #[path = "message_results.rs"]
 mod message_results;
 
@@ -187,6 +189,7 @@ pub(crate) enum EchoChannels {
     Topic(agenc_relay_types::ChannelInstanceId),
     ChannelModes(super::message_echo::ChannelModeRequester),
     Invite(invitation::InviteRequester),
+    Kick(kick::KickRequester),
     UserMode {
         session: SessionId,
         revision: u64,
@@ -885,6 +888,16 @@ fn route_admitted(
             message,
         );
     }
+    if matches!(command.view(), CanonicalCommandView::Kick(_, _, _)) {
+        return kick::route(
+            edge,
+            context,
+            generation,
+            (session_id, user_id),
+            command,
+            message,
+        );
+    }
     if let CanonicalCommandView::Message(command) = command.view() {
         return message_results::route(
             edge,
@@ -1542,21 +1555,9 @@ fn operation_of(
                 expected_channel_revision: revision,
             })
         }
-        CanonicalCommandView::Kick(name, targets, reason) => {
-            let (channel_id, revision) = channel_of(edge, name)?;
-            let mut ids = Vec::new();
-            for nickname in targets {
-                ids.push(user_by_nickname(edge, nickname).ok_or(DomainError::NotFound)?);
-            }
-            Ok(FederatedOperation::Kick {
-                session_id,
-                channel_id,
-                targets: ids,
-                expected_channel_revision: revision,
-                reason: reason.map_or(String::new(), |reason| reason.as_str().to_owned()),
-            })
+        CanonicalCommandView::Kick(_, _, _) | CanonicalCommandView::Message(_) => {
+            Err(DomainError::InvariantViolation)
         }
-        CanonicalCommandView::Message(_) => Err(DomainError::InvariantViolation),
         CanonicalCommandView::Presence(PresenceCommand::Away(away)) => {
             Ok(FederatedOperation::Away {
                 session_id,
@@ -1882,6 +1883,18 @@ pub(super) fn receive_result(
         replies.push(reply_frame(&edge.config.server_name, reply)?);
     }
     project_join_result(context, pending, &checked.arm, &mut replies)?;
+    if let PendingKind::Command {
+        message,
+        echo_channels: Some(EchoChannels::Kick(requester)),
+    } = &pending.kind
+    {
+        requester.project(context.server_prefix(), message, &checked.arm, &mut replies)?;
+        requester.check_evidence(
+            message,
+            pending.message_echoes.iter().map(|echo| echo.frame()),
+            &replies,
+        )?;
+    }
     invitation::project(
         context.server_prefix(),
         &pending.kind,
@@ -2274,7 +2287,8 @@ fn completed_request(
                         EchoChannels::Part { .. }
                         | EchoChannels::UnlabeledPart(_)
                         | EchoChannels::Message(_)
-                        | EchoChannels::Invite(_),
+                        | EchoChannels::Invite(_)
+                        | EchoChannels::Kick(_),
                     ),
             },
             ResultArm::Failed { .. },
@@ -2362,6 +2376,7 @@ fn completed_request(
                 EchoChannels::Part { .. }
                     | EchoChannels::UnlabeledPart(_)
                     | EchoChannels::ChannelModes(_)
+                    | EchoChannels::Kick(_)
             )
         ) =>
         {

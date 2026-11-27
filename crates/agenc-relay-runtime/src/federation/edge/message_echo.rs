@@ -25,6 +25,7 @@
 //! the original actor and the exact topic bytes (including an explicit clear).
 //! An explicit PART may name several channels. Each correlated departure must match
 //! one of their original instances, the departing user, and the admitted reason.
+//! A KICK also matches the selected physical target and the channel revision.
 
 use agenc_relay_client_wire::{CapabilityState, ParsedMessage, WireMessage};
 use agenc_relay_domain::federation::ProjectedEvent;
@@ -62,6 +63,10 @@ pub(super) struct MessageEcho {
 }
 
 impl MessageEcho {
+    pub(super) fn frame(&self) -> &WireMessage {
+        &self.frame
+    }
+
     fn replace_frame(
         &mut self,
         channel: Option<ChannelInstanceId>,
@@ -93,6 +98,11 @@ pub(super) fn capture(
         ProjectedEvent::MessageDelivered(record) => record.sender.user_id,
         ProjectedEvent::TopicChanged { actor, .. } => actor.user_id,
         ProjectedEvent::ChannelModesChanged {
+            actor,
+            resulting_revision,
+            ..
+        }
+        | ProjectedEvent::Kicked {
             actor,
             resulting_revision,
             ..
@@ -249,6 +259,10 @@ fn labeled_targets(
         (FederationOpcode::ChannelMode, ProjectedEvent::ChannelModesChanged { channel_id, resulting_revision, changes, .. }) => {
             matches!(echo_channels, Some(EchoChannels::ChannelModes(original)) if original.matches(*channel_id, resulting_revision.get(), changes)).then_some(1)
         }
+        (FederationOpcode::Kick, ProjectedEvent::Kicked { channel_id, target, resulting_revision, reason, .. }) => {
+            let Some(EchoChannels::Kick(original)) = echo_channels else { return None; };
+            original.echo_targets(message, *channel_id, resulting_revision.get(), target, reason)
+        }
         (FederationOpcode::UserMode, ProjectedEvent::UserModesChanged(record)) => {
             original_user_mode(message, echo_channels.as_ref(), record).then_some(1)
         }
@@ -380,23 +394,26 @@ fn validate_incoming_message_echo(
     event: EventId,
     frame: &WireMessage,
 ) -> Result<(), Violation> {
-    if let PendingKind::Command {
+    let PendingKind::Command {
         message,
-        echo_channels: Some(EchoChannels::Message(_)),
+        echo_channels,
     } = &pending.kind
-    {
-        check_message_replies(
-            message,
-            pending
-                .message_echoes
-                .iter()
-                .filter(|held| held.event != event)
-                .map(|held| &held.frame)
-                .chain(std::iter::once(frame)),
-            &pending.replies,
-        )?;
+    else {
+        return Ok(());
+    };
+    let echoes = pending
+        .message_echoes
+        .iter()
+        .filter(|held| held.event != event)
+        .map(MessageEcho::frame)
+        .chain(std::iter::once(frame));
+    match echo_channels {
+        Some(EchoChannels::Message(_)) => check_message_replies(message, echoes, &pending.replies),
+        Some(EchoChannels::Kick(original)) => {
+            original.check_evidence(message, echoes, &pending.replies)
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn original_message_echo(
