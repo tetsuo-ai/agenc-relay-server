@@ -198,14 +198,9 @@ fn labeled_targets(
     else {
         return None;
     };
-    let labeled = message
-        .tags()
-        .iter()
-        .any(|tag| tag.key() == "label" && tag.value().is_some());
     if pending.generation != generation
         || pending.sink_gone
-        || !labeled
-        || !capabilities.is_some_and(|state| state.enabled("labeled-response"))
+        || !label_negotiated(message, capabilities)
     {
         return None;
     }
@@ -252,6 +247,14 @@ fn labeled_targets(
         }
         _ => None,
     }
+}
+
+fn label_negotiated(message: &ParsedMessage, capabilities: Option<&CapabilityState>) -> bool {
+    capabilities.is_some_and(|state| state.enabled("labeled-response"))
+        && message
+            .tags()
+            .iter()
+            .any(|tag| tag.key() == "label" && tag.value().is_some())
 }
 
 fn departure_targets(
