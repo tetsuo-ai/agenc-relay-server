@@ -29,6 +29,7 @@ fn the_root_publisher_can_delete_after_its_first_valid_successor_roster() -> Tes
             client,
             keys: Principal::new(ROOT, DEVICE, id)?,
         };
+        crate::initial_root_registered::await_directory_account(&mut account.client, id)?;
         let initial = wire_object(ArcWireObjectKind::RootIdentity, &account.keys.keys.root)?;
         account.stored("EKEY PUBLISH IDENTITY", "IDENTITY", &initial)?;
         step(
@@ -38,8 +39,12 @@ fn the_root_publisher_can_delete_after_its_first_valid_successor_roster() -> Tes
         quit_and_drain(&mut account.client, "renewing the original login")?;
 
         account.client = authenticated_session(&network.edge_a, "publisher", login, 70, id)?;
+        crate::initial_root_registered::await_directory_account(&mut account.client, id)?;
         let original_roster = account.keys.keys.roster.clone();
-        account.roster(&original_roster, true)?;
+        step(
+            "first roster of the original root",
+            account.roster(&original_roster, true),
+        )?;
         let next = builders::root(
             &builders::key(NEXT_ROOT),
             &account.keys.account,
