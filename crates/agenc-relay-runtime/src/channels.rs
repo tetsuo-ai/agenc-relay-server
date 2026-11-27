@@ -1133,14 +1133,22 @@ fn local_projection_context(
     command: &CanonicalCommand,
 ) -> Result<Option<agenc_relay_domain::federation::MutationContext>, RuntimeError> {
     use agenc_relay_domain::federation::MutationContext;
-    if matches!(
-        command.view(),
-        CanonicalCommandView::Mode(agenc_relay_domain::ModeCommand::ChannelChange(_, _))
-    ) {
-        return Ok(Some(MutationContext {
-            actor: Some(bound.user_id),
-            ..Default::default()
-        }));
+    match command.view() {
+        CanonicalCommandView::Mode(agenc_relay_domain::ModeCommand::ChannelChange(_, _)) => {
+            return Ok(Some(MutationContext {
+                actor: Some(bound.user_id),
+                ..Default::default()
+            }));
+        }
+        CanonicalCommandView::Kick(_, _, reason) => {
+            return Ok(Some(MutationContext {
+                actor: Some(bound.user_id),
+                kicked: true,
+                reason: reason.map_or_else(String::new, |value| value.as_str().to_owned()),
+                ..Default::default()
+            }));
+        }
+        _ => {}
     }
     let (Some(batch), Some(reply)) = (plan.message_batch(), reply) else {
         return Ok(None);

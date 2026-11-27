@@ -1189,11 +1189,16 @@ fn finish_rejected(
                 rejected.failures(),
             )
         }
-        agenc_relay_types::FederationOpcode::Invite => {
+        agenc_relay_types::FederationOpcode::Kick | agenc_relay_types::FederationOpcode::Invite => {
+            let command = if opcode == agenc_relay_types::FederationOpcode::Kick {
+                "KICK"
+            } else {
+                "INVITE"
+            };
             crate::mutation_render::target_failure_replies(
                 context,
                 fresh.bound.ok_or(Violation::Codec)?,
-                "INVITE",
+                command,
                 rejected.failures(),
             )
         }

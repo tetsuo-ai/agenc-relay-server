@@ -1509,6 +1509,7 @@ fn an_edge_gives_a_labeled_channel_message_one_labeled_response() -> TestResult 
         .and_then(|()| exercise_labeled_channel_messages(&network))
         .and_then(|()| verify_labeled_public_topics(&network))
         .and_then(|()| verify_labeled_channel_modes(&network))
+        .and_then(|()| verify_labeled_kicks(&network))
         .and_then(|()| verify_labeled_departures(&network));
     let stopped_a = edge_a.stop();
     let stopped_b = edge_b.stop();
@@ -1834,6 +1835,139 @@ fn verify_departure_batch(frames: &[String], label: &str, outcomes: &[String]) -
         return Err(failure(format!(
             "wrong target decisions for {label}: {scoped:?}"
         )));
+    }
+    Ok(())
+}
+
+fn verify_labeled_kicks(network: &Network) -> TestResult {
+    for (node, actor, channel, first, second, watcher) in [
+        (
+            &network.coordinator,
+            "corekick",
+            "#corekick",
+            "cka",
+            "ckz",
+            "cwatchkick",
+        ),
+        (
+            &network.edge_a,
+            "edgekick",
+            "#edgekick",
+            "eka",
+            "ekz",
+            "ewatchkick",
+        ),
+    ] {
+        let mut owner = register_when_available(node, actor)?;
+        let mut observer = register_when_available(&network.edge_b, watcher)?;
+        let mut one = register_when_available(node, first)?;
+        let mut two = register_when_available(&network.edge_b, second)?;
+        for client in [&mut owner, &mut observer] {
+            client.send("CAP REQ :message-tags batch labeled-response")?;
+            client.read_until(|line| line.contains(" ACK "))?;
+        }
+        for (client, name) in [
+            (&mut owner, actor),
+            (&mut observer, watcher),
+            (&mut one, first),
+            (&mut two, second),
+        ] {
+            client.send(&format!("JOIN {channel}"))?;
+            client.read_until(|line| line.contains(&format!(" 366 {name} {channel} ")))?;
+        }
+        owner
+            .read_until(|line| line.contains(&format!(":{second}!")) && line.contains(" JOIN "))?;
+        let frames = labeled_exchange(
+            &mut owner,
+            "removeboth",
+            &format!("KICK {channel} {second},{first} :first removal"),
+        )?;
+        let outcomes = [
+            format!(" KICK {channel} {first} :first removal"),
+            format!(" KICK {channel} {second} :first removal"),
+        ];
+        verify_departure_batch(&frames, "removeboth", &outcomes)?;
+        for suffix in &outcomes {
+            if frames.iter().filter(|line| line.ends_with(suffix)).count() != 1 {
+                return Err(failure(format!(
+                    "{actor}: duplicate ordinary removal: {frames:?}"
+                )));
+            }
+        }
+        let mut count = 0;
+        let mut observed = observer.read_until(|line| {
+            if outcomes.iter().any(|suffix| line.ends_with(suffix)) {
+                count += 1;
+            }
+            count == 2
+        })?;
+        observer.send("PING :both-kicks-observed")?;
+        observed.extend(observer.read_until(|line| line.ends_with(" :both-kicks-observed"))?);
+        for suffix in &outcomes {
+            if observed
+                .iter()
+                .filter(|line| line.starts_with(&format!(":{actor}!")) && line.ends_with(suffix))
+                .count()
+                != 1
+            {
+                return Err(failure(format!(
+                    "{watcher}: expected one ordinary removal from {actor}: {observed:?}"
+                )));
+            }
+        }
+        for (client, suffix) in [(&mut one, &outcomes[0]), (&mut two, &outcomes[1])] {
+            client.read_until(|line| {
+                line.starts_with(&format!(":{actor}!")) && line.ends_with(suffix)
+            })?;
+        }
+        one.send(&format!("JOIN {channel}"))?;
+        one.read_until(|line| line.contains(&format!(" 366 {first} {channel} ")))?;
+        owner.read_until(|line| {
+            line.starts_with(&format!(":{first}!")) && line.contains(" JOIN ")
+        })?;
+        let frames = labeled_exchange(
+            &mut owner,
+            "mixedkick",
+            &format!("KICK {channel} nobody,{second},{first} :again"),
+        )?;
+        verify_departure_batch(
+            &frames,
+            "mixedkick",
+            &[
+                format!(" 401 {actor} nobody :No such nick"),
+                format!(" 401 {actor} {second} :No such nick"),
+                format!(" KICK {channel} {first} :again"),
+            ],
+        )?;
+        let frames = labeled_exchange(
+            &mut owner,
+            "absentkick",
+            &format!("KICK {channel} absentone,absenttwo"),
+        )?;
+        let refused = labeled_exchange(
+            &mut observer,
+            "unprivileged",
+            &format!("KICK {channel} absentone,absenttwo"),
+        )?;
+        if refused
+            .iter()
+            .filter(|line| line.starts_with("@label=unprivileged ") && line.contains(" 482 "))
+            .count()
+            != 1
+            || refused.iter().any(|line| line.contains(" 401 "))
+        {
+            return Err(failure(format!(
+                "target lookup escaped the original moderator check: {refused:?}"
+            )));
+        }
+        verify_departure_batch(
+            &frames,
+            "absentkick",
+            &[
+                format!(" 401 {actor} absentone :No such nick"),
+                format!(" 401 {actor} absenttwo :No such nick"),
+            ],
+        )?;
     }
     Ok(())
 }

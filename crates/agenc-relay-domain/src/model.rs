@@ -427,6 +427,18 @@ pub enum Visibility {
     Secret,
 }
 
+impl Visibility {
+    /// Authorize resolving KICK targets on an existing channel using the requester's
+    /// current membership. Hidden instances disclose nothing to nonmembers.
+    pub fn authorize_kick_targets(self, membership: Option<Role>) -> Result<(), DomainError> {
+        match membership {
+            None if self != Self::Listed => Err(DomainError::SecretUnavailable),
+            Some(role) if role >= Role::HalfOperator => Ok(()),
+            _ => Err(DomainError::Forbidden),
+        }
+    }
+}
+
 /// Channel content policy.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ContentPolicy {

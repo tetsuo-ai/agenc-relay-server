@@ -54,6 +54,9 @@ pub(crate) fn mutation_result_replies(
             agenc_relay_types::FederationOpcode::Part,
             plan.failures(),
         ),
+        CanonicalCommandView::Kick(_, _, _) => {
+            target_failure_replies(context, bound, "KICK", plan.failures())
+        }
         CanonicalCommandView::Message(message) => {
             message_failure_replies(context, bound, message.kind(), plan.failures())
         }

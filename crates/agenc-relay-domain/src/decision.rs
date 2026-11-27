@@ -2400,13 +2400,9 @@ impl DomainState {
         name: &ChannelNameValue,
     ) -> Result<(), DomainError> {
         let channel = self.privacy_safe_channel(session, name)?;
-        let Some(actor_role) = channel.role_of(session.user_id) else {
-            return Err(DomainError::Forbidden);
-        };
-        if actor_role < Role::HalfOperator {
-            return Err(DomainError::Forbidden);
-        }
-        Ok(())
+        channel
+            .visibility
+            .authorize_kick_targets(channel.role_of(session.user_id))
     }
 
     fn authorize_channel_message(
