@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::*;
 use agenc_relay_federation_wire::{DecodeBudget, access::vector};
 
