@@ -13,6 +13,9 @@ use agenc_relay_types::{FederationDirectoryQueryKind as QueryKind, SessionId};
 use crate::federation::codec::operations::FederatedOperation;
 use crate::federation::codec::{channel_name_object, nickname_object};
 
+#[cfg(test)]
+mod tests;
+
 type QueryArm = (QueryKind, SchemaObject);
 
 pub(super) fn operation(
@@ -145,12 +148,7 @@ fn arm(
 }
 
 fn channel_names(channels: &[ChannelNameValue]) -> Result<WireValue, DomainError> {
-    channels
-        .iter()
-        .map(|channel| channel_name_object(channel.canonical()))
-        .collect::<Result<Vec<_>, _>>()
-        .map(WireValue::Vector)
-        .map_err(invalid)
+    target_vector(channels, |channel| channel_name_object(channel.canonical()))
 }
 
 fn channel_name(channel: &ChannelNameValue) -> Result<WireValue, DomainError> {
@@ -160,12 +158,23 @@ fn channel_name(channel: &ChannelNameValue) -> Result<WireValue, DomainError> {
 }
 
 fn nicknames(names: &[NicknameValue]) -> Result<WireValue, DomainError> {
-    names
-        .iter()
-        .map(nickname_object)
-        .collect::<Result<Vec<_>, _>>()
-        .map(WireValue::Vector)
-        .map_err(invalid)
+    target_vector(names, nickname_object)
+}
+
+// Wire vectors also bound their backing allocation. A geometrically growing collector
+// can reserve 32 elements for a valid 20-target command or eight for five USERHOST names.
+fn target_vector<T>(
+    targets: &[T],
+    encode: impl Fn(&T) -> Result<SchemaObject, CodecError>,
+) -> Result<WireValue, DomainError> {
+    let mut objects = Vec::new();
+    objects
+        .try_reserve_exact(targets.len())
+        .map_err(|_| DomainError::AllocationFailed)?;
+    for target in targets {
+        objects.push(encode(target).map_err(invalid)?);
+    }
+    Ok(WireValue::Vector(objects))
 }
 
 fn nickname(name: &NicknameValue) -> Result<WireValue, DomainError> {
