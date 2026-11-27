@@ -90,6 +90,16 @@ pub(super) fn capture(
     }) else {
         return Ok(());
     };
+    if let PendingKind::Command {
+        message,
+        echo_channels: Some(EchoChannels::Message(_)),
+    } = &pending.kind
+        && frames
+            .last()
+            .is_some_and(|frame| !original_message_echo(message, frame))
+    {
+        return Ok(());
+    }
     let Some(frame) = frames.pop() else {
         return Ok(());
     };
@@ -123,12 +133,28 @@ fn hold_echo(
         return Err(Violation::Consistency);
     }
     check_departure_reply(parted_channel, &frame, &pending.replies)?;
+    if let PendingKind::Command {
+        message,
+        echo_channels: Some(EchoChannels::Message(_)),
+    } = &pending.kind
+    {
+        check_message_replies(
+            message,
+            pending
+                .message_echoes
+                .iter()
+                .filter(|held| held.event != header.event_id)
+                .map(|held| &held.frame)
+                .chain(std::iter::once(&frame)),
+            &pending.replies,
+        )?;
+    }
     if let Some(held) = pending
         .message_echoes
         .iter_mut()
         .find(|echo| echo.event == header.event_id)
     {
-        if held.parted_channel != parted_channel {
+        if held.parted_channel != parted_channel || held.frame.middle() != frame.middle() {
             return Err(Violation::Consistency);
         }
         held.frame = frame;
@@ -270,6 +296,75 @@ fn check_departure_reply(
         .iter()
         .any(|reply| matches!(reply.middle(), [_, refused] if refused.eq_ignore_ascii_case(parted)))
     {
+        return Err(Violation::Consistency);
+    }
+    Ok(())
+}
+
+/// A result or a later echo must agree with the original target dispositions,
+/// whichever arrives first. Unqualified user policy errors can only cover users
+/// with no named decision or accepted echo.
+pub(super) fn validate_message_replies(
+    pending: &PendingRequest,
+    replies: &[WireMessage],
+) -> Result<(), Violation> {
+    let PendingKind::Command { message, .. } = &pending.kind else {
+        return Err(Violation::Consistency);
+    };
+    check_message_replies(
+        message,
+        pending.message_echoes.iter().map(|held| &held.frame),
+        replies,
+    )
+}
+
+fn original_message_echo(message: &ParsedMessage, frame: &WireMessage) -> bool {
+    matches!(frame.middle(), [name] if message.middle().first().is_some_and(|names|
+        names.split(',').any(|original| original.eq_ignore_ascii_case(name))))
+        && message.command() == frame.command()
+        && message.trailing() == frame.trailing()
+}
+
+fn check_message_replies<'a>(
+    message: &ParsedMessage,
+    echoes: impl Iterator<Item = &'a WireMessage>,
+    replies: &[WireMessage],
+) -> Result<(), Violation> {
+    let names = message.middle().first().ok_or(Violation::Consistency)?;
+    let mut accepted = 0u8;
+    for echo in echoes {
+        let [name] = echo.middle() else {
+            return Err(Violation::Consistency);
+        };
+        let index = names
+            .split(',')
+            .position(|target| target.eq_ignore_ascii_case(name))
+            .filter(|index| *index < 4)
+            .ok_or(Violation::Consistency)?;
+        let bit = 1 << index;
+        if accepted & bit != 0
+            || replies.iter().any(|reply| {
+                reply.middle().last().is_some_and(|refused| {
+                    reply.command() != "481" && refused.eq_ignore_ascii_case(name)
+                })
+            })
+        {
+            return Err(Violation::Consistency);
+        }
+        accepted |= bit;
+    }
+    let available_users = names
+        .split(',')
+        .enumerate()
+        .filter(|(index, name)| {
+            *index < 4 && !name.starts_with('#') && accepted & (1 << index) == 0
+        })
+        .count();
+    let refused_users = replies
+        .iter()
+        .filter(|reply| matches!(reply.command(), "401" | "481"))
+        .count();
+    if refused_users > available_users {
         return Err(Violation::Consistency);
     }
     Ok(())

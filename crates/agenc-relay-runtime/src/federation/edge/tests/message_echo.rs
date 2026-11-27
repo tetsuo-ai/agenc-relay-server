@@ -76,6 +76,69 @@ fn edge_with(command: &str, opcode: FederationOpcode) -> TestResult<EdgeFederati
     Ok(edge)
 }
 
+#[test]
+fn message_echoes_and_refusals_bind_the_same_original_targets_in_either_order() -> TestResult {
+    let request = parse_message(FramedLine::new("PRIVMSG bob,#Room :hi")?)?.ok_or("request")?;
+    let echo = |name, text| WireMessage::new("sam!u-a@h-b.invalid", "PRIVMSG", &[name], Some(text));
+    let room = echo("#room", "hi")?;
+    let bob = echo("Bob", "hi")?;
+    let other = echo("#other", "hi")?;
+    let denied = agenc_relay_client_wire::numeric_reply(
+        "edge.example",
+        482,
+        "Sam",
+        &["#ROOM"],
+        Some("Permission denied for channel"),
+    )?;
+    let missing = agenc_relay_client_wire::numeric_reply(
+        "edge.example",
+        401,
+        "Sam",
+        &["bob"],
+        Some("No such nick"),
+    )?;
+    let private = agenc_relay_client_wire::numeric_reply(
+        "edge.example",
+        481,
+        "Sam",
+        &[],
+        Some("Command is unavailable"),
+    )?;
+    assert!(original_message_echo(&request, &room));
+    for unmatched in [
+        &other,
+        &echo("#room", "other")?,
+        &WireMessage::new("sam", "NOTICE", &["#room"], Some("hi"))?,
+    ] {
+        assert!(!original_message_echo(&request, unmatched));
+    }
+    assert_eq!(
+        check_message_replies(&request, [&room, &bob].into_iter(), &[]),
+        Ok(())
+    );
+    assert_eq!(
+        check_message_replies(
+            &request,
+            [&room].into_iter(),
+            std::slice::from_ref(&private)
+        ),
+        Ok(())
+    );
+    for (frames, refusals) in [
+        (vec![&room, &room], vec![]),
+        (vec![&other], vec![]),
+        (vec![&room], vec![denied]),
+        (vec![&bob], vec![missing]),
+        (vec![&bob], vec![private]),
+    ] {
+        assert_eq!(
+            check_message_replies(&request, frames.into_iter(), &refusals),
+            Err(Violation::Consistency)
+        );
+    }
+    Ok(())
+}
+
 /// The labeled channel message most cases send.
 fn labeled_message() -> TestResult<EdgeFederation> {
     edge_with("@label=m1 PRIVMSG #edge :hi", FederationOpcode::Message)

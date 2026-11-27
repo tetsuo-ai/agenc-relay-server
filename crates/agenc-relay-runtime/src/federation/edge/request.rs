@@ -31,6 +31,11 @@ use crate::state_core::StateCoreContext;
 #[path = "departure.rs"]
 mod departure;
 pub(crate) use departure::PartRequester;
+#[path = "requester.rs"]
+mod requester;
+use requester::ReplyRequester;
+#[path = "message_results.rs"]
+mod message_results;
 
 /// What the router does when a request finishes.
 pub enum EdgeCompletion {
@@ -179,6 +184,7 @@ pub enum EdgeCompletion {
 pub(crate) enum EchoChannels {
     Topic(agenc_relay_types::ChannelInstanceId),
     UnlabeledPart(PartRequester),
+    Message(message_results::MessageRequester),
     Part {
         channels: Vec<agenc_relay_types::ChannelInstanceId>,
         reason: String,
@@ -843,6 +849,16 @@ fn route_command(
             message,
         );
     }
+    if let CanonicalCommandView::Message(command) = command.view() {
+        return message_results::route(
+            edge,
+            context,
+            generation,
+            (session_id, user_id),
+            command,
+            message,
+        );
+    }
     if let Some(answered) = local_answer(edge, context, kind, user_id, &message, &command) {
         return Routed::local(answered, message);
     }
@@ -1458,9 +1474,7 @@ fn operation_of(
                 reason: reason.map_or(String::new(), |reason| reason.as_str().to_owned()),
             })
         }
-        CanonicalCommandView::Message(message_command) => {
-            message_operation(edge, session_id, message, message_command)
-        }
+        CanonicalCommandView::Message(_) => Err(DomainError::InvariantViolation),
         CanonicalCommandView::Presence(PresenceCommand::Away(away)) => {
             Ok(FederatedOperation::Away {
                 session_id,
@@ -1665,10 +1679,19 @@ fn message_operation(
     session_id: SessionId,
     message: &ParsedMessage,
     command: &agenc_relay_domain::MessageCommand,
-) -> Result<FederatedOperation, DomainError> {
+) -> Result<(Option<FederatedOperation>, u8), DomainError> {
     let mut targets = Vec::new();
-    for target in command.targets() {
-        targets.push(message_target_arg(edge, target)?);
+    let mut absent = 0;
+    for (index, target) in command.targets().iter().enumerate() {
+        match message_target_arg(edge, target) {
+            Err(DomainError::NotFound) if matches!(target, MessageTarget::Channel(_)) => {
+                absent |= 1 << index;
+            }
+            target => targets.push(target?),
+        }
+    }
+    if targets.is_empty() {
+        return Ok((None, absent));
     }
     targets.sort_by_key(|target| match target {
         MessageTargetArg::Channel { channel_id, .. } => (1_u16, channel_id.as_bytes().to_vec()),
@@ -1682,17 +1705,20 @@ fn message_operation(
         .collect();
     tags.sort();
     let kind = command.kind();
-    Ok(FederatedOperation::Message {
-        session_id,
-        kind,
-        targets,
-        tags,
-        body: if kind == MessageKind::Tagmsg {
-            String::new()
-        } else {
-            command.body().map_or(String::new(), str::to_owned)
-        },
-    })
+    Ok((
+        Some(FederatedOperation::Message {
+            session_id,
+            kind,
+            targets,
+            tags,
+            body: if kind == MessageKind::Tagmsg {
+                String::new()
+            } else {
+                command.body().map_or(String::new(), str::to_owned)
+            },
+        }),
+        absent,
+    ))
 }
 
 fn message_target_arg(
@@ -1774,6 +1800,14 @@ pub(super) fn receive_result(
         replies.push(reply_frame(&edge.config.server_name, reply)?);
     }
     project_join_result(context, pending, &checked.arm, &mut replies)?;
+    if let PendingKind::Command {
+        message,
+        echo_channels: Some(EchoChannels::Message(requester)),
+    } = &pending.kind
+    {
+        requester.project(context.server_prefix(), message, &checked.arm, &mut replies)?;
+        super::message_echo::validate_message_replies(pending, &replies)?;
+    }
     if let PendingKind::Command {
         message,
         echo_channels:
@@ -2147,7 +2181,12 @@ fn completed_request(
         (
             PendingKind::Command {
                 message,
-                echo_channels: Some(EchoChannels::Part { .. } | EchoChannels::UnlabeledPart(_)),
+                echo_channels:
+                    Some(
+                        EchoChannels::Part { .. }
+                        | EchoChannels::UnlabeledPart(_)
+                        | EchoChannels::Message(_),
+                    ),
             },
             ResultArm::Failed { .. },
         ) if !pending.replies.is_empty() => super::message_echo::complete(

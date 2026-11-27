@@ -1180,20 +1180,44 @@ fn finish_rejected(
         .first()
         .map_or(DomainError::BadState, |failure| failure.error());
     let opcode = fresh.header.opcode;
-    if !matches!(
-        opcode,
-        agenc_relay_types::FederationOpcode::Join | agenc_relay_types::FederationOpcode::Part
-    ) {
-        return finish_failed(coordinator, context, link, peer, fresh, error);
+    let replies = match opcode {
+        agenc_relay_types::FederationOpcode::Join | agenc_relay_types::FederationOpcode::Part => {
+            crate::mutation_render::membership_failure_replies(
+                context,
+                fresh.bound.ok_or(Violation::Codec)?,
+                opcode,
+                rejected.failures(),
+            )
+        }
+        agenc_relay_types::FederationOpcode::Message => {
+            let Some(agenc_relay_domain::CanonicalCommandView::Message(message)) = fresh
+                .command
+                .as_ref()
+                .map(agenc_relay_domain::CanonicalCommand::view)
+            else {
+                return Err(Violation::Codec);
+            };
+            if rejected.is_silent() {
+                return finish_without_plan(
+                    coordinator,
+                    context,
+                    link,
+                    peer,
+                    fresh,
+                    ResultArm::NoContent,
+                    Vec::new(),
+                );
+            }
+            crate::mutation_render::message_failure_replies(
+                context,
+                fresh.bound.ok_or(Violation::Codec)?,
+                message.kind(),
+                rejected.failures(),
+            )
+        }
+        _ => return finish_failed(coordinator, context, link, peer, fresh, error),
     }
-    let bound = fresh.bound.ok_or(Violation::Codec)?;
-    let replies = crate::mutation_render::membership_failure_replies(
-        context,
-        bound,
-        opcode,
-        rejected.failures(),
-    )
-    .map_err(|_| Violation::Codec)?;
+    .map_err(internal_violation)?;
     let code = if error == DomainError::LimitExceeded {
         "SERVER_BUSY"
     } else {
