@@ -1717,7 +1717,8 @@ fn verify_labeled_departures(network: &Network) -> TestResult {
                 .iter()
                 .filter(|line| line.ends_with(&suffix))
                 .collect();
-            if copies.len() != 1 || !copies[0].starts_with(&format!("@batch={batch} :{nick}!")) {
+            if !matches!(copies.as_slice(), [only] if only.starts_with(&format!("@batch={batch} :{nick}!")))
+            {
                 return Err(failure(format!(
                     "{nick} did not receive its unique departure from {channel}"
                 )));

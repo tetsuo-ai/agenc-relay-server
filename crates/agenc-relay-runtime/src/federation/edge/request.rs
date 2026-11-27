@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 use super::{
     DeferredCarrier, DeferredCommand, EdgeFederation, MAX_DEFERRED_COMMANDS, Phase, Violation,
 };
+use crate::budget::MemoryPermit;
 use crate::connection::ConnectionGeneration;
 use crate::federation::codec::operations::{
     FederatedOperation, JoinTarget, MessageTargetArg, ModeChangeArg, USER_MODE_CODE_WALLOPS,
@@ -176,6 +177,7 @@ pub(crate) enum EchoChannels {
     Part {
         channels: Vec<agenc_relay_types::ChannelInstanceId>,
         reason: String,
+        _backing: [MemoryPermit; 2],
     },
 }
 
@@ -209,7 +211,11 @@ pub(crate) enum PendingKind {
 }
 
 impl PendingKind {
-    fn for_operation(message: Box<ParsedMessage>, operation: FederatedOperation) -> Self {
+    fn for_operation(
+        message: Box<ParsedMessage>,
+        operation: FederatedOperation,
+        part_backing: Option<[MemoryPermit; 2]>,
+    ) -> Self {
         let echo_channels = match operation {
             FederatedOperation::Topic { channel_id, .. } => Some(EchoChannels::Topic(channel_id)),
             FederatedOperation::Part {
@@ -217,7 +223,11 @@ impl PendingKind {
                 channels,
                 reason,
                 ..
-            } => Some(EchoChannels::Part { channels, reason }),
+            } => part_backing.map(|backing| EchoChannels::Part {
+                channels,
+                reason,
+                _backing: backing,
+            }),
             _ => None,
         };
         Self::Command {
@@ -837,15 +847,57 @@ fn forward_command(
         Ok(requester) => requester,
         Err(error) => return Err((message, error)),
     };
+    // Acquire both retained allocations before encoding consumes the origin sequence.
+    let part_backing = match &operation {
+        FederatedOperation::Part {
+            all_channels: false,
+            channels,
+            reason,
+            ..
+        } if message
+            .tags()
+            .iter()
+            .any(|tag| tag.key() == "label" && tag.value().is_some())
+            && context
+                .sessions()
+                .capabilities_for_user(user_id)
+                .is_some_and(|caps| caps.enabled("labeled-response")) =>
+        {
+            match reserve_departure_backing(context, channels.capacity(), reason.capacity()) {
+                Ok(permits) => Some(permits),
+                Err(error) => return Err((message, error)),
+            }
+        }
+        _ => None,
+    };
     let Ok(prepared) = prepare_request(edge, context, generation, &operation) else {
         return Err((message, DomainError::ServerBusy));
     };
     let pending = match requester {
         Some(requester) => PendingKind::Join { message, requester },
-        None => PendingKind::for_operation(message, operation),
+        None => PendingKind::for_operation(message, operation, part_backing),
     };
     register_request(edge, context, generation, prepared, pending);
     Ok(Routed::Forwarded)
+}
+
+/// Charge the actual Vec and String capacities separately under the process budget.
+pub(super) fn reserve_departure_backing(
+    context: &StateCoreContext,
+    channel_capacity: usize,
+    reason_capacity: usize,
+) -> Result<[MemoryPermit; 2], DomainError> {
+    let channels = channel_capacity
+        .checked_mul(size_of::<agenc_relay_types::ChannelInstanceId>())
+        .ok_or(DomainError::ServerBusy)?;
+    Ok([
+        context
+            .reserve_output_backing(channels)
+            .map_err(|_| DomainError::ServerBusy)?,
+        context
+            .reserve_output_backing(reason_capacity)
+            .map_err(|_| DomainError::ServerBusy)?,
+    ])
 }
 
 fn join_requester(

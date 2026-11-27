@@ -199,6 +199,7 @@ fn labeled_targets(
             let Some(EchoChannels::Part {
                 channels,
                 reason: requested,
+                ..
             }) = echo_channels
             else {
                 return None;

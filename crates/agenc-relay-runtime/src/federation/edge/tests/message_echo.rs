@@ -188,6 +188,49 @@ fn only_the_original_topic_instance_actor_and_text_are_held() -> TestResult {
 }
 
 #[test]
+fn departure_backing_charges_both_allocations_before_the_request_can_be_sent() -> TestResult {
+    use super::super::request::reserve_departure_backing;
+    use crate::budget::MemoryCharge;
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let before = charged(context);
+    let channel_charge =
+        MemoryCharge::allocation(20 * size_of::<ChannelInstanceId>() as u64)?.bytes();
+    let reason_charge = MemoryCharge::allocation(256)?.bytes();
+    let permits = reserve_departure_backing(context, 20, 256)?;
+    assert_eq!(charged(context), before + channel_charge + reason_charge);
+    drop(permits);
+    assert_eq!(charged(context), before);
+    let empty_reason = reserve_departure_backing(context, 1, 0)?;
+    assert_eq!(
+        charged(context),
+        before + MemoryCharge::allocation(size_of::<ChannelInstanceId>() as u64)?.bytes()
+    );
+    drop(empty_reason);
+    assert!(matches!(
+        reserve_departure_backing(context, usize::MAX, 0),
+        Err(agenc_relay_domain::DomainError::ServerBusy)
+    ));
+    let available = context.backing_budget_for_test().available();
+    let all = context.reserve_kept_output(available)?;
+    assert!(matches!(
+        reserve_departure_backing(context, 20, 0),
+        Err(agenc_relay_domain::DomainError::ServerBusy)
+    ));
+    drop(all);
+    let guard = context.reserve_kept_output(available - channel_charge)?;
+    let held = charged(context);
+    assert!(matches!(
+        reserve_departure_backing(context, 20, 256),
+        Err(agenc_relay_domain::DomainError::ServerBusy)
+    ));
+    assert_eq!(charged(context), held);
+    drop(guard);
+    assert_eq!(charged(context), before);
+    Ok(())
+}
+
+#[test]
 fn a_departure_echo_belongs_to_one_original_instance_actor_and_reason() -> TestResult {
     let mut fixture = StateCoreFixture::new(Vec::new())?;
     let context = fixture.context_mut()?;
@@ -206,6 +249,7 @@ fn a_departure_echo_belongs_to_one_original_instance_actor_and_reason() -> TestR
         *echo_channels = Some(EchoChannels::Part {
             channels: vec![first, second],
             reason: reason.to_owned(),
+            _backing: super::super::request::reserve_departure_backing(context, 2, reason.len())?,
         });
         for (id, channel, actor, observed, expected, held_count) in [
             (1, foreign, SENDER, reason, Ok(false), 0),

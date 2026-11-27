@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1165
-reviewed_source_sha256 = "a52ebab0b524b37fca43889b044343fb2d0cbf7e1753f830612c036f583f10f7"
+reviewed_source_sha256 = "20e495bdf7f20275eeba37a7e004ef6dcad9f1e5ac513fca0025a7a2188c8f03"
 deferred = []
 
 [[region]]
@@ -654,3 +654,15 @@ end_line = 160
 span_sha256 = "800e984d91eb5ef31117d065d579b7531eb49b5dfad1e2d31b5afb76b9086f30"
 metric = "branches"
 reason = "A legacy JOIN refusal can name only the original canonical first operand."
+
+[[region]]
+id = "runtime-edge-original-departure-backing"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/federation/edge/request.rs"
+item = "reserve_departure_backing"
+source_sha256 = "6c7d95b168f66df202d6eca19eecabf7f1ca4a411014e5eb6189ba7ae9e4595f"
+start_line = 885
+end_line = 901
+span_sha256 = "c13addfad31945dd0f9c9a6384a0e34e23c0448a4ff2945b4d9f59091173d76a"
+metric = "branches"
+reason = "Before consuming an origin sequence, reserve both retained PART allocations by capacity. A refusal releases the first reservation and each original completion releases both."
