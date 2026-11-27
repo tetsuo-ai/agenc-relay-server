@@ -27,6 +27,18 @@ const CHANNEL: ChannelInstanceId = ChannelInstanceId::from_bytes([10; 16]);
 #[path = "encrypted.rs"]
 mod encrypted;
 
+#[test]
+fn generated_history_batch_references_are_distinct_and_fit_the_client_grammar() -> TestResult {
+    let mut references = std::collections::BTreeSet::new();
+    for value in 0..=u8::MAX {
+        let id = RequestId::from_bytes([value; 16]);
+        let reference = batch_reference(id);
+        agenc_relay_client_wire::validate_batch_reference(&reference)?;
+        assert!(references.insert(reference));
+    }
+    Ok(())
+}
+
 fn capabilities() -> TestResult<CapabilityState> {
     let names = [
         "message-tags",
@@ -215,7 +227,7 @@ fn fixture_with_options(
         Batch {
             channel: CHANNEL,
             query,
-            id: "history-test".into(),
+            id: batch_reference(ID),
             token: None,
             authorization: None,
             page: 0,
