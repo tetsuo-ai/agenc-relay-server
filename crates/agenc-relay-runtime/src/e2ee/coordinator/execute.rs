@@ -329,6 +329,7 @@ pub(crate) fn run_with_object(
             security_owner: origin
                 .account_digest
                 .filter(|_| assembled.blocks_account_deletion),
+            new_direct_binding: assembled.new_direct_binding,
             result: assembled.result,
             responses: assembled.responses,
             events: assembled.copies,
@@ -407,6 +408,20 @@ impl Fresh<'_> {
             ops::Prepared::Complete(outcome) => *outcome,
             ops::Prepared::Read(request) => return Ok(Prepared::Read(request)),
         };
+        // A unilateral reservation permits the named peer to retire. Both accounts must
+        // still exist in the same authoritative revision that stages their signed binding.
+        if let (
+            Some(pair),
+            request::ResultBody::Bound {
+                conversation_id, ..
+            },
+        ) = (outcome.new_direct_binding, &outcome.result)
+            && [pair.smaller(), pair.larger()]
+                .into_iter()
+                .any(|account| view.context.domain().account(account).is_none())
+        {
+            outcome = Outcome::failed(E2eeReplyCode::BindingAuthInvalid, conversation_id.to_vec());
+        }
         let base_plan = outcome.base_plan.take();
         if let Some(deadline) = outcome.mailbox_expiry {
             ops::mailbox_snapshot::reserve_expiry(
@@ -795,6 +810,7 @@ fn binding_plan(
 /// One assembled batch.
 struct Assembled {
     blocks_account_deletion: bool,
+    new_direct_binding: Option<agenc_relay_domain::e2ee::DirectPair>,
     result: Vec<u8>,
     responses: Vec<Vec<u8>>,
     copies: Vec<events::CopyToSend>,
@@ -1049,6 +1065,7 @@ fn assemble(
     Ok(Assembled {
         blocks_account_deletion: outcome.security_mutation
             || matches!(outcome.result, request::ResultBody::Reserved(..)),
+        new_direct_binding: outcome.new_direct_binding,
         result,
         responses,
         copies,

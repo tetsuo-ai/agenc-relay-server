@@ -338,6 +338,8 @@ pub struct Outcome {
     pub effects: Vec<Effect>,
     /// Whether the mutation is a security-state mutation (seven-day replay).
     pub security_mutation: bool,
+    /// Participants from the verified initial Direct binding, including a recreated pair.
+    pub(super) new_direct_binding: Option<agenc_relay_domain::e2ee::DirectPair>,
     /// The base domain plan the same batch applies, when the operation
     /// changes base state (a channel binding); its events join a
     /// cross-profile barrier at every target that also receives companion
@@ -360,6 +362,7 @@ impl Outcome {
             writes: Vec::new(),
             effects: Vec::new(),
             security_mutation: false,
+            new_direct_binding: None,
             base_plan: None,
         }
     }
@@ -378,6 +381,7 @@ impl Outcome {
             writes: Vec::new(),
             effects: Vec::new(),
             security_mutation: false,
+            new_direct_binding: None,
             base_plan: None,
         }
     }

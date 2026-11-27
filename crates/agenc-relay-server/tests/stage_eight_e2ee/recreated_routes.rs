@@ -9,6 +9,9 @@
 //! incarnation takes no traffic. Both accounts use edge A.
 #![forbid(unsafe_code)]
 
+#[path = "recreated_routes/account_deletion.rs"]
+mod account_deletion;
+
 use super::close_authority::{CertificationTransition, authorization};
 use super::recovery_submission::{attach_when_active, settle};
 use super::stage_ten_drills::wait_for_account_authority;

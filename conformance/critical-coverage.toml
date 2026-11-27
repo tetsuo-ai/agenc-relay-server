@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1177
-reviewed_source_sha256 = "05ded14c9050371c78173a808cae03a68fb4cde8e77279931621e45ed341e461"
+reviewed_source_files = 1180
+reviewed_source_sha256 = "7e466c282fd12a24225e2c9e342c2f734cbb4abe0dd2164ffff225bd477690e9"
 deferred = []
 
 [[region]]
@@ -276,7 +276,7 @@ id = "retained-route-account-membership"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/ops/route.rs"
 item = "member_route"
-source_sha256 = "20626e4f41339199dd11410ec0879f1ffe63b79a1483b7f39ace546a51deee1d"
+source_sha256 = "745d6eeba5192d0f81c7691f96974815057104fe3552447fb9078954ebadf0a2"
 start_line = 119
 end_line = 129
 span_sha256 = "6817aca6d024a6ca787fca7c66dca6a5f23fa00996827dcf8c71ad5a8f06ef78"
@@ -864,9 +864,33 @@ id = "pending-companion-security-account"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/mod.rs"
 item = "blocks_account_deletion"
-source_sha256 = "a371ce0f025e6f1dec4d9c45bc5ae482da2e356c02c5e9c739dcd4bf4c6c34a9"
-start_line = 1354
-end_line = 1354
-span_sha256 = "21794f8ca913b4779fbb2eef725ec1e1ed09bd5d71726a118fb34b1ed9e5d718"
+source_sha256 = "912b6fc15f93e99e941ccd92f1002477e8f8278bc72b5acc07a977ca68404265"
+start_line = 1360
+end_line = 1364
+span_sha256 = "ac6f1a53060042e1e06665766ddfb8a9d85b7c0debd2f0fddf84802e7721ec69"
 metric = "branches"
-reason = "Only its authenticated owner is held by a staged security transition or successfully granted reservation."
+reason = "A staged security transition holds its authenticated account. A staged Direct binding also holds the other verified participant."
+
+[[region]]
+id = "fixed-direct-account-participation"
+category = "authorization-decisions"
+file = "crates/agenc-relay-domain/src/e2ee/route_table/account_participation.rs"
+item = "refresh_account_participation"
+source_sha256 = "8ca927c705cf12407cefb96b22cca0c122bd832ed137ee3f86924c82fc9ab4a9"
+start_line = 36
+end_line = 39
+span_sha256 = "f0b909a094d99ec99124b2a8ea4386aaf7e92a1c8d8647fdb241f2df35844301"
+metric = "branches"
+reason = "The current pair retains both accounts during active, closing and unresolved recovery states and releases both after a verified close."
+
+[[region]]
+id = "binding-participants-at-deletion"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/execute.rs"
+item = "stage"
+source_sha256 = "80094e45fac6e0a8166bf25947c82c3aaccc8edf97bfab1334bf5fa445ef1aae"
+start_line = 419
+end_line = 421
+span_sha256 = "bc78021937bbaaa6642f7e5014ae775a2e15b808274a68312737e5931cd1cf39"
+metric = "branches"
+reason = "A signed initial Direct binding requires both original accounts at its authoritative staging revision."
