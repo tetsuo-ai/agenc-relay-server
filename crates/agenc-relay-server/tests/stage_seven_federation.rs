@@ -1861,6 +1861,8 @@ fn verify_labeled_channel_modes(network: &Network) -> TestResult {
             agenc_relay_types::AccountRandomId::from_bytes([71; 16]).to_text()
         );
         let voice = format!("+v {second}");
+        let vector = format!("+o-o {second} {second}");
+        let half_operator = format!("+h {second}");
         for (label, request, local, projected) in [
             ("moderated", "+m", "+m", "+m"),
             ("key", "+k private-test-key", "+k", "+k *"),
@@ -1868,6 +1870,7 @@ fn verify_labeled_channel_modes(network: &Network) -> TestResult {
             ("clear", "-m", "-m", "-m"),
             ("voice", voice.as_str(), voice.as_str(), voice.as_str()),
             ("mask", mask.as_str(), mask.as_str(), mask.as_str()),
+            ("compoundprefix", &vector, &vector, &half_operator),
         ] {
             // The coordinator omits a join key. The federation projection sends presence only.
             let expected = if node.public_address == network.coordinator.public_address {
@@ -1891,7 +1894,12 @@ fn verify_labeled_channel_modes(network: &Network) -> TestResult {
                 )));
             }
             let end = format!(" MODE {channel} {projected}");
-            let mut broadcast = observer.read_until(|line| line.ends_with(&end))?;
+            let mut broadcast =
+                observer
+                    .read_until(|line| line.ends_with(&end))
+                    .map_err(|error| {
+                        failure(format!("observer awaiting {first} mode {label}: {error}"))
+                    })?;
             let barrier = format!("observed-{label}");
             observer.send(&format!("PING :{barrier}"))?;
             broadcast.extend(observer.read_until(|line| line.ends_with(&format!(" :{barrier}")))?);

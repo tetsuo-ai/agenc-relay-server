@@ -300,7 +300,10 @@ fn original_user_mode(
         && params.next().is_none()
 }
 
-fn label_negotiated(message: &ParsedMessage, capabilities: Option<&CapabilityState>) -> bool {
+pub(super) fn label_negotiated(
+    message: &ParsedMessage,
+    capabilities: Option<&CapabilityState>,
+) -> bool {
     capabilities.is_some_and(|state| state.enabled("labeled-response"))
         && message
             .tags()

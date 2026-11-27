@@ -5342,7 +5342,7 @@ fn resolve_mode_role_subject(
     ))
 }
 
-fn resulting_role(
+pub(crate) fn resulting_role(
     current: Role,
     operation: ModeOperation,
     requested: Role,
