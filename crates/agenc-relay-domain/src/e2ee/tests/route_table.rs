@@ -4,6 +4,9 @@
 //! recreate isolation, plaintext downgrade rules, recovery gates, and the
 //! netjoin collision rule.
 
+#[path = "route_participation.rs"]
+mod account_participation;
+
 use std::error::Error;
 
 use agenc_relay_types::{AccountId, AccountRandomId, ChannelInstanceId};

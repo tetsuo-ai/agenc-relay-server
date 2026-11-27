@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod account_retirement;
 mod earlier_stores;
 mod reserved_pair;
 mod row_mismatch;

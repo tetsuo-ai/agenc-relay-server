@@ -19,6 +19,7 @@ use agenc_relay_types::{AccountId, ChannelInstanceId};
 
 use crate::error::DomainError;
 
+mod account_participation;
 mod binding_change;
 mod successor;
 
@@ -258,6 +259,8 @@ pub struct RouteTable {
     /// Superseded instances stay encrypted until destruction of that exact instance.
     retired_channels: BTreeSet<ChannelInstanceId>,
     by_pair: BTreeMap<DirectPair, ConversationId>,
+    /// Both account directions of each current Direct pair awaiting a verified close.
+    unclosed_direct: BTreeSet<(AccountId, AccountId)>,
     locks: BTreeMap<SemanticLockId, ConversationId>,
     /// The newest incarnation of each semantic route.
     lineages: BTreeMap<SemanticLockId, ConversationId>,
@@ -517,6 +520,7 @@ impl RouteTable {
         self.locks.insert(entry.lock, entry.conversation_id);
         self.lineages.insert(entry.lineage, entry.conversation_id);
         self.routes.insert(entry.conversation_id, entry);
+        self.refresh_account_participation(entry.target);
     }
 
     /// Replaces the binding of a live route in place (a same-group route
@@ -585,6 +589,8 @@ impl RouteTable {
         match (entry.lifecycle, entry.recovery) {
             (RouteLifecycle::Closing, RecoveryState::Normal) => {
                 entry.lifecycle = RouteLifecycle::Tombstone { close_id };
+                let target = entry.target;
+                self.refresh_account_participation(target);
                 Ok(())
             }
             _ => Err(RouteConflict::BadState),
@@ -651,6 +657,8 @@ impl RouteTable {
             (RecoveryState::Closed, Some(close_id)) => {
                 entry.recovery = RecoveryState::Closed;
                 entry.lifecycle = RouteLifecycle::Tombstone { close_id };
+                let target = entry.target;
+                self.refresh_account_participation(target);
                 Ok(())
             }
             (RecoveryState::Conflict, None) => {
@@ -690,12 +698,17 @@ impl RouteTable {
         if let Some(previous) = self.routes.get(&entry.conversation_id).copied()
             && previous.target != entry.target
         {
+            // A continued binding may move between channel instances. A fixed Direct pair
+            // keeps its kind and both accounts throughout its binding chain.
+            let (RouteTarget::Channel(old), RouteTarget::Channel(_)) =
+                (previous.target, entry.target)
+            else {
+                return;
+            };
             if entry.binding_generation <= previous.binding_generation {
                 return;
             }
-            if let RouteTarget::Channel(old) = previous.target
-                && self.by_channel.get(&old) == Some(&entry.conversation_id)
-            {
+            if self.by_channel.get(&old) == Some(&entry.conversation_id) {
                 self.by_channel.remove(&old);
                 self.retired_channels.insert(old);
             }
@@ -734,6 +747,7 @@ impl RouteTable {
                 }
                 RouteTarget::Direct(pair) => {
                     self.by_pair.insert(pair, id);
+                    self.refresh_account_participation(entry.target);
                 }
             }
         }
@@ -789,6 +803,9 @@ impl RouteTable {
             .collect();
         for (heir, shared) in heirs {
             self.take_indexes(&heir, shared);
+        }
+        if vacated.target {
+            self.refresh_account_participation(entry.target);
         }
     }
 }

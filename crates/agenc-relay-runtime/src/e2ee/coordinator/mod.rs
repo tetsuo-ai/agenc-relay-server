@@ -479,6 +479,8 @@ pub struct PendingCompanion {
     pub request_object_id: [u8; 32],
     /// Authenticated owner of this pending security transition or successful route grant.
     pub(crate) security_owner: Option<[u8; 32]>,
+    /// Both participants of a verified Direct binding staged for commit.
+    pub(crate) new_direct_binding: Option<agenc_relay_domain::e2ee::DirectPair>,
     /// The encoded result object.
     pub result: Vec<u8>,
     /// Response objects in descriptor order.
@@ -1337,9 +1339,10 @@ impl CompanionCoordinator {
             .is_some_and(|queue| !queue.is_empty())
     }
 
-    /// An issued route reservation belongs to its authenticated requester. Both local
-    /// and forwarded confirmations inspect its authoritative lease immediately before
-    /// staging. A missing trusted clock cannot release a retained lease early.
+    /// Both local and forwarded confirmations consult the same current pair, pending
+    /// security owner and reservation. A unilateral grant holds its requester. A verified
+    /// Direct binding holds both participants from staging through the route's close.
+    /// A missing trusted clock cannot release a retained lease early.
     pub(crate) fn blocks_account_deletion(
         &self,
         context: &crate::state_core::StateCoreContext,
@@ -1356,7 +1359,14 @@ impl CompanionCoordinator {
         if self.state.pending_roots.contains_key(&owner) {
             return true;
         }
-        if matches!(&self.pending, Some(sync::PendingWork::Request(work)) if work.security_owner == Some(owner))
+        if self.state.routes.has_unclosed_direct(account) {
+            return true;
+        }
+        if let Some(sync::PendingWork::Request(work)) = &self.pending
+            && (work
+                .new_direct_binding
+                .is_some_and(|pair| account == pair.smaller() || account == pair.larger())
+                || work.security_owner == Some(owner))
         {
             return true;
         }

@@ -740,6 +740,9 @@ pub fn bind(exec: &mut Exec<'_>) -> Result<Outcome, Fail> {
             .map_err(|_| Fail::from(E2eeReplyCode::InvalidFragment))?,
     );
     outcome.security_mutation = true;
+    if let agenc_relay_domain::e2ee::RouteTarget::Direct(pair) = entry.target {
+        outcome.new_direct_binding = Some(pair);
+    }
     if let Some(instance) = verified.channel_instance_id {
         outcome.base_plan = (exec.plan_binding)(
             ChannelInstanceId::from_bytes(instance),

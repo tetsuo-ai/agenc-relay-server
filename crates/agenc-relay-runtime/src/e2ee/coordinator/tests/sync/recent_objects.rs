@@ -200,6 +200,7 @@ fn an_answered_request_releases_its_objects() -> TestResult {
             },
             request_object_id: object_id(&answered.request),
             security_owner: None,
+            new_direct_binding: None,
             result: Vec::new(),
             responses: Vec::new(),
             events: Vec::new(),
