@@ -371,6 +371,44 @@ async fn a_local_query_needs_a_registered_connection() -> TestResult {
 }
 
 #[tokio::test]
+async fn local_refusals_and_forwarded_mutations_share_one_physical_command_budget() -> TestResult {
+    use super::request_refusals::{command, registered_edge};
+    use crate::admission::{BucketDemand, BucketKey, BucketKind, RateLimits};
+    let mut fixture = StateCoreFixture::new(entropy_script())?;
+    let context = fixture.context_mut()?;
+    let mut edge = registered_edge(context)?;
+    project_own_session(&mut edge)?;
+    let rate = BucketKind::RegisteredCommand;
+    let key = BucketKey::Session(UserId::from_bytes([42; 16]));
+    let limits = RateLimits::defaults();
+    context.buckets_mut().reload(limits);
+    let now = context.now();
+    let demand = BucketDemand::new(rate, key, limits.rate(rate).burst() - 2)?;
+    context
+        .buckets_mut()
+        .charge_all_or_nothing(now, &[demand])
+        .map_err(|_| "reserve two commands")?;
+    // This fixture has no live response sink. The local operation still costs exactly one token.
+    assert_eq!(
+        command(&mut edge, context, "PART #absent,#missing")?,
+        Err(agenc_relay_domain::DomainError::RegistrationRequired)
+    );
+    assert_eq!(context.buckets_mut().available(now, rate, key), 1);
+    assert_eq!(command(&mut edge, context, "AWAY :here")?, Ok(()));
+    assert_eq!(edge.pending.len(), 1);
+    assert_eq!(context.buckets_mut().available(now, rate, key), 0);
+    for next in ["PART #another,#missing", "LUSERS", "AWAY :again"] {
+        assert_eq!(
+            command(&mut edge, context, next)?,
+            Err(agenc_relay_domain::DomainError::ServerBusy)
+        );
+    }
+    assert!(edge.deferred.is_empty());
+    assert_eq!(edge.pending.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_local_query_is_charged_as_a_registered_command() -> TestResult {
     use super::request_refusals::{command, registered_edge};
     use crate::admission::{BucketDemand, BucketKey, BucketKind, RateLimits};

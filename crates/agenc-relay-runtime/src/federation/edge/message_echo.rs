@@ -122,6 +122,7 @@ fn hold_echo(
     {
         return Err(Violation::Consistency);
     }
+    check_departure_reply(parted_channel, &frame, &pending.replies)?;
     if let Some(held) = pending
         .message_echoes
         .iter_mut()
@@ -241,6 +242,37 @@ fn departure_targets(
         return None;
     };
     (channels.contains(channel_id) && requested == reason).then_some(channels.len())
+}
+
+/// Whether any already held successful PART contradicts a scoped refusal in the result.
+pub(super) fn validate_departure_replies(
+    pending: &PendingRequest,
+    replies: &[WireMessage],
+) -> Result<(), Violation> {
+    for echo in &pending.message_echoes {
+        check_departure_reply(echo.parted_channel, &echo.frame, replies)?;
+    }
+    Ok(())
+}
+
+fn check_departure_reply(
+    channel: Option<ChannelInstanceId>,
+    frame: &WireMessage,
+    replies: &[WireMessage],
+) -> Result<(), Violation> {
+    if channel.is_none() {
+        return Ok(());
+    }
+    let [parted] = frame.middle() else {
+        return Err(Violation::Consistency);
+    };
+    if replies
+        .iter()
+        .any(|reply| matches!(reply.middle(), [_, refused] if refused.eq_ignore_ascii_case(parted)))
+    {
+        return Err(Violation::Consistency);
+    }
+    Ok(())
 }
 
 fn commits_at(result: &ResultArm, generation: u64) -> bool {

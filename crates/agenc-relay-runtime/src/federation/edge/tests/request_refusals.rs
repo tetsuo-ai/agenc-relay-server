@@ -282,6 +282,7 @@ async fn a_full_deferred_queue_answers_server_busy() -> TestResult {
         .get_mut(&CONNECTION)
         .ok_or("origin")?
         .join_names_pending = true;
+    admit_queue_test_session(context, UserId::from_bytes([42; 16]))?;
     fill_deferred_query_queue(&mut edge, context, CONNECTION)?;
     assert!(matches!(
         queue_deferred_query(&mut edge, context, CONNECTION)?,

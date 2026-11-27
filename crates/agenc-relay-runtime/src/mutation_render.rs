@@ -29,7 +29,8 @@ const NAMES_CHUNK_BYTES: usize = 8_000;
 mod join;
 mod local_join;
 pub(crate) use join::{
-    JoinRequester, join_result_frames, join_result_replies, refused_join_replies,
+    JoinRequester, join_result_frames, join_result_replies, membership_failure_replies,
+    original_channel_targets,
 };
 pub(crate) use local_join::render_local_join_start;
 
@@ -45,6 +46,12 @@ pub(crate) fn mutation_result_replies(
 ) -> Result<Vec<agenc_relay_federation_wire::SchemaObject>, RuntimeError> {
     match command.view() {
         CanonicalCommandView::Join(_) => join_result_replies(context, bound, command, plan),
+        CanonicalCommandView::Part(_, _) => membership_failure_replies(
+            context,
+            bound,
+            agenc_relay_types::FederationOpcode::Part,
+            plan.failures(),
+        ),
         CanonicalCommandView::Presence(PresenceCommand::Away(_)) => {
             away_result_replies(context, bound, command, plan)
         }

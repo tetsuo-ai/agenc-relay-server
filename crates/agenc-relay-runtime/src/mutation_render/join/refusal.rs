@@ -136,7 +136,9 @@ impl JoinRequester {
     }
 }
 
-fn original_targets(request: &ParsedMessage) -> Result<Vec<ChannelNameValue>, RuntimeError> {
+pub(crate) fn original_targets(
+    request: &ParsedMessage,
+) -> Result<Vec<ChannelNameValue>, RuntimeError> {
     let mut targets = Vec::new();
     let names = request.middle().first().ok_or(RuntimeError::InvalidValue)?;
     for text in names.split(',') {

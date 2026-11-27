@@ -28,6 +28,10 @@ use crate::federation::codec::operations::{
 use crate::federation::codec::results::{ResultArm, failure_error, reply_parts_of};
 use crate::state_core::StateCoreContext;
 
+#[path = "departure.rs"]
+mod departure;
+pub(crate) use departure::PartRequester;
+
 /// What the router does when a request finishes.
 pub enum EdgeCompletion {
     /// The coordinator durably revoked this local session.
@@ -174,9 +178,11 @@ pub enum EdgeCompletion {
 /// Physical channels selected when the originating command was admitted.
 pub(crate) enum EchoChannels {
     Topic(agenc_relay_types::ChannelInstanceId),
+    UnlabeledPart(PartRequester),
     Part {
         channels: Vec<agenc_relay_types::ChannelInstanceId>,
         reason: String,
+        requester: PartRequester,
         _backing: MemoryPermitBatch,
     },
 }
@@ -214,7 +220,7 @@ impl PendingKind {
     fn for_operation(
         message: Box<ParsedMessage>,
         operation: FederatedOperation,
-        part_backing: Option<MemoryPermitBatch>,
+        part: Option<(PartRequester, Option<MemoryPermitBatch>)>,
     ) -> Self {
         let echo_channels = match operation {
             FederatedOperation::Topic { channel_id, .. } => Some(EchoChannels::Topic(channel_id)),
@@ -223,10 +229,14 @@ impl PendingKind {
                 channels,
                 reason,
                 ..
-            } => part_backing.map(|backing| EchoChannels::Part {
-                channels,
-                reason,
-                _backing: backing,
+            } => part.map(|(requester, backing)| match backing {
+                Some(backing) => EchoChannels::Part {
+                    channels,
+                    reason,
+                    requester,
+                    _backing: backing,
+                },
+                None => EchoChannels::UnlabeledPart(requester),
             }),
             _ => None,
         };
@@ -774,6 +784,16 @@ pub(super) fn send_command(
     kind: RegisteredCommandKind,
     message: Box<ParsedMessage>,
 ) -> Result<(), (Box<ParsedMessage>, DomainError)> {
+    // Both local answers and forwarded mutations use this physical session's
+    // registered-command bucket. Deferred work was already charged on receipt.
+    if let Some((_, user)) = edge
+        .origins
+        .get(&generation)
+        .and_then(|origin| origin.session)
+        && crate::registration::charge_registered_command(context, user).is_err()
+    {
+        return Err((message, DomainError::ServerBusy));
+    }
     match route_command(edge, context, generation, kind, message)? {
         Routed::Forwarded => Ok(()),
         Routed::Local { frames, message } => context
@@ -809,18 +829,20 @@ fn route_command(
     if must_defer_command(edge, generation) {
         return defer_command(edge, context, generation, kind, message).map(|()| Routed::Forwarded);
     }
-    let has_account = edge
-        .replica
-        .session(user_id)
-        .is_some_and(|session| session.account.is_some());
-    if let Err(error) = crate::command_convert::require_channel_control_account(kind, has_account) {
-        return Err((message, error));
-    }
-    let command = match crate::command_convert::convert(&edge.replica, kind, &message) {
+    let command = match admitted_command(edge, user_id, kind, &message) {
         Ok(command) => command,
-        Err(crate::RuntimeError::CommandRefused(error)) => return Err((message, error)),
-        Err(_) => return Err((message, DomainError::InvalidArgument)),
+        Err(error) => return Err((message, error)),
     };
+    if matches!(command.view(), CanonicalCommandView::Part(_, _)) {
+        return departure::route(
+            edge,
+            context,
+            generation,
+            (session_id, user_id),
+            &command,
+            message,
+        );
+    }
     if let Some(answered) = local_answer(edge, context, kind, user_id, &message, &command) {
         return Routed::local(answered, message);
     }
@@ -835,6 +857,23 @@ fn route_command(
     forward_command(edge, context, generation, user_id, operation, message)
 }
 
+fn admitted_command(
+    edge: &EdgeFederation,
+    user_id: UserId,
+    kind: RegisteredCommandKind,
+    message: &ParsedMessage,
+) -> Result<CanonicalCommand, DomainError> {
+    let has_account = edge
+        .replica
+        .session(user_id)
+        .is_some_and(|session| session.account.is_some());
+    crate::command_convert::require_channel_control_account(kind, has_account)?;
+    crate::command_convert::convert(&edge.replica, kind, message).map_err(|error| match error {
+        crate::RuntimeError::CommandRefused(error) => error,
+        _ => DomainError::InvalidArgument,
+    })
+}
+
 fn forward_command(
     edge: &mut EdgeFederation,
     context: &mut StateCoreContext,
@@ -847,35 +886,12 @@ fn forward_command(
         Ok(requester) => requester,
         Err(error) => return Err((message, error)),
     };
-    // Acquire both retained allocations before encoding consumes the origin sequence.
-    let part_backing = match &operation {
-        FederatedOperation::Part {
-            all_channels: false,
-            channels,
-            reason,
-            ..
-        } if message
-            .tags()
-            .iter()
-            .any(|tag| tag.key() == "label" && tag.value().is_some())
-            && context
-                .sessions()
-                .capabilities_for_user(user_id)
-                .is_some_and(|caps| caps.enabled("labeled-response")) =>
-        {
-            match reserve_departure_backing(context, channels.capacity(), reason.capacity()) {
-                Ok(permit) => Some(permit),
-                Err(error) => return Err((message, error)),
-            }
-        }
-        _ => None,
-    };
     let Ok(prepared) = prepare_request(edge, context, generation, &operation) else {
         return Err((message, DomainError::ServerBusy));
     };
     let pending = match requester {
         Some(requester) => PendingKind::Join { message, requester },
-        None => PendingKind::for_operation(message, operation, part_backing),
+        None => PendingKind::for_operation(message, operation, None),
     };
     register_request(edge, context, generation, prepared, pending);
     Ok(Routed::Forwarded)
@@ -1098,9 +1114,9 @@ fn local_answer(
         CanonicalCommandView::Mode(ModeCommand::UserQuery(target)) => {
             Some(local_user_modes(edge, context, user_id, message, target))
         }
-        CanonicalCommandView::Information(query) if is_local_information_query(kind) => Some(
-            local_information(edge, context, user_id, message, command, query),
-        ),
+        CanonicalCommandView::Information(query) if is_local_information_query(kind) => {
+            Some(local_information(edge, context, user_id, message, query))
+        }
         _ => None,
     }
 }
@@ -1157,13 +1173,6 @@ fn local_user_modes(
     message: &ParsedMessage,
     target: &agenc_relay_domain::NicknameValue,
 ) -> Result<Vec<agenc_relay_client_wire::WireMessage>, DomainError> {
-    let command = CanonicalCommand::user_mode_query(target.clone());
-    let charges = context.domain().command_charges(user_id, &command);
-    let now = context.now();
-    context
-        .buckets_mut()
-        .apply_domain_charges(now, &charges)
-        .map_err(|_| DomainError::ServerBusy)?;
     let session = edge
         .replica
         .session(user_id)
@@ -1207,15 +1216,8 @@ fn local_information(
     context: &mut StateCoreContext,
     user_id: UserId,
     message: &ParsedMessage,
-    command: &CanonicalCommand,
     query: InformationQuery,
 ) -> Result<Vec<agenc_relay_client_wire::WireMessage>, DomainError> {
-    let charges = context.domain().command_charges(user_id, command);
-    let now = context.now();
-    context
-        .buckets_mut()
-        .apply_domain_charges(now, &charges)
-        .map_err(|_| DomainError::ServerBusy)?;
     let session = edge
         .replica
         .session(user_id)
@@ -1406,20 +1408,6 @@ fn operation_of(
         }
         CanonicalCommandView::Account(command) => {
             account_operation(edge, session_id, user_id, command)
-        }
-        CanonicalCommandView::Part(channels, reason) => {
-            let mut ids = Vec::new();
-            for name in channels {
-                ids.push(channel_of(edge, name)?.0);
-            }
-            ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-            Ok(FederatedOperation::Part {
-                session_id,
-                expected_session_revision: session_revision(edge, user_id)?,
-                all_channels: false,
-                channels: ids,
-                reason: reason.map_or(String::new(), |reason| reason.as_str().to_owned()),
-            })
         }
         CanonicalCommandView::PartAll => {
             let mut ids: Vec<_> = edge.replica.channels_of(user_id).collect();
@@ -1786,6 +1774,15 @@ pub(super) fn receive_result(
         replies.push(reply_frame(&edge.config.server_name, reply)?);
     }
     project_join_result(context, pending, &checked.arm, &mut replies)?;
+    if let PendingKind::Command {
+        message,
+        echo_channels:
+            Some(EchoChannels::Part { requester, .. } | EchoChannels::UnlabeledPart(requester)),
+    } = &pending.kind
+    {
+        requester.project(context.server_prefix(), message, &checked.arm, &mut replies)?;
+        super::message_echo::validate_departure_replies(pending, &replies)?;
+    }
     let arm = checked.arm;
     let pending = edge
         .pending
@@ -2147,6 +2144,19 @@ fn completed_request(
                 }]
             }
         }
+        (
+            PendingKind::Command {
+                message,
+                echo_channels: Some(EchoChannels::Part { .. } | EchoChannels::UnlabeledPart(_)),
+            },
+            ResultArm::Failed { .. },
+        ) if !pending.replies.is_empty() => super::message_echo::complete(
+            context,
+            generation,
+            message,
+            pending.message_echoes,
+            pending.replies,
+        ),
         (PendingKind::Join { message, .. }, ResultArm::Failed { .. })
             if !pending.replies.is_empty() =>
         {
@@ -2216,7 +2226,10 @@ fn completed_request(
                 | agenc_relay_types::FederationOpcode::NickChange
                 | agenc_relay_types::FederationOpcode::Setname
                 | agenc_relay_types::FederationOpcode::Topic
-        ) || matches!(echo_channels, Some(EchoChannels::Part { .. })) =>
+        ) || matches!(
+            echo_channels,
+            Some(EchoChannels::Part { .. } | EchoChannels::UnlabeledPart(_))
+        ) =>
         {
             super::message_echo::complete(
                 context,
