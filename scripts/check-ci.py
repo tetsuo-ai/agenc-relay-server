@@ -33,6 +33,7 @@ GATE_PATHS = (
 MANIFEST_PATH = "conformance/gates.toml"
 REQUIRED_WORKFLOW_SNIPPETS = (
     "permissions:\n  contents: read",
+    '      AGENC_RELAY_GATE_HOSTED: "1"',
     f"uses: actions/checkout@{CHECKOUT_COMMIT}",
     "persist-credentials: false",
     "fetch-depth: 0",
@@ -44,7 +45,7 @@ REQUIRED_WORKFLOW_SNIPPETS = (
     "cargo +1.98.0 install --locked cargo-llvm-cov --version 0.9.0",
     "cargo +1.98.0 install --locked cargo-nextest --version 0.9.145",
     "cargo +1.98.0 install --locked cargo-fuzz --version 0.13.2",
-    "sudo apt-get install --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross tor",
+    "sudo apt-get install --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross ripgrep tor",
     "sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL",
 )
 REQUIRED_GATE_STEP = (
@@ -618,6 +619,7 @@ def self_test(root: Path) -> int:
         raise CiError("gate runner does not expose reviewed environment construction")
     inherited = {
         "AGENC_RELAY_RECORD_GATE": "1",
+        "AGENC_RELAY_GATE_HOSTED": "1",
         "AGENC_STAGE3_SEED": "1",
         "AGENC_STAGE3_STEPS": "1",
         "BASH_ENV": "/tmp/unreviewed-shell-environment",
@@ -666,6 +668,16 @@ def self_test(root: Path) -> int:
         "PYTHONDONTWRITEBYTECODE": "1",
     }:
         raise CiError("gate runner retained an inherited Rust build override")
+    hosted_lane = runner["lane_environment"]
+    shared = str(root / "target" / "lanes" / "hosted")
+    for lane in ("check-host", "clippy", "stage-tests", "tests", "stage-storage", "exclusive", "coverage", "static", "fuzz"):
+        settings = hosted_lane(root, lane, clean_environment, hosted=True)
+        jobs = settings.get("CARGO_BUILD_JOBS")
+        if jobs not in {"1", "2"} or any(settings.get(k) != jobs for k in ("NEXTEST_TEST_THREADS", "RUST_TEST_THREADS")):
+            raise CiError("hosted lane lost its compiler or test capacity limit")
+        target = None if lane in {"static", "fuzz"} else shared + ("-coverage" if lane == "coverage" else "")
+        if settings.get("CARGO_TARGET_DIR") != target:
+            raise CiError("hosted lane lost its shared or instrumented build directory")
     coverage_environment = environment_builder(inherited, {"RUSTC_BOOTSTRAP": "1"})
     if coverage_environment != {
         "CARGO_INCREMENTAL": "0",

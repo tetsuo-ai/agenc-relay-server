@@ -19,8 +19,9 @@ jobs:
   stage-nine:
     name: Stage 09 implementation checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 300
     env:
+      AGENC_RELAY_GATE_HOSTED: "1"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
     steps:
@@ -56,10 +57,12 @@ jobs:
       - name: Install host qualification tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross tor
+          sudo apt-get install --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross ripgrep tor
 
       - name: Free hosted-runner disk for the coverage and fuzz builds
         run: |
+          nproc
+          free -h
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
