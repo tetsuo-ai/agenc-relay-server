@@ -640,7 +640,7 @@ source_sha256 = "d595ca21b4b67126129ba5e2dfccd9907e3ad219c7d5fc98a302569c8c9162f
 start_line = 145
 end_line = 184
 span_sha256 = "7c8eba7eef7902fabd8dc68c34eb6a3bc809610fd681901c6c6e2b7280c3d418"
-metric = "branches"
+metric = "regions"
 reason = "A pending controller approval uses the canonical unsigned policy subject or the verified predecessor required by its generation."
 
 [[region]]
