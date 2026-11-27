@@ -10,6 +10,9 @@
 mod support;
 use support::*;
 
+#[path = "history/first_welcome.rs"]
+mod first_welcome;
+
 #[path = "history/membership.rs"]
 mod membership;
 

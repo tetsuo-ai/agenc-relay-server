@@ -3,8 +3,8 @@ minimum_overall_branch_percent = 75.0
 minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
-reviewed_source_files = 1181
-reviewed_source_sha256 = "94945c9e8de0313e636df818266e99ea601c2ed1f96471f0097c85ed290248d7"
+reviewed_source_files = 1182
+reviewed_source_sha256 = "325581f991890552783b2f8e1d16a3862f481ccf426f1c0aa9d831dd7e1d5999"
 deferred = []
 
 [[region]]
@@ -528,9 +528,9 @@ id = "genesis-proposal-requires-unsigned-binding"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
 item = "unsigned_package"
-source_sha256 = "249fd08e906ca48d8af24ed82b0057f25bc83359800a2cc2a49e997433d66cb7"
-start_line = 292
-end_line = 294
+source_sha256 = "db1044ed47708bc7200c3e81b381be6576d222535db4bb50bfdc2d6eae90ba39"
+start_line = 308
+end_line = 310
 span_sha256 = "8f6d00b3e48fee10dd4d545d31cd88b5ef9418a0d93f6b07822b2def68615df3"
 metric = "branches"
 reason = "Only the unsigned canonical proposal can enter the protected device and root pre-signature route."
@@ -540,9 +540,9 @@ id = "genesis-proposal-signed-plan-group-ceiling"
 category = "authorization-decisions"
 file = "crates/agenc-relay-e2ee/src/initial_authority/proposal.rs"
 item = "check_plan"
-source_sha256 = "249fd08e906ca48d8af24ed82b0057f25bc83359800a2cc2a49e997433d66cb7"
-start_line = 396
-end_line = 398
+source_sha256 = "db1044ed47708bc7200c3e81b381be6576d222535db4bb50bfdc2d6eae90ba39"
+start_line = 412
+end_line = 414
 span_sha256 = "c14fd98352bc7b9affadf92591be333f1c3d2abc1d4ded1b98aafce728f22f4e"
 metric = "branches"
 reason = "The total device plan must fit the strictest signed policy before a binding can lock its semantic route."
@@ -942,3 +942,123 @@ end_line = 215
 span_sha256 = "bf9c4cc9db82242e60854300e4b84a8f47b2e86df2f6de17ec31e92145de8c1b"
 metric = "branches"
 reason = "The canonical before-and-after role must follow the original physical member's entire ordered vector, using the known starting role for a home membership."
+
+[[region]]
+id = "first-welcome-from-genesis"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/history.rs"
+item = "from_genesis"
+source_sha256 = "17ee9ea8b7deb616c690ad53cfc9fc734f5a5c72d12438693129b728313b593b"
+start_line = 339
+end_line = 387
+span_sha256 = "75fa00110123f4f6d8fbf4e76f58f64d7b9a0bed5b26e2a5c21e37116625c049"
+metric = "branches"
+reason = "A private shared opening requires the independently pinned conversation and the original or immediately preceding authenticated route incarnation before accepting epoch zero."
+
+[[region]]
+id = "first-welcome-authenticated-objects"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority.rs"
+item = "authenticated_objects"
+source_sha256 = "b594361e2ba48af9402ca7e3cfdcaad4d3e099796ad46641052dc698b9efe560"
+start_line = 215
+end_line = 273
+span_sha256 = "9d2394dccc9f65d6e0b9d86de48331a7933b59f0f29fc45a75b00f5f89e8912a"
+metric = "branches"
+reason = "The independently pinned binding names each individual signed source, the nonzero initial and distinct operating policies, and the original sequencer before role or context decisions."
+
+[[region]]
+id = "first-welcome-complete"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority.rs"
+item = "complete"
+source_sha256 = "b594361e2ba48af9402ca7e3cfdcaad4d3e099796ad46641052dc698b9efe560"
+start_line = 276
+end_line = 295
+span_sha256 = "5ab6022ab1449d06d135199ec2e77c62666ec3448d8b7e4533ebb87f20d30760"
+metric = "branches"
+reason = "Only the original hash-matched core, policy IDs, MLS version and validity intervals complete initial authority."
+
+[[region]]
+id = "first-welcome-require-initial-time"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/anchors.rs"
+item = "require_initial_time"
+source_sha256 = "21d424002d885c7ed83ab4a24a9473e0929949aeb28ac8404abe27cfd6f1e4ec"
+start_line = 197
+end_line = 211
+span_sha256 = "259a3659296ee3d22fb02d39655f01f43693e6df7877092361958d3a30952e94"
+metric = "branches"
+reason = "The initial second must be covered by the original sequencer and every pinned principal root and roster."
+
+[[region]]
+id = "first-welcome-authenticate-first-add"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/first_welcome.rs"
+item = "authenticate_first_add"
+source_sha256 = "a9295cf875bd8cdf2710fdc0f4df6594ebba433e49b1eb64677887f4d8164293"
+start_line = 73
+end_line = 118
+span_sha256 = "ac643a64cad809f246d89ee1d0ac5d1fadf2981f91e0da0d27b835e46d4997a0"
+metric = "branches"
+reason = "The complete bounded standalone certificate must name the selected delivery, the controlled first Add and its one processing acknowledgement before replay from genesis."
+
+[[region]]
+id = "first-welcome-complete-context"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/first_welcome.rs"
+item = "complete_context"
+source_sha256 = "a9295cf875bd8cdf2710fdc0f4df6594ebba433e49b1eb64677887f4d8164293"
+start_line = 56
+end_line = 66
+span_sha256 = "eaab8c0876867651cc5d33d9a736c4da3acca99e04ae12c2395ac661b9505c86"
+metric = "branches"
+reason = "Only the original authenticated initial context can complete the public proof, and the certified first Add cannot predate its initial validation time."
+
+[[region]]
+id = "first-welcome-creator-membership"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/first_welcome.rs"
+item = "creator_membership"
+source_sha256 = "a9295cf875bd8cdf2710fdc0f4df6594ebba433e49b1eb64677887f4d8164293"
+start_line = 230
+end_line = 269
+span_sha256 = "548357755240bfb64feeff6b2df700d7b2ce9ec047098dd632cf82017b5b7d72"
+metric = "branches"
+reason = "The continuing epoch-zero leaf at index zero must be the original bootstrap creator with a verified device signature and leaf possession."
+
+[[region]]
+id = "first-welcome-require-recipient"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/first_welcome.rs"
+item = "require_recipient"
+source_sha256 = "a9295cf875bd8cdf2710fdc0f4df6594ebba433e49b1eb64677887f4d8164293"
+start_line = 198
+end_line = 228
+span_sha256 = "dd505a3cc37004df937f25028c1aeed56fd715418141fd0b9ed593726d030fc1"
+metric = "branches"
+reason = "The selected local network, account, root and device must match the first noncreator in the signed original plan."
+
+[[region]]
+id = "first-welcome-check-terminal"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/first_welcome.rs"
+item = "check_terminal"
+source_sha256 = "a9295cf875bd8cdf2710fdc0f4df6594ebba433e49b1eb64677887f4d8164293"
+start_line = 145
+end_line = 184
+span_sha256 = "968bd43a0a1d8fe839d25728d73626944c7bde7440054468a115d517c5baa0f0"
+metric = "branches"
+reason = "The original controller, old-leaf and council evidence must finalize the exact accepted state and name a signed roster containing the intended enrolled recipient."
+
+[[region]]
+id = "first-welcome-possible-initial-time"
+category = "authorization-decisions"
+file = "crates/agenc-relay-e2ee/src/initial_authority/first_welcome.rs"
+item = "possible_initial_time"
+source_sha256 = "a9295cf875bd8cdf2710fdc0f4df6594ebba433e49b1eb64677887f4d8164293"
+start_line = 120
+end_line = 143
+span_sha256 = "efe99f8bfc442af0890e60e3d8e71f8630ea0cbcbdaf1a6b7974064607b23895"
+metric = "branches"
+reason = "The original signed directory and sequencer intervals must admit an initial validation second no later than the certified Add."

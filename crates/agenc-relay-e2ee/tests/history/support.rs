@@ -239,7 +239,7 @@ impl Genesis {
         Ok(genesis)
     }
 
-    fn seal(&mut self) -> Result<(), E2eeError> {
+    pub(super) fn seal(&mut self) -> Result<(), E2eeError> {
         self.package.binding.tbs.context_core_id =
             semantic_id_of(SemanticHashDomain::ContextCoreId, &self.core)?;
         let binding_id = semantic_id_of(SemanticHashDomain::BindingId, &self.package.binding.tbs)?;
@@ -1234,42 +1234,12 @@ pub(super) fn memberships(
 ) -> Result<agenc_relay_e2ee::membership::LeafMembershipSet, Box<dyn std::error::Error>> {
     use agenc_relay_e2ee::identity::{verify_root_identity, verify_roster};
     use agenc_relay_e2ee::membership::verify_leaf_membership_proof;
-    use agenc_relay_e2ee::objects::membership::{
-        ArcLeafDispositionKind, ArcLeafMembershipProof, ArcLeafMembershipProofTbs,
-    };
     let mut set = agenc_relay_e2ee::membership::LeafMembershipSet::default();
-    for (index, device, leaf_seed, leaf, credential) in leaves {
-        let principal = genesis.principal(*index)?;
+    for leaf in leaves {
+        let principal = genesis.principal(leaf.0)?;
         let root = verify_root_identity(&NETWORK, &principal.root, None)?;
         let roster = verify_roster(&root, &principal.roster, None)?;
-        let tbs = ArcLeafMembershipProofTbs {
-            profile_version: 1,
-            network_id: NETWORK,
-            conversation_id: genesis.conversation,
-            epoch: 0,
-            leaf_index: *leaf,
-            old_credential_hash: *credential,
-            leaf_signature_scheme: 0x0807,
-            leaf_signature_key: Opaque::from_slice(&public(&key(*leaf_seed)))?,
-            account_id: principal.root.tbs.account_id.clone(),
-            device_id: [*device; 16],
-            root_generation: principal.root.tbs.root_generation,
-            root_fingerprint: root_fingerprint(&principal.root)?,
-            roster_generation: principal.roster.tbs.roster_generation,
-            roster_id: roster_id(&principal.roster)?,
-            credential_generation: 0,
-            disposition: ArcLeafDispositionKind::Continuing,
-            removal_finalization_id: [0; 32],
-        };
-        let proof = ArcLeafMembershipProof {
-            device_signature: sign(&key(*device), SignatureDomain::LeafMembership, &tbs)?,
-            possession_signature: Opaque::from_slice(&sign(
-                &key(*leaf_seed),
-                SignatureDomain::LeafMembershipPossession,
-                &tbs,
-            )?)?,
-            tbs,
-        };
+        let proof = signed_membership(genesis, leaf)?;
         let verified =
             verify_leaf_membership_proof(&NETWORK, &genesis.conversation, &proof, &root, &roster)
                 .map_err(|refusal| format!("{refusal:?}"))?;
@@ -1308,4 +1278,43 @@ impl Log {
     pub(super) fn target_digest(&self) -> Result<[u8; 32], E2eeError> {
         semantic_id_of(SemanticHashDomain::ReinitTarget, &self.target)
     }
+}
+
+pub(super) fn signed_membership(
+    genesis: &Genesis,
+    leaf: &Leaf,
+) -> Result<agenc_relay_e2ee::objects::membership::ArcLeafMembershipProof, E2eeError> {
+    use agenc_relay_e2ee::objects::membership::{
+        ArcLeafDispositionKind, ArcLeafMembershipProof, ArcLeafMembershipProofTbs,
+    };
+    let (index, device, leaf_seed, leaf, credential) = leaf;
+    let principal = genesis.principal(*index)?;
+    let tbs = ArcLeafMembershipProofTbs {
+        profile_version: 1,
+        network_id: NETWORK,
+        conversation_id: genesis.conversation,
+        epoch: 0,
+        leaf_index: *leaf,
+        old_credential_hash: *credential,
+        leaf_signature_scheme: 0x0807,
+        leaf_signature_key: Opaque::from_slice(&public(&key(*leaf_seed)))?,
+        account_id: principal.root.tbs.account_id.clone(),
+        device_id: [*device; 16],
+        root_generation: principal.root.tbs.root_generation,
+        root_fingerprint: root_fingerprint(&principal.root)?,
+        roster_generation: principal.roster.tbs.roster_generation,
+        roster_id: roster_id(&principal.roster)?,
+        credential_generation: 0,
+        disposition: ArcLeafDispositionKind::Continuing,
+        removal_finalization_id: [0; 32],
+    };
+    Ok(ArcLeafMembershipProof {
+        device_signature: sign(&key(*device), SignatureDomain::LeafMembership, &tbs)?,
+        possession_signature: Opaque::from_slice(&sign(
+            &key(*leaf_seed),
+            SignatureDomain::LeafMembershipPossession,
+            &tbs,
+        )?)?,
+        tbs,
+    })
 }

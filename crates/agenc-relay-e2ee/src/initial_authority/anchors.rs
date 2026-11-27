@@ -5,7 +5,8 @@
 use super::{ExpectedInitialAuthority, InitialPrincipalEvidence, PriorTerminal, decode_object};
 use crate::error::E2eeError;
 use crate::identity::{
-    Interval, ValidationTime, ensure_distinct_device_keys, restore_roster, verify_root_standalone,
+    ClientIdentity, Interval, ValidationTime, ensure_distinct_device_keys, restore_roster,
+    verify_root_standalone,
 };
 use crate::ids::semantic_id_of;
 use crate::limits::{MAX_BINDING_PRINCIPALS, PROFILE_VERSION};
@@ -54,7 +55,6 @@ pub(super) fn principals(
     expected: &ExpectedInitialAuthority,
     package: &ArcConversationBindingPackage,
     evidence: &[InitialPrincipalEvidence<'_>],
-    time: ValidationTime,
     budget: &mut DecodeBudget,
 ) -> Result<PrincipalRosters, E2eeError> {
     let pins = package.binding.tbs.principals.as_slice();
@@ -71,9 +71,6 @@ pub(super) fn principals(
         // Only the independently pinned binding permits these prefix omissions.
         let root = verify_root_standalone(&expected.network_id, &root)?;
         let roster = restore_roster(&root, &roster)?;
-        if !root.interval.covers(time) || !roster.interval.covers(time) {
-            return Err(E2eeError::InvalidValue);
-        }
         if result.insert(account, (root, roster)).is_some() {
             return Err(E2eeError::NonCanonical);
         }
@@ -118,7 +115,7 @@ pub(super) fn bootstrap(
     package: &ArcConversationBindingPackage,
     policy: &VerifiedPolicy,
     principals: &PrincipalRosters,
-) -> Result<(), E2eeError> {
+) -> Result<ClientIdentity, E2eeError> {
     controller_roots(policy, principals)?;
     let [creator] = policy.council.as_slice() else {
         return Err(E2eeError::InvalidValue);
@@ -144,7 +141,12 @@ pub(super) fn bootstrap(
     {
         return Err(E2eeError::InvalidValue);
     }
-    Ok(())
+    Ok(ClientIdentity {
+        network_id: package.binding.tbs.network_id,
+        account_id: *account,
+        root_fingerprint: creator.root_fingerprint,
+        device_id: creator.device_id,
+    })
 }
 
 fn controller_roots(
@@ -165,14 +167,14 @@ fn controller_roots(
 pub(super) fn sequencer(
     expected: &ExpectedInitialAuthority,
     bytes: &[u8],
-    core: &ArcContextCoreTbs,
+    key_id: &[u8; 32],
     budget: &mut DecodeBudget,
 ) -> Result<VerifiedSequencerCredential, E2eeError> {
     let credential = ArcSequencerCredential::decode_exact(bytes, budget)?;
     let tbs = &credential.tbs;
     let credential_id = semantic_id_of(SemanticHashDomain::SequencerKey, tbs)?;
     credential_shape(&credential)?;
-    if credential_id != core.sequencer_credential_id
+    if &credential_id != key_id
         || tbs.profile_version != PROFILE_VERSION
         || tbs.network_id != expected.network_id
         || tbs.not_before >= tbs.not_after
@@ -183,9 +185,6 @@ pub(super) fn sequencer(
         not_before: tbs.not_before,
         not_after: tbs.not_after,
     };
-    if !interval.covers(ValidationTime(core.initial_validation_time)) {
-        return Err(E2eeError::InvalidValue);
-    }
     Ok(VerifiedSequencerCredential {
         credential_id,
         generation: tbs.key_generation,
@@ -193,6 +192,22 @@ pub(super) fn sequencer(
         interval,
         previous_key_id: tbs.previous_key_id,
     })
+}
+
+pub(super) fn require_initial_time(
+    principals: &PrincipalRosters,
+    sequencer: &VerifiedSequencerCredential,
+    time: ValidationTime,
+) -> Result<(), E2eeError> {
+    if sequencer.covers(time)
+        && principals
+            .values()
+            .all(|(root, roster)| root.interval.covers(time) && roster.interval.covers(time))
+    {
+        Ok(())
+    } else {
+        Err(E2eeError::InvalidValue)
+    }
 }
 
 fn credential_shape(credential: &ArcSequencerCredential) -> Result<(), E2eeError> {

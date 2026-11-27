@@ -153,6 +153,22 @@ impl<'a> From<&InitialAuthorityEvidence<'a>> for InitialPlanEvidence<'a> {
     }
 }
 
+impl InitialPlanEvidence<'_> {
+    fn sequencer(
+        &self,
+        expected: &ExpectedInitialAuthority,
+        core: &ArcContextCoreTbs,
+        budget: &mut DecodeBudget,
+    ) -> Result<VerifiedSequencerCredential, E2eeError> {
+        anchors::sequencer(
+            expected,
+            self.sequencer_credential,
+            &core.sequencer_credential_id,
+            budget,
+        )
+    }
+}
+
 enum PolicyInput<'a> {
     Approved(&'a [u8]),
     Subject(&'a [u8]),
@@ -223,9 +239,9 @@ fn check_proposal(
     verify_proposed_core(&expected.network_id, &core, binding)?;
     anchors::core(binding, &core)?;
     let time = ValidationTime(core.initial_validation_time);
-    let principals = anchors::principals(expected, &package, evidence.principals, time, budget)?;
+    let principals = anchors::principals(expected, &package, evidence.principals, budget)?;
     check_principals(binding, &route, &principals)?;
-    let sequencer = anchors::sequencer(expected, evidence.sequencer_credential, &core, budget)?;
+    let sequencer = evidence.sequencer(expected, &core, budget)?;
     let mut validity = directory_validity(&principals, sequencer.interval)?;
     let initial = policy(binding, &principals, bootstrap, None, &mut validity, budget)?;
     anchors::bootstrap(&package, &initial.checked, &principals)?;
