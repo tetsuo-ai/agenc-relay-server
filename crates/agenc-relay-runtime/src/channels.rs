@@ -1075,26 +1075,6 @@ fn execute_planned_command(
     let PlanDecision::Mutation(plan) = decision else {
         return complete_nonmutation(context, bound, reply, decision);
     };
-    if let (Some(batch), Some(reply)) = (plan.message_batch(), reply) {
-        let mut tags: Vec<_> = reply
-            .request
-            .message
-            .tags()
-            .iter()
-            .filter(|tag| tag.is_client_only())
-            .map(|tag| (tag.key().to_owned(), tag.value().unwrap_or("").to_owned()))
-            .collect();
-        tags.sort_unstable();
-        context.set_mutation_context(agenc_relay_domain::federation::MutationContext {
-            received_unix_milliseconds: batch
-                .accepted_at()
-                .get()
-                .checked_mul(1_000)
-                .ok_or(RuntimeError::Overflow)?,
-            client_tags: tags,
-            ..agenc_relay_domain::federation::MutationContext::default()
-        });
-    }
     let mut local_join = context.prepare_local_join(
         bound,
         reply.map(|reply| reply.render_input(bound.user_id)),
@@ -1121,7 +1101,13 @@ fn execute_planned_command(
                 &plan,
             )?
         };
-        match plan.storage_class() {
+        // Install the projection metadata after rendering and clear it if staging refuses.
+        let projection = local_projection_context(bound, &plan, reply, render_command)?;
+        let has_projection = projection.is_some();
+        if let Some(projection) = projection {
+            context.set_mutation_context(projection);
+        }
+        let settled = match plan.storage_class() {
             StorageClass::Ephemeral => match context.apply_ephemeral(plan, fanout) {
                 Ok(_) => Ok(ResultClass::Ok),
                 Err(error) => render_ephemeral_refusal(context, bound, reply, error),
@@ -1129,10 +1115,54 @@ fn execute_planned_command(
             StorageClass::Durable => {
                 stage_durable_command(context, accounts, bound, plan, fanout, reply, observation)
             }
+        };
+        if has_projection {
+            context.set_mutation_context(Default::default());
         }
+        settled
     })();
     context.settle_local_join(local_join, result == Ok(ResultClass::Ok));
     result
+}
+
+/// The origin and client-only tags to carry across the corresponding committed federation event.
+fn local_projection_context(
+    bound: BoundSession,
+    plan: &MutationPlan,
+    reply: Option<ClientReply<'_>>,
+    command: &CanonicalCommand,
+) -> Result<Option<agenc_relay_domain::federation::MutationContext>, RuntimeError> {
+    use agenc_relay_domain::federation::MutationContext;
+    if matches!(
+        command.view(),
+        CanonicalCommandView::Mode(agenc_relay_domain::ModeCommand::ChannelChange(_, _))
+    ) {
+        return Ok(Some(MutationContext {
+            actor: Some(bound.user_id),
+            ..Default::default()
+        }));
+    }
+    let (Some(batch), Some(reply)) = (plan.message_batch(), reply) else {
+        return Ok(None);
+    };
+    let mut tags: Vec<_> = reply
+        .request
+        .message
+        .tags()
+        .iter()
+        .filter(|tag| tag.is_client_only())
+        .map(|tag| (tag.key().to_owned(), tag.value().unwrap_or("").to_owned()))
+        .collect();
+    tags.sort_unstable();
+    Ok(Some(MutationContext {
+        received_unix_milliseconds: batch
+            .accepted_at()
+            .get()
+            .checked_mul(1_000)
+            .ok_or(RuntimeError::Overflow)?,
+        client_tags: tags,
+        ..Default::default()
+    }))
 }
 
 fn render_ephemeral_refusal(

@@ -185,6 +185,7 @@ pub enum EdgeCompletion {
 /// Physical channels selected when the originating command was admitted.
 pub(crate) enum EchoChannels {
     Topic(agenc_relay_types::ChannelInstanceId),
+    ChannelModes(super::message_echo::ChannelModeRequester),
     Invite(invitation::InviteRequester),
     UserMode {
         session: SessionId,
@@ -237,6 +238,18 @@ impl PendingKind {
     ) -> Self {
         let echo_channels = match operation {
             FederatedOperation::Topic { channel_id, .. } => Some(EchoChannels::Topic(channel_id)),
+            FederatedOperation::ChannelMode {
+                channel_id,
+                expected_channel_revision,
+                changes,
+                ..
+            } => Some(EchoChannels::ChannelModes(
+                super::message_echo::ChannelModeRequester::new(
+                    channel_id,
+                    expected_channel_revision,
+                    changes,
+                ),
+            )),
             FederatedOperation::UserMode {
                 session_id,
                 expected_session_revision,
@@ -2327,6 +2340,7 @@ fn completed_request(
                 | agenc_relay_types::FederationOpcode::Setname
                 | agenc_relay_types::FederationOpcode::Invite
                 | agenc_relay_types::FederationOpcode::Topic
+                | agenc_relay_types::FederationOpcode::ChannelMode
         ) || matches!(
             echo_channels,
             Some(EchoChannels::Part { .. } | EchoChannels::UnlabeledPart(_))

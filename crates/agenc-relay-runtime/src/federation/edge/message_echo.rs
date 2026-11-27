@@ -20,6 +20,7 @@
 //! notifications are independent of echo-message. The requested name and
 //! the coordinator's committed generation must match before sending the label.
 //! A connection without setname receives its ordinary labeled ACK.
+//! A channel MODE matches the original instance, actor, public arguments and committed delta.
 //! A public TOPIC notification must match the instance selected at admission,
 //! the original actor and the exact topic bytes (including an explicit clear).
 //! An explicit PART may name several channels. Each correlated departure must match
@@ -29,6 +30,8 @@ use agenc_relay_client_wire::{CapabilityState, ParsedMessage, WireMessage};
 use agenc_relay_domain::federation::ProjectedEvent;
 use agenc_relay_federation_wire::EventHeader;
 use agenc_relay_types::{ChannelInstanceId, EventId, FederationOpcode, UserId};
+mod channel_mode;
+pub(super) use channel_mode::ChannelModeRequester;
 
 use super::request::{EchoChannels, PendingKind, PendingRequest};
 use super::{EdgeCompletion, EdgeFederation, Violation};
@@ -89,6 +92,19 @@ pub(super) fn capture(
     let actor = match event {
         ProjectedEvent::MessageDelivered(record) => record.sender.user_id,
         ProjectedEvent::TopicChanged { actor, .. } => actor.user_id,
+        ProjectedEvent::ChannelModesChanged {
+            actor,
+            resulting_revision,
+            ..
+        } => {
+            let Some(source) = &actor.0 else {
+                return Ok(());
+            };
+            if resulting_revision.get() != header.coordinator_state_generation {
+                return Ok(());
+            }
+            source.user_id
+        }
         ProjectedEvent::MemberParted { source, .. } => source.user_id,
         ProjectedEvent::Invited { inviter, .. } => inviter.user_id,
         ProjectedEvent::UserModesChanged(record) => record.user_id,
@@ -229,6 +245,9 @@ fn labeled_targets(
         ) => departure_targets(echo_channels.as_ref(), channel_id, reason),
         (FederationOpcode::Invite, ProjectedEvent::Invited {channel_id, named_target, ..}) => {
             matches!(echo_channels, Some(EchoChannels::Invite(original)) if original.matches(*channel_id, message, &named_target.nickname)).then_some(1)
+        }
+        (FederationOpcode::ChannelMode, ProjectedEvent::ChannelModesChanged { channel_id, resulting_revision, changes, .. }) => {
+            matches!(echo_channels, Some(EchoChannels::ChannelModes(original)) if original.matches(*channel_id, resulting_revision.get(), changes)).then_some(1)
         }
         (FederationOpcode::UserMode, ProjectedEvent::UserModesChanged(record)) => {
             original_user_mode(message, echo_channels.as_ref(), record).then_some(1)
