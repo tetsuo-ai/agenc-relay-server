@@ -395,7 +395,10 @@ async fn completed_channel_setting_is_noted_only_with_standard_replies() -> Test
     assert_eq!(plain.lines().len(), before);
 
     let noted = harness.open(2, true)?;
-    harness.line(2, "CAP REQ :standard-replies")?;
+    harness.line(
+        2,
+        "CAP REQ :message-tags batch labeled-response standard-replies",
+    )?;
     let event_generation = await_session(&mut harness, 2, "noted")?;
     complete(
         &mut harness,
@@ -412,6 +415,32 @@ async fn completed_channel_setting_is_noted_only_with_standard_replies() -> Test
         saw(&noted, "NOTE CHANCTL UPDATED #room"),
         "lines: {:?}",
         noted.lines()
+    );
+    let before = noted.lines().len();
+    complete(
+        &mut harness,
+        completed(2, "@label=owned CHANCTL REGISTER #room")?,
+    )?;
+    let lines = noted.lines();
+    assert_eq!(lines.len(), before + 1);
+    assert!(
+        lines
+            .get(before)
+            .is_some_and(|line| line.starts_with("@label=owned ")
+                && line.contains(" NOTE CHANCTL UPDATED #room :"))
+    );
+    harness.line(2, "CAP REQ :-standard-replies")?;
+    let before = noted.lines().len();
+    complete(
+        &mut harness,
+        completed(2, "@label=quiet CHANCTL UNREGISTER #room")?,
+    )?;
+    let lines = noted.lines();
+    assert_eq!(lines.len(), before + 1);
+    assert!(
+        lines.get(before).is_some_and(
+            |line| line.starts_with("@label=quiet ") && line.trim_end().ends_with(" ACK")
+        )
     );
     let before = noted.lines().len();
     complete(&mut harness, completed(2, "CHANCTL SET notachannel on")?)?;

@@ -462,6 +462,24 @@ fn description(text: &'static str) -> Result<SafeReplyDescription, RuntimeError>
     SafeReplyDescription::new(text).map_err(|_| RuntimeError::InvalidValue)
 }
 
+/// The same public committed channel-setting receipt on both relay roles.
+pub(crate) fn channel_setting_updated(
+    capabilities: &CapabilityState,
+    prefix: &str,
+    channel: &ChannelName,
+) -> Result<WireMessage, RuntimeError> {
+    agenc_relay_client_wire::standard_reply(
+        capabilities,
+        prefix,
+        ReplyKind::Note,
+        "CHANCTL",
+        PublicErrorCode::UPDATED,
+        &[SafeReplyContext::Channel(channel)],
+        description("Channel setting updated")?,
+    )
+    .map_err(|_| RuntimeError::InvalidValue)
+}
+
 pub(crate) fn send_logical(
     context: &mut StateCoreContext,
     generation: ConnectionGeneration,
