@@ -311,3 +311,32 @@ fn a_context_genuinely_committed_after_the_first_add_time_cannot_complete_that_r
     );
     Ok(())
 }
+
+#[test]
+fn a_signed_plan_and_valid_quorum_do_not_supply_a_device_absent_from_the_resulting_roster()
+-> TestResult {
+    let mut inputs = Inputs::new()?;
+    let genesis = &mut inputs.genesis;
+    let mut entries = genesis
+        .package
+        .initial_member_plan
+        .entries
+        .as_slice()
+        .to_vec();
+    let recipient = entries
+        .iter_mut()
+        .find(|entry| entry.device_id == [9; 16])
+        .ok_or(E2eeError::InvalidValue)?;
+    recipient.device_id = [17; 16];
+    inputs.recipient.device_id = recipient.device_id;
+    genesis.package.initial_member_plan.entries = TlsVec::new(entries)?;
+    let id = verify_initial_member_plan(&genesis.package.initial_member_plan)?;
+    genesis.package.binding.tbs.initial_member_plan_id = id;
+    genesis.core.initial_member_plan_id = id;
+    genesis.seal()?;
+    inputs.binding = object(ArcWireObjectKind::ConversationBinding, &genesis.package)?;
+    let pin = genesis.expected;
+    let signed = inputs.certificate(vec![(0, 7)], vec![(0, 7)])?;
+    assert!(inputs.inspect(&pin, &signed).is_err());
+    Ok(())
+}

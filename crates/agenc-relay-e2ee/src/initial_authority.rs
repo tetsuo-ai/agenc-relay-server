@@ -242,8 +242,8 @@ fn authenticated_objects(
         &principals,
         None,
     )?;
-    if policy.policy_id != tbs.initial_policy_id
-        || tbs.initial_policy_id == [0; 32]
+    if tbs.initial_policy_id == [0; 32]
+        || policy.policy_id != tbs.initial_policy_id
         || tbs.required_operational_policy_id == [0; 32]
         || tbs.required_operational_policy_id == tbs.initial_policy_id
     {

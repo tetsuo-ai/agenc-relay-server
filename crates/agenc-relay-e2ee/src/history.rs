@@ -347,7 +347,8 @@ impl HistoricalChain {
             None => binding.route.incarnation == 0,
             Some(prior) => prior.precedes(network_id, conversation_id, &binding.route),
         };
-        if binding.conversation_id != *conversation_id || binding.generation != 0 || !anchored {
+        // GenesisObjects has already required a signed generation-zero package.
+        if binding.conversation_id != *conversation_id || !anchored {
             return Err(E2eeError::InvalidValue);
         }
         let genesis = ArcGroupGenesisTbs {
