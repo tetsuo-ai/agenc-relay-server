@@ -924,14 +924,7 @@ impl CompanionCoordinator {
                 correlation,
                 object_id,
                 fragment,
-            } => self.on_request_fragment(
-                peer,
-                correlation,
-                object_id,
-                fragment,
-                now_millis,
-                |capacity| host.reserve_cut_backing(capacity).ok(),
-            ),
+            } => self.on_request_fragment(peer, correlation, object_id, fragment, now_millis, host),
             CompanionFrame::Payload {
                 correlation,
                 object_id,
@@ -1043,7 +1036,7 @@ impl CompanionCoordinator {
         object_id: [u8; 32],
         fragment: agenc_relay_e2ee::wire::fragment::FragmentTag,
         now_millis: u64,
-        reserve: impl FnOnce(usize) -> Option<crate::budget::MemoryPermit>,
+        host: &dyn sync::CompanionHost,
     ) -> Result<Vec<sync::Action>, CompanionFault> {
         if correlation.peer_server_id != *self.server_id.as_bytes() {
             return Err(CompanionFault::Protocol);
@@ -1059,9 +1052,29 @@ impl CompanionCoordinator {
         let bytes = match self.ingest(key.clone(), peer, &fragment, now_millis)? {
             Ingested::Complete(bytes) => bytes,
             Ingested::Pending => return Ok(Vec::new()),
-            Ingested::Recent => return self.replay_recent(peer, &correlation, object_id, reserve),
+            Ingested::Recent => {
+                // Every valid proof request fits exactly one canonical fragment. Audit the
+                // original request again before looking up any retained reply on an older link.
+                if !host.terminal_root_profile() && fragment.count == 1
+                    && request::decode_request(&fragment.segment).is_ok_and(|r| r.opcode == agenc_relay_e2ee::objects::federation::ArcFederationOpcode::ProveRootHead)
+                {
+                    return Err(CompanionFault::Protocol);
+                }
+                return self.replay_recent(peer, &correlation, object_id, |n| {
+                    host.reserve_cut_backing(n).ok()
+                });
+            }
         };
         let decoded = request::decode_request(&bytes).map_err(|_| CompanionFault::Protocol)?;
+        if decoded.opcode
+            == agenc_relay_e2ee::objects::federation::ArcFederationOpcode::ProveRootHead
+            && (!host.terminal_root_profile()
+                || decoded.encoded_parameters.len() != 16
+                || !decoded.payload_object_id.is_empty()
+                || fragment.count != 1)
+        {
+            return Err(CompanionFault::Protocol);
+        }
         let refusal = self.refusal_for(&key);
         if decoded.payload_object_id.as_slice().is_empty() {
             return Ok(vec![sync::Action::Execute(CompleteRequest {

@@ -22,7 +22,7 @@ type PageEdit = fn(&mut HistoryPageMetadata, &mut Vec<HistoryMessageRecord>);
 fn idle() -> TestResult<(Parts, Box<ParsedMessage>)> {
     let (fixture, mut edge, sink, page) = fixture()?;
     let pending = edge.pending.remove(&ID).ok_or("pending")?;
-    let PendingKind::Command { message } = pending.kind else {
+    let PendingKind::Command { message, .. } = pending.kind else {
         return Err("command".into());
     };
     edge.history.records.clear();

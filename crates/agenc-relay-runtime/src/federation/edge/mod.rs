@@ -908,8 +908,16 @@ impl EdgeFederation {
     /// The exact live authenticated coordinator connection available for opt-in discovery.
     pub(crate) fn initial_root_link(&self) -> Option<LinkId> {
         let live = self.live.as_ref()?;
-        (self.phase == Phase::Active
-            && live.handle.profile == agenc_relay_federation_wire::FederationProfile::InitialRoot)
+        (self.phase == Phase::Active && live.handle.profile.supports_initial_root())
+            .then_some(live.link)
+    }
+
+    /// The actual version-3 link after successful companion negotiation.
+    pub(crate) fn terminal_root_link(&self) -> Option<LinkId> {
+        let live = self.live.as_ref()?;
+        (self.companion_active()
+            && self.phase == Phase::Active
+            && live.handle.profile == agenc_relay_federation_wire::FederationProfile::TerminalRoot)
             .then_some(live.link)
     }
 
@@ -992,7 +1000,8 @@ impl EdgeFederation {
             .values()
             .filter(|pending| !pending.sink_gone)
             .filter(|pending| {
-                matches!(&pending.kind, request::PendingKind::Command { message }
+                matches!(&pending.kind, request::PendingKind::Join { .. })
+                    || matches!(&pending.kind, request::PendingKind::Command { message, .. }
                     if message.command() == "JOIN")
             })
             .map(|pending| pending.generation);

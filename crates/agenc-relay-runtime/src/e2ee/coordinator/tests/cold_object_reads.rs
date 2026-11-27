@@ -151,6 +151,7 @@ fn evaluate_lookup(
         channel_member: &|_| false,
         binding_channel: &|_| None,
         plan_binding: &|_, _| Ok(None),
+        terminal_login: None,
         plan_root: &|_, _| Ok(None),
         state_generation: 7,
         source_view: Vec::new(),

@@ -112,7 +112,7 @@ fn session_open(
             .flatten()
             .map(|binding| (owner, binding))
     });
-    let Some((owner, (account_id, session_generation, authenticated_at))) = binding else {
+    let Some((owner, (account_id, session_generation, login))) = binding else {
         federation.refuse_remote_session(context, link, peer, fresh);
         return;
     };
@@ -138,7 +138,7 @@ fn session_open(
         seed,
         RemoteSessionGrant {
             writes,
-            authenticated_at,
+            login,
             owner,
         },
     );

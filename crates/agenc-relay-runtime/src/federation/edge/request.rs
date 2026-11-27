@@ -93,7 +93,7 @@ pub enum EdgeCompletion {
         /// The original message and its response label.
         message: Box<ParsedMessage>,
     },
-    /// A covered JOIN result starts its bounded topic and NAMES response.
+    /// A durably recorded JOIN result. Accepted targets continue to topic and NAMES.
     JoinCommitted {
         /// The client connection.
         generation: ConnectionGeneration,
@@ -189,8 +189,27 @@ pub(crate) enum PendingKind {
     },
     Command {
         message: Box<ParsedMessage>,
+        /// Channel instance selected at admission for the original public topic change.
+        topic_channel: Option<agenc_relay_types::ChannelInstanceId>,
+    },
+    Join {
+        message: Box<ParsedMessage>,
+        requester: crate::mutation_render::JoinRequester,
     },
     Close,
+}
+
+impl PendingKind {
+    fn for_operation(message: Box<ParsedMessage>, operation: &FederatedOperation) -> Self {
+        let topic_channel = match operation {
+            FederatedOperation::Topic { channel_id, .. } => Some(*channel_id),
+            _ => None,
+        };
+        Self::Command {
+            message,
+            topic_channel,
+        }
+    }
 }
 
 /// One request awaiting its result or completion.
@@ -788,17 +807,53 @@ fn route_command(
         return super::history::begin(edge, context, generation, message, operation)
             .map(|()| Routed::Forwarded);
     }
+    forward_command(edge, context, generation, user_id, operation, message)
+}
+
+fn forward_command(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    user_id: UserId,
+    operation: FederatedOperation,
+    message: Box<ParsedMessage>,
+) -> Result<Routed, (Box<ParsedMessage>, DomainError)> {
+    let requester = match join_requester(edge, context, user_id, &operation) {
+        Ok(requester) => requester,
+        Err(error) => return Err((message, error)),
+    };
     let Ok(prepared) = prepare_request(edge, context, generation, &operation) else {
         return Err((message, DomainError::ServerBusy));
     };
-    register_request(
-        edge,
-        context,
-        generation,
-        prepared,
-        PendingKind::Command { message },
-    );
+    let pending = match requester {
+        Some(requester) => PendingKind::Join { message, requester },
+        None => PendingKind::for_operation(message, &operation),
+    };
+    register_request(edge, context, generation, prepared, pending);
     Ok(Routed::Forwarded)
+}
+
+fn join_requester(
+    edge: &EdgeFederation,
+    context: &StateCoreContext,
+    user: UserId,
+    operation: &FederatedOperation,
+) -> Result<Option<crate::mutation_render::JoinRequester>, DomainError> {
+    if !matches!(operation, FederatedOperation::Join { .. }) {
+        return Ok(None);
+    }
+    let Some((session, caps)) = edge
+        .replica
+        .session(user)
+        .zip(context.sessions().capabilities_for_user(user))
+    else {
+        return Err(DomainError::RegistrationRequired);
+    };
+    let requester = crate::mutation_render::JoinRequester {
+        nickname: session.nickname.clone(),
+        replies: agenc_relay_client_wire::StandardReplies::negotiated(caps),
+    };
+    Ok(Some(requester))
 }
 
 pub(super) fn defer_account_carrier(
@@ -1661,6 +1716,7 @@ pub(super) fn receive_result(
     for reply in checked.indexed_replies().map_err(|_| Violation::Codec)? {
         replies.push(reply_frame(&edge.config.server_name, reply)?);
     }
+    project_join_result(context, pending, &checked.arm, &mut replies)?;
     let arm = checked.arm;
     let pending = edge
         .pending
@@ -1696,6 +1752,39 @@ pub(super) fn receive_result(
             Ok(completed(edge, context, header.request_id))
         }
     }
+}
+
+/// Project the coordinator's JOIN decisions into the dialect of the original requester.
+fn project_join_result(
+    context: &StateCoreContext,
+    pending: &PendingRequest,
+    arm: &ResultArm,
+    replies: &mut Vec<agenc_relay_client_wire::WireMessage>,
+) -> Result<(), Violation> {
+    let PendingKind::Join { message, requester } = &pending.kind else {
+        return Ok(());
+    };
+    let first = match arm {
+        ResultArm::Committed { .. } => None,
+        ResultArm::Failed {
+            code,
+            context: original,
+        } if replies.is_empty() => {
+            let known = requester
+                .coarse(context.server_prefix(), message, code, original)
+                .map_err(|_| Violation::Consistency)?;
+            replies.extend(known);
+            return Ok(());
+        }
+        ResultArm::Failed {
+            code,
+            context: original,
+        } => Some((code.as_str(), original.as_str())),
+        _ => return Err(Violation::Consistency),
+    };
+    requester
+        .project_covered(context.server_prefix(), message, replies, first)
+        .map_err(|_| Violation::Consistency)
 }
 
 /// A result cannot substitute another request's pending or durable completion.
@@ -1989,7 +2078,23 @@ fn completed_request(
                 }]
             }
         }
-        (PendingKind::Command { message }, ResultArm::Failed { code, .. }) => {
+        (PendingKind::Join { message, .. }, ResultArm::Failed { .. })
+            if !pending.replies.is_empty() =>
+        {
+            if let Some(origin) = edge.origins.get_mut(&generation) {
+                origin.join_names_pending = true;
+            }
+            vec![EdgeCompletion::JoinCommitted {
+                generation,
+                message,
+                frames: pending.replies,
+                echo_permits: Vec::new(),
+            }]
+        }
+        (
+            PendingKind::Join { message, .. } | PendingKind::Command { message, .. },
+            ResultArm::Failed { code, .. },
+        ) => {
             vec![EdgeCompletion::CommandFailed {
                 generation,
                 message,
@@ -1997,7 +2102,7 @@ fn completed_request(
             }]
         }
         (
-            PendingKind::Command { message },
+            PendingKind::Command { message, .. },
             ResultArm::ReplyPage {
                 page_sequence,
                 next_cursor,
@@ -2013,7 +2118,7 @@ fn completed_request(
             }]
         }
         (
-            PendingKind::Command { message },
+            PendingKind::Join { message, .. } | PendingKind::Command { message, .. },
             ResultArm::Committed {
                 resulting_state_generation,
             },
@@ -2030,12 +2135,13 @@ fn completed_request(
                 pending.replies,
             )
         }
-        (PendingKind::Command { message }, ResultArm::Committed { .. })
+        (PendingKind::Command { message, .. }, ResultArm::Committed { .. })
             if matches!(
                 pending.header.opcode,
                 agenc_relay_types::FederationOpcode::Message
                     | agenc_relay_types::FederationOpcode::NickChange
                     | agenc_relay_types::FederationOpcode::Setname
+                    | agenc_relay_types::FederationOpcode::Topic
             ) =>
         {
             super::message_echo::complete(
@@ -2046,7 +2152,7 @@ fn completed_request(
                 pending.replies,
             )
         }
-        (PendingKind::Command { message }, ResultArm::Committed { .. })
+        (PendingKind::Command { message, .. }, ResultArm::Committed { .. })
             if pending.header.opcode == agenc_relay_types::FederationOpcode::AccountSettings
                 && is_committed_account_deletion(&message, &pending.replies) =>
         {
@@ -2056,7 +2162,7 @@ fn completed_request(
                 message,
             }]
         }
-        (PendingKind::Command { message }, _) if !pending.replies.is_empty() => {
+        (PendingKind::Command { message, .. }, _) if !pending.replies.is_empty() => {
             vec![EdgeCompletion::Replies {
                 generation,
                 frames: pending.replies,
@@ -2065,18 +2171,20 @@ fn completed_request(
                 message,
             }]
         }
-        (PendingKind::Command { message }, ResultArm::NoContent) => vec![EdgeCompletion::Replies {
+        (PendingKind::Command { message, .. }, ResultArm::NoContent) => {
+            vec![EdgeCompletion::Replies {
+                generation,
+                frames: Vec::new(),
+                page_sequence: 0,
+                next_cursor: None,
+                message,
+            }]
+        }
+        (PendingKind::Command { message, .. }, _) => vec![EdgeCompletion::CommandCompleted {
             generation,
-            frames: Vec::new(),
-            page_sequence: 0,
-            next_cursor: None,
             message,
         }],
-        (PendingKind::Command { message }, _) => vec![EdgeCompletion::CommandCompleted {
-            generation,
-            message,
-        }],
-        (PendingKind::Close, _) => Vec::new(),
+        (PendingKind::Close | PendingKind::Join { .. }, _) => Vec::new(),
     };
     if edge
         .origins
@@ -2196,7 +2304,10 @@ fn send_directory_query(
         context,
         generation,
         prepared,
-        PendingKind::Command { message },
+        PendingKind::Command {
+            message,
+            topic_channel: None,
+        },
     );
     true
 }
@@ -2236,7 +2347,10 @@ pub(super) fn continue_join_names(
         context,
         generation,
         prepared,
-        PendingKind::Command { message },
+        PendingKind::Command {
+            message,
+            topic_channel: None,
+        },
     );
     true
 }

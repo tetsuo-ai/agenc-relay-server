@@ -201,7 +201,11 @@ impl E2eeEdge {
         if !self.is_active() {
             return Err(E2eeReplyCode::Syncing.into());
         }
-        let command = self.parse_line(edge, message)?;
+        let terminal_root = facts
+            .capabilities
+            .enabled(agenc_relay_types::TERMINAL_ROOT_CAPABILITY)
+            && edge.terminal_root_link().is_some();
+        let command = self.parse_line(edge, message, terminal_root)?;
         if self.witness_blocks(&command) {
             return Err(E2eeReplyCode::Syncing.into());
         }
@@ -331,6 +335,7 @@ impl E2eeEdge {
         &self,
         edge: &EdgeFederation,
         message: &ParsedMessage,
+        terminal_root: bool,
     ) -> Result<Resolved, Refusal> {
         let params: Vec<&str> = message
             .middle()
@@ -350,7 +355,12 @@ impl E2eeEdge {
                 channel: channel_id,
             });
         }
-        let command = parse_command(message.command(), &params)
+        let parser = if terminal_root {
+            agenc_relay_e2ee::wire::command::parse_terminal_root_command
+        } else {
+            parse_command
+        };
+        let command = parser(message.command(), &params)
             .map_err(|_| Refusal::from(E2eeReplyCode::InvalidFragment))?;
         let (opcode, name) = match &command {
             ClientCommand::Egroup(EgroupCommand::ReserveChannel(name)) => {
@@ -843,6 +853,7 @@ fn requires_device(command: &Resolved) -> bool {
                 | EkeyCommand::PublishIdentity
                 | EkeyCommand::PublishRoster
                 | EkeyCommand::FetchIdentity(_)
+                | EkeyCommand::ProveRootHead(_)
                 | EkeyCommand::FetchRootChain { .. }
                 | EkeyCommand::FetchRoster(_)
                 | EkeyCommand::FetchCapabilities { .. }
@@ -1026,6 +1037,10 @@ fn encode_ekey(
 ) -> Result<ArcFederationOpcode, agenc_relay_e2ee::E2eeError> {
     use ArcFederationOpcode as Op;
     Ok(match command {
+        EkeyCommand::ProveRootHead(challenge) => {
+            writer.fixed(challenge)?;
+            Op::ProveRootHead
+        }
         EkeyCommand::FetchIdentity(target) => {
             account(writer, target)?;
             Op::FetchIdentity

@@ -69,7 +69,7 @@ fn envelope_bounds_are_checked_before_the_body_is_copied() -> TestResult {
 
 #[test]
 fn every_kind_has_a_token_a_limit_and_a_direction() -> TestResult {
-    assert_eq!(ArcWireObjectKind::ALL.len(), 37);
+    assert_eq!(ArcWireObjectKind::ALL.len(), 38);
     assert_eq!(ArcWireObjectKind::RecoverySubmission.value(), 35);
     assert_eq!(
         ArcWireObjectKind::RecoverySubmission.token(),
@@ -98,14 +98,22 @@ fn every_kind_has_a_token_a_limit_and_a_direction() -> TestResult {
         ArcWireObjectKind::LeafMembershipProof.maximum_object_bytes(),
         8_192
     );
-    // Kind 38 is not registered by this implementation.
+    // Only the exact fixed-length optional head is accepted. Kind 39 is unassigned.
     assert_eq!(
         ArcWireObject::peek(&[0, 1, 38, 0, 0, 1, 0]),
+        Err(E2eeError::LimitExceeded)
+    );
+    assert_eq!(
+        ArcWireObject::peek(&[0, 1, 39, 0, 0, 1, 0]),
         Err(E2eeError::UnknownDiscriminant)
     );
     for kind in ArcWireObjectKind::ALL {
         assert_eq!(ArcWireObjectKind::from_token(kind.token())?, *kind);
-        assert!(kind.maximum_object_bytes() >= 4_096);
+        if *kind == ArcWireObjectKind::TerminalRootHead {
+            assert_eq!(kind.maximum_object_bytes(), 360);
+        } else {
+            assert!(kind.maximum_object_bytes() >= 4_096);
+        }
         assert_eq!(
             kind.is_server_only(),
             (29..=33).contains(&kind.value()) || kind.value() == 36

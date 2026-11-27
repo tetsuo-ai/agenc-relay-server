@@ -1,8 +1,8 @@
 //! Public-safe replies for registered client commands.
 
 use agenc_relay_client_wire::{
-    CapabilityState, ParsedMessage, ReplyKind, SafeReplyContext, SafeReplyDescription, WireMessage,
-    labeled_response, numeric_reply, standard_reply,
+    CapabilityState, ParsedMessage, ReplyKind, SafeReplyContext, SafeReplyDescription,
+    StandardReplies, WireMessage, labeled_response, numeric_reply,
 };
 use agenc_relay_domain::{DomainError, FailedTarget, RejectedPlan};
 use agenc_relay_types::{ChannelName, PublicErrorCode, UserId};
@@ -185,6 +185,24 @@ pub(crate) fn failure_frame(
         )
         .map_err(|_| RuntimeError::InvalidValue);
     }
+    projected_failure(
+        StandardReplies::negotiated(capabilities),
+        prefix,
+        nickname,
+        request,
+        error,
+        target,
+    )
+}
+
+pub(crate) fn projected_failure(
+    capabilities: StandardReplies,
+    prefix: &str,
+    nickname: &str,
+    request: &ParsedMessage,
+    error: DomainError,
+    target: Option<&FailedTarget>,
+) -> Result<WireMessage, RuntimeError> {
     if let Some(frame) = standard_failure(capabilities, prefix, request, error, target)? {
         return Ok(frame);
     }
@@ -192,13 +210,13 @@ pub(crate) fn failure_frame(
 }
 
 fn standard_failure(
-    capabilities: &CapabilityState,
+    capabilities: StandardReplies,
     prefix: &str,
     request: &ParsedMessage,
     error: DomainError,
     target: Option<&FailedTarget>,
 ) -> Result<Option<WireMessage>, RuntimeError> {
-    if !capabilities.enabled("standard-replies") {
+    if !capabilities.enabled() {
         return Ok(None);
     }
     let operation = request.command();
@@ -211,16 +229,16 @@ fn standard_failure(
     let Some(failure) = plain_standard_failure(operation, error) else {
         return Ok(None);
     };
-    let frame = standard_reply(
-        capabilities,
-        prefix,
-        ReplyKind::Fail,
-        failure.operation,
-        failure.code,
-        &[],
-        description(failure.description)?,
-    )
-    .map_err(|_| RuntimeError::InvalidValue)?;
+    let frame = capabilities
+        .render(
+            prefix,
+            ReplyKind::Fail,
+            failure.operation,
+            failure.code,
+            &[],
+            description(failure.description)?,
+        )
+        .map_err(|_| RuntimeError::InvalidValue)?;
     Ok(Some(frame))
 }
 
@@ -272,7 +290,7 @@ fn plain_standard_failure(operation: &str, error: DomainError) -> Option<Standar
 }
 
 fn standard_channel_failure(
-    capabilities: &CapabilityState,
+    capabilities: StandardReplies,
     prefix: &str,
     request: &ParsedMessage,
     target: Option<&FailedTarget>,
@@ -284,21 +302,21 @@ fn standard_channel_failure(
     let Some(channel) = failure_channel(request, target) else {
         return Ok(None);
     };
-    standard_reply(
-        capabilities,
-        prefix,
-        ReplyKind::Fail,
-        operation,
-        PublicErrorCode::SECRETUNAVAILABLE,
-        &[SafeReplyContext::Channel(&channel)],
-        description("Channel is unavailable")?,
-    )
-    .map(Some)
-    .map_err(|_| RuntimeError::InvalidValue)
+    capabilities
+        .render(
+            prefix,
+            ReplyKind::Fail,
+            operation,
+            PublicErrorCode::SECRETUNAVAILABLE,
+            &[SafeReplyContext::Channel(&channel)],
+            description("Channel is unavailable")?,
+        )
+        .map(Some)
+        .map_err(|_| RuntimeError::InvalidValue)
 }
 
 fn standard_e2ee_failure(
-    capabilities: &CapabilityState,
+    capabilities: StandardReplies,
     prefix: &str,
     request: &ParsedMessage,
     target: Option<&FailedTarget>,
@@ -312,17 +330,17 @@ fn standard_e2ee_failure(
     if operation != "JOIN" && !(operation == "PRIVMSG" && channel.is_some()) {
         return Ok(None);
     }
-    standard_reply(
-        capabilities,
-        prefix,
-        ReplyKind::Fail,
-        operation,
-        PublicErrorCode::E2EEREQUIRED,
-        context,
-        description("End-to-end encryption is required")?,
-    )
-    .map(Some)
-    .map_err(|_| RuntimeError::InvalidValue)
+    capabilities
+        .render(
+            prefix,
+            ReplyKind::Fail,
+            operation,
+            PublicErrorCode::E2EEREQUIRED,
+            context,
+            description("End-to-end encryption is required")?,
+        )
+        .map(Some)
+        .map_err(|_| RuntimeError::InvalidValue)
 }
 
 fn legacy_failure(

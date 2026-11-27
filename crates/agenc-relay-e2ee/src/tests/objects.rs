@@ -1027,10 +1027,11 @@ fn federation_objects_round_trip() -> TestResult {
         usize::try_from(crate::limits::MAX_WITNESS_RESOLUTION_RECORDS)? * 32,
         32_768
     );
-    assert_eq!(ArcFederationOpcode::ALL.len(), 44);
+    assert_eq!(ArcFederationOpcode::ALL.len(), 45);
     assert_eq!(ArcFederationOpcode::SubmitRecovery.value(), 42);
     assert_eq!(ArcFederationOpcode::SubmitRecoveryElement.value(), 43);
     assert_eq!(ArcFederationOpcode::SubmitMembership.value(), 44);
+    assert_eq!(ArcFederationOpcode::ProveRootHead.value(), 45);
     assert_eq!(
         crate::objects::federation::ArcFederationStoreKind::StoreMembership.value(),
         11

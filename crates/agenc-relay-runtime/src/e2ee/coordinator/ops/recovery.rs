@@ -42,6 +42,7 @@ pub(super) fn admit(exec: &Exec<'_>) -> Result<(), Fail> {
         | Op::FetchReceipts
         | Op::FetchIdentity
         | Op::FetchRootChain
+        | Op::ProveRootHead
         | Op::FetchRoster
         | Op::FetchCapabilities
         | Op::FetchBindingLocks

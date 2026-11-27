@@ -125,6 +125,8 @@ mod login_after_registration;
 mod loopback_ports;
 #[path = "stage_eight_e2ee/mixed_profile.rs"]
 mod mixed_profile;
+#[path = "stage_eight_e2ee/negotiated_join.rs"]
+mod negotiated_join;
 #[path = "stage_eight_e2ee/origin_deletion.rs"]
 mod origin_deletion;
 #[path = "stage_eight_e2ee/origin_journal.rs"]

@@ -44,6 +44,7 @@ fuzz_target!(|data: &[u8]| {
         TypedBody::AbortCertificate(value) => Some(value.encode()),
         TypedBody::WelcomeMls(value) => Some(value.encode()),
         TypedBody::RootIdentity(value) => Some(value.encode()),
+        TypedBody::TerminalRootHead(value) => Some(value.encode()),
         TypedBody::RootIdentityChain(value) => Some(value.encode()),
         TypedBody::DeviceRoster(value) => Some(value.encode()),
         TypedBody::DeviceCapabilities(value) => Some(value.encode()),

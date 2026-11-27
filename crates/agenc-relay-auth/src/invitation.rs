@@ -127,10 +127,12 @@ impl AccountCreationInvite {
         })
     }
 
-    /// Verifies the offline authority, exact network, and exclusive time bounds.
-    pub fn verify(
+    /// Checks the expected network, maximum lifetime and current validity window.
+    ///
+    /// Clients can check these public fields before sealing a creation request.
+    /// The coordinator must also verify the issuing authority and enforce single use.
+    pub fn validate_scope(
         &self,
-        authority: Ed25519PublicKey,
         expected_network: NetworkId,
         now: UtcSecond,
     ) -> Result<(), AuthError> {
@@ -146,6 +148,17 @@ impl AccountCreationInvite {
         {
             return Err(AuthError::InvitationRejected);
         }
+        Ok(())
+    }
+
+    /// Verifies the offline authority, exact network, and exclusive time bounds.
+    pub fn verify(
+        &self,
+        authority: Ed25519PublicKey,
+        expected_network: NetworkId,
+        now: UtcSecond,
+    ) -> Result<(), AuthError> {
+        self.validate_scope(expected_network, now)?;
         let tbs = self
             .encoded
             .get(..INVITATION_TBS_BYTES)
