@@ -423,8 +423,12 @@ async fn completed_channel_setting_is_noted_only_with_standard_replies() -> Test
     )?;
     let lines = noted.lines();
     assert_eq!(lines.len(), before + 1);
-    assert!(lines[before].starts_with("@label=owned "));
-    assert!(lines[before].contains(" NOTE CHANCTL UPDATED #room :"));
+    assert!(
+        lines
+            .get(before)
+            .is_some_and(|line| line.starts_with("@label=owned ")
+                && line.contains(" NOTE CHANCTL UPDATED #room :"))
+    );
     harness.line(2, "CAP REQ :-standard-replies")?;
     let before = noted.lines().len();
     complete(
@@ -433,8 +437,11 @@ async fn completed_channel_setting_is_noted_only_with_standard_replies() -> Test
     )?;
     let lines = noted.lines();
     assert_eq!(lines.len(), before + 1);
-    assert!(lines[before].starts_with("@label=quiet "));
-    assert!(lines[before].trim_end().ends_with(" ACK"));
+    assert!(
+        lines.get(before).is_some_and(
+            |line| line.starts_with("@label=quiet ") && line.trim_end().ends_with(" ACK")
+        )
+    );
     let before = noted.lines().len();
     complete(&mut harness, completed(2, "CHANCTL SET notachannel on")?)?;
     complete(&mut harness, completed(9, "CHANCTL SET #room history on")?)?;
