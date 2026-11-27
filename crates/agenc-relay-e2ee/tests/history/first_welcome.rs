@@ -3,14 +3,18 @@
 //! Companion 9.4, 9.5 and 12.4. The recipient learns its authentic initial
 //! context after independently replaying the root-locked first public Add.
 use super::*;
+use agenc_relay_crypto::SignatureDomain;
 use agenc_relay_e2ee::identity::ClientIdentity;
 use agenc_relay_e2ee::initial_authority::{
     ExpectedInitialAuthority, InitialPrincipalEvidence, PublicGenesisEvidence,
     first_welcome::{FirstAddEvidence, PublicFirstAdd, authenticate_first_add},
 };
-use agenc_relay_e2ee::objects::sequencing::terminal_certificate_view;
+use agenc_relay_e2ee::object::ArcWireObjectRef;
+use agenc_relay_e2ee::objects::sequencing::{
+    ArcCommitFinalizationCertificate, terminal_certificate_view,
+};
 use agenc_relay_e2ee::route::verify_initial_member_plan;
-use agenc_relay_e2ee::{ObjectId, TlsVec};
+use agenc_relay_e2ee::{ObjectId, TlsDecode, TlsVec};
 
 struct Inputs {
     genesis: Genesis,
@@ -115,6 +119,15 @@ impl Inputs {
         pin: &ExpectedInitialAuthority,
         cert: &(Vec<u8>, [u8; 32]),
     ) -> Result<PublicFirstAdd, E2eeError> {
+        self.inspect_address(pin, cert, ObjectId::compute(&cert.0))
+    }
+
+    fn inspect_address(
+        &self,
+        pin: &ExpectedInitialAuthority,
+        cert: &(Vec<u8>, [u8; 32]),
+        address: ObjectId,
+    ) -> Result<PublicFirstAdd, E2eeError> {
         let pairs: Vec<_> = self
             .directory
             .iter()
@@ -136,7 +149,7 @@ impl Inputs {
                 recipient_roster: &self.roster,
                 creator_membership: &self.membership,
                 certificate: &cert.0,
-                expected_certificate: (ObjectId::compute(&cert.0), cert.1),
+                expected_certificate: (address, cert.1),
             },
             &mut budget(),
         )
@@ -186,5 +199,115 @@ fn original_signed_first_add_requires_its_root_locks_controller_council_and_epoc
         &signed_membership(&inputs.genesis, &(1, 9, JOINER_LEAF_SEED, 0, [55; 32]))?,
     )?;
     assert!(inputs.inspect(&pin, &signed).is_err());
+    Ok(())
+}
+
+fn changed_certificate(
+    original: &(Vec<u8>, [u8; 32]),
+    change: impl FnOnce(&mut ArcCommitFinalizationCertificate),
+) -> Result<(Vec<u8>, [u8; 32]), E2eeError> {
+    let object_ref = ArcWireObjectRef::parse(&original.0)?;
+    let mut certificate =
+        ArcCommitFinalizationCertificate::decode_exact(object_ref.body(), &mut budget())?;
+    change(&mut certificate);
+    certificate.sequencer_signature = sign(
+        &key(SEQUENCER_SEED),
+        SignatureDomain::CommitFinalization,
+        &certificate.tbs,
+    )?;
+    Ok((
+        object(ArcWireObjectKind::FinalizationCertificate, &certificate)?,
+        original.1,
+    ))
+}
+
+#[test]
+fn first_add_checks_the_selected_delivery_original_recipient_roster_and_only_bootstrap_action()
+-> TestResult {
+    let mut inputs = Inputs::new()?;
+    let pin = inputs.genesis.expected;
+    let valid = inputs.certificate(vec![(0, 7)], vec![(0, 7)])?;
+    assert!(
+        inputs
+            .inspect(&pin, &(inputs.policy.clone(), valid.1))
+            .is_err()
+    );
+    assert!(
+        inputs
+            .inspect_address(&pin, &valid, ObjectId::compute(&inputs.binding))
+            .is_err()
+    );
+    assert!(inputs.inspect(&pin, &(valid.0.clone(), [12; 32])).is_err());
+    let different = changed_certificate(&valid, |cert| {
+        cert.tbs.request.proof.authorization.tbs.authorization_rule =
+            ArcCommitAuthorizationRule::RosterRecovery
+    })?;
+    assert!(inputs.inspect(&pin, &different).is_err());
+    let different = changed_certificate(&valid, |cert| {
+        cert.tbs.request.proof.authorization.tbs.action_bits = action_bits::ROSTER
+    })?;
+    assert!(inputs.inspect(&pin, &different).is_err());
+    let decoded = ArcCommitFinalizationCertificate::decode_exact(
+        ArcWireObjectRef::parse(&valid.0)?.body(),
+        &mut budget(),
+    )?;
+    let original = decoded
+        .tbs
+        .request
+        .proof
+        .acknowledgements
+        .as_slice()
+        .first()
+        .ok_or(E2eeError::InvalidValue)?;
+    let duplicate = TlsVec::new(vec![original.clone(), original.clone()])?;
+    let different = changed_certificate(&valid, |cert| {
+        cert.tbs.request.proof.acknowledgements = duplicate
+    })?;
+    assert!(inputs.inspect(&pin, &different).is_err());
+    let past = changed_certificate(&valid, |cert| {
+        cert.tbs
+            .request
+            .proof
+            .authorization
+            .tbs
+            .canonical_validation_time = 99
+    })?;
+    assert!(inputs.inspect(&pin, &past).is_err());
+    inputs.recipient.network_id = [63; 32];
+    assert!(inputs.inspect(&pin, &valid).is_err());
+    inputs.recipient.network_id = NETWORK;
+    inputs.recipient.device_id = [17; 16];
+    assert!(inputs.inspect(&pin, &valid).is_err());
+    inputs.recipient.device_id = [9; 16];
+    inputs.roster = object(
+        ArcWireObjectKind::DeviceRoster,
+        &inputs.genesis.principal(0)?.roster,
+    )?;
+    assert!(inputs.inspect(&pin, &valid).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_context_genuinely_committed_after_the_first_add_time_cannot_complete_that_receive()
+-> TestResult {
+    let mut inputs = Inputs::new()?;
+    inputs.genesis.core.initial_validation_time = VALIDATION_TIME + 1;
+    inputs.genesis.seal()?;
+    inputs.binding = object(
+        ArcWireObjectKind::ConversationBinding,
+        &inputs.genesis.package,
+    )?;
+    let pin = inputs.genesis.expected;
+    let signed = inputs.certificate(vec![(0, 7)], vec![(0, 7)])?;
+    assert_eq!(
+        inputs.genesis.authority()?.validation_time().0,
+        VALIDATION_TIME + 1
+    );
+    let public = inputs.inspect(&pin, &signed)?;
+    assert!(
+        public
+            .complete_context(&inputs.genesis.core.encode()?, &mut budget())
+            .is_err()
+    );
     Ok(())
 }

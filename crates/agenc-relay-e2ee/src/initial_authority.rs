@@ -26,7 +26,7 @@ pub use prior::PriorTerminal;
 
 use crate::context::verify_context_core;
 use crate::error::E2eeError;
-use crate::identity::ValidationTime;
+use crate::identity::{ClientIdentity, ValidationTime};
 use crate::limits::MAX_BINDING_PRINCIPALS;
 use crate::object::{ArcWireObject, ArcWireObjectKind};
 use crate::objects::conversation::{
@@ -106,6 +106,7 @@ pub(crate) struct GenesisObjects {
     pub(crate) prior_terminal: Option<PriorTerminal>,
     network: [u8; 32],
     mls_version: u16,
+    creator: ClientIdentity,
 }
 
 /// Initial public authority revalidated under the independent binding pin.
@@ -248,7 +249,7 @@ fn authenticated_objects(
     {
         return Err(E2eeError::InvalidValue);
     }
-    anchors::bootstrap(&package, &policy, &principals)?;
+    let creator = anchors::bootstrap(&package, &policy, &principals)?;
     let sequencer = anchors::sequencer(
         expected,
         evidence.sequencer_credential,
@@ -263,6 +264,7 @@ fn authenticated_objects(
             sequencer,
             network: expected.network_id,
             mls_version: tbs.mls_version,
+            creator,
             required_operational_policy_id: tbs.required_operational_policy_id,
             prior_terminal: prior.cloned(),
         },

@@ -5,7 +5,8 @@
 use super::{ExpectedInitialAuthority, InitialPrincipalEvidence, PriorTerminal, decode_object};
 use crate::error::E2eeError;
 use crate::identity::{
-    Interval, ValidationTime, ensure_distinct_device_keys, restore_roster, verify_root_standalone,
+    ClientIdentity, Interval, ValidationTime, ensure_distinct_device_keys, restore_roster,
+    verify_root_standalone,
 };
 use crate::ids::semantic_id_of;
 use crate::limits::{MAX_BINDING_PRINCIPALS, PROFILE_VERSION};
@@ -114,7 +115,7 @@ pub(super) fn bootstrap(
     package: &ArcConversationBindingPackage,
     policy: &VerifiedPolicy,
     principals: &PrincipalRosters,
-) -> Result<(), E2eeError> {
+) -> Result<ClientIdentity, E2eeError> {
     controller_roots(policy, principals)?;
     let [creator] = policy.council.as_slice() else {
         return Err(E2eeError::InvalidValue);
@@ -140,7 +141,12 @@ pub(super) fn bootstrap(
     {
         return Err(E2eeError::InvalidValue);
     }
-    Ok(())
+    Ok(ClientIdentity {
+        network_id: package.binding.tbs.network_id,
+        account_id: *account,
+        root_fingerprint: creator.root_fingerprint,
+        device_id: creator.device_id,
+    })
 }
 
 fn controller_roots(

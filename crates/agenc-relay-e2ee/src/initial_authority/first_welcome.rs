@@ -9,12 +9,13 @@ use super::{
 use crate::history::{ChainLimits, ChainStep, HistoricalChain, RecordReferences};
 use crate::identity::{ClientIdentity, ValidationTime};
 use crate::membership::{LeafMembershipSet, verify_leaf_membership_proof};
-use crate::object::{ArcWireObject, ArcWireObjectKind, ObjectId};
+use crate::object::{ArcWireObject, ArcWireObjectKind, ArcWireObjectRef, ObjectId};
 use crate::objects::account_id_bytes;
 use crate::objects::conversation::{ArcCommitAuthorizationRule, ArcInitialMemberPlan, action_bits};
+use crate::objects::identity::ArcDeviceRoster;
 use crate::objects::membership::ArcLeafMembershipProof;
 use crate::objects::sequencing::{ArcCommitFinalizationCertificate, ArcSequencerRecord};
-use crate::{DecodeBudget, E2eeError, TlsEncode};
+use crate::{DecodeBudget, E2eeError, TlsDecode, TlsEncode};
 
 /// Public inputs at the first planned recipient. Obtain the delivery's addresses, selected local
 /// client, locked registered binding and complete signed objects from independently scoped reads.
@@ -78,14 +79,13 @@ pub fn authenticate_first_add(
     let (genesis, plan) = authenticated_objects(pin, None, evidence, budget)?;
     require_recipient(&genesis, &plan, add.recipient)?;
     let memberships = creator_membership(&genesis, add.creator_membership, budget)?;
-    if ObjectId::compute(add.certificate) != add.expected_certificate.0 {
+    let wire = ArcWireObjectRef::parse(add.certificate)?;
+    if wire.kind() != ArcWireObjectKind::FinalizationCertificate
+        || wire.object_id()? != add.expected_certificate.0
+    {
         return Err(E2eeError::InvalidValue);
     }
-    let certificate: ArcCommitFinalizationCertificate = decode_object(
-        add.certificate,
-        ArcWireObjectKind::FinalizationCertificate,
-        budget,
-    )?;
+    let certificate = ArcCommitFinalizationCertificate::decode_exact(wire.body(), budget)?;
     let proof = &certificate.tbs.request.proof;
     let authorization = &proof.authorization.tbs;
     if authorization.authorization_rule != ArcCommitAuthorizationRule::ControlledTransition
@@ -155,22 +155,28 @@ fn check_terminal(
         memberships: Some(memberships),
         ..Default::default()
     };
-    let ChainStep::Finalized {
-        finalization_id,
-        resulting_epoch: 1,
-        transitions,
-        ..
-    } = advance(chain, terminal, &references, budget)?
-    else {
+    let roster: ArcDeviceRoster = decode_object(
+        add.recipient_roster,
+        ArcWireObjectKind::DeviceRoster,
+        budget,
+    )?;
+    if account_id_bytes(&roster.tbs.account_id)? != add.recipient.account_id {
         return Err(E2eeError::InvalidValue);
-    };
-    let Some((root, roster)) = chain.principals().get(&add.recipient.account_id) else {
-        return Err(E2eeError::InvalidValue);
-    };
+    }
+    // This exact typed record takes the chain's normal finalization path and authenticates the
+    // recipient's roster. No other candidate or terminal can be substituted here.
+    advance(chain, terminal, &references, budget)?;
+    let finalization_id = *chain.accepted_state_id();
+    let recipient = chain
+        .principals()
+        .get(&add.recipient.account_id)
+        .and_then(|(root, roster)| {
+            roster
+                .device(&add.recipient.device_id)
+                .map(|_| root.fingerprint)
+        });
     if finalization_id != add.expected_certificate.1
-        || root.fingerprint != add.recipient.root_fingerprint
-        || roster.device(&add.recipient.device_id).is_none()
-        || transitions.roster_heads.as_slice() != [(add.recipient.account_id, roster.roster_id)]
+        || recipient != Some(add.recipient.root_fingerprint)
     {
         return Err(E2eeError::InvalidValue);
     }
@@ -194,19 +200,28 @@ fn require_recipient(
     plan: &ArcInitialMemberPlan,
     recipient: &ClientIdentity,
 ) -> Result<(), E2eeError> {
-    let [creator] = genesis.policy.council.as_slice() else {
-        return Err(E2eeError::InvalidValue);
-    };
-    let planned = plan.entries.as_slice().iter().find(|entry| {
-        (entry.root_fingerprint, entry.device_id) != (creator.root_fingerprint, creator.device_id)
-    });
-    if recipient.network_id != genesis.network
-        || !planned.is_some_and(|entry| {
-            entry.account_id.as_slice() == recipient.account_id
-                && entry.root_fingerprint == recipient.root_fingerprint
-                && entry.device_id == recipient.device_id
+    let original = &genesis.creator;
+    let planned = plan
+        .entries
+        .as_slice()
+        .iter()
+        .find(|entry| {
+            (entry.root_fingerprint, entry.device_id)
+                != (original.root_fingerprint, original.device_id)
         })
-    {
+        .map(|entry| {
+            (
+                entry.account_id.as_slice(),
+                entry.root_fingerprint,
+                entry.device_id,
+            )
+        });
+    let target = (
+        recipient.account_id.as_slice(),
+        recipient.root_fingerprint,
+        recipient.device_id,
+    );
+    if recipient.network_id != genesis.network || planned != Some(target) {
         return Err(E2eeError::InvalidValue);
     }
     Ok(())
@@ -231,14 +246,21 @@ fn creator_membership(
         root,
         roster,
     )?;
-    if member.epoch != 0
-        || member.leaf_index != 0
-        || !member.is_continuing()
-        || genesis
-            .policy
-            .council_member(&member.root_fingerprint, &member.device_id)
-            .is_none()
-    {
+    if (
+        member.epoch,
+        member.leaf_index,
+        member.is_continuing(),
+        member.account_id,
+        member.root_fingerprint,
+        member.device_id,
+    ) != (
+        0,
+        0,
+        true,
+        genesis.creator.account_id,
+        genesis.creator.root_fingerprint,
+        genesis.creator.device_id,
+    ) {
         return Err(E2eeError::InvalidValue);
     }
     let mut members = LeafMembershipSet::default();
