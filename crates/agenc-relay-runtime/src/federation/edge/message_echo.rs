@@ -262,11 +262,21 @@ fn original_user_mode(
     let Some(EchoChannels::UserMode { session, revision }) = original else {
         return false;
     };
-    let mut params = message.middle().iter().map(String::as_str).chain(message.trailing());
-    let expected = if record.user_mode_bits & 2 == 0 { "-w" } else { "+w" };
+    let mut params = message
+        .middle()
+        .iter()
+        .map(String::as_str)
+        .chain(message.trailing());
+    let expected = if record.user_mode_bits & 2 == 0 {
+        "-w"
+    } else {
+        "+w"
+    };
     record.session_id == *session
         && record.session_revision.get() > *revision
-        && params.next().is_some_and(|name| name.eq_ignore_ascii_case(record.nickname.presentation()))
+        && params
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case(record.nickname.presentation()))
         && params.next() == Some(expected)
         && params.next().is_none()
 }

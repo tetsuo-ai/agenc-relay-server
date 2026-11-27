@@ -186,7 +186,10 @@ pub enum EdgeCompletion {
 pub(crate) enum EchoChannels {
     Topic(agenc_relay_types::ChannelInstanceId),
     Invite(invitation::InviteRequester),
-    UserMode { session: SessionId, revision: u64 },
+    UserMode {
+        session: SessionId,
+        revision: u64,
+    },
     UnlabeledPart(PartRequester),
     Message(message_results::MessageRequester),
     Part {
