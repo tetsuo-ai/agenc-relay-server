@@ -183,6 +183,57 @@ fn a_malformed_echo_and_an_extra_recipient_cannot_account_for_a_decision() -> Te
     Ok(())
 }
 
+#[test]
+fn operator_notice_echo_requires_the_original_session_revision_nickname_and_setting() -> TestResult
+{
+    use agenc_relay_domain::federation::SessionRecord;
+    use agenc_relay_types::SessionId;
+    let session = SessionId::from_bytes([6; 16]);
+    let mut record = SessionRecord {
+        session_id: session,
+        user_id: SENDER,
+        home_server_id: ServerId::from_bytes([2; 16]),
+        session_revision: Revision::new(7)?,
+        account: None,
+        nickname: NicknameValue::parse("Sam")?,
+        display_name: agenc_relay_domain::DisplayNameValue::prepare("Sam")?,
+        public_cloak: agenc_relay_testkit::deterministic_cloak(1)?,
+        account_label: None,
+        user_mode_bits: 3,
+        away: None,
+    };
+    let original = EchoChannels::UserMode {
+        session,
+        revision: 6,
+    };
+    for (line, matches) in [
+        ("MODE sam +w", true),
+        ("MODE Sam :+w", true),
+        ("MODE Pat +w", false),
+        ("MODE Sam -w", false),
+        ("MODE Sam +w extra", false),
+        ("MODE Sam", false),
+        ("MODE", false),
+    ] {
+        let message = parse_message(FramedLine::new(line)?)?.ok_or("mode request")?;
+        assert_eq!(
+            original_user_mode(&message, Some(&original), &record),
+            matches,
+            "{line}"
+        );
+    }
+    let off = parse_message(FramedLine::new("MODE Sam -w")?)?.ok_or("mode request")?;
+    record.user_mode_bits = 1;
+    assert!(original_user_mode(&off, Some(&original), &record));
+    assert!(!original_user_mode(&off, None, &record));
+    record.session_revision = Revision::new(6)?;
+    assert!(!original_user_mode(&off, Some(&original), &record));
+    record.session_revision = Revision::new(7)?;
+    record.session_id = SessionId::from_bytes([7; 16]);
+    assert!(!original_user_mode(&off, Some(&original), &record));
+    Ok(())
+}
+
 /// The labeled channel message most cases send.
 fn labeled_message() -> TestResult<EdgeFederation> {
     edge_with("@label=m1 PRIVMSG #edge :hi", FederationOpcode::Message)

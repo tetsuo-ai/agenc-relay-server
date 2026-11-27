@@ -186,6 +186,7 @@ pub enum EdgeCompletion {
 pub(crate) enum EchoChannels {
     Topic(agenc_relay_types::ChannelInstanceId),
     Invite(invitation::InviteRequester),
+    UserMode { session: SessionId, revision: u64 },
     UnlabeledPart(PartRequester),
     Message(message_results::MessageRequester),
     Part {
@@ -233,6 +234,14 @@ impl PendingKind {
     ) -> Self {
         let echo_channels = match operation {
             FederatedOperation::Topic { channel_id, .. } => Some(EchoChannels::Topic(channel_id)),
+            FederatedOperation::UserMode {
+                session_id,
+                expected_session_revision,
+                ..
+            } => Some(EchoChannels::UserMode {
+                session: session_id,
+                revision: expected_session_revision,
+            }),
             FederatedOperation::Part {
                 all_channels: false,
                 channels,
@@ -2311,6 +2320,7 @@ fn completed_request(
             pending.header.opcode,
             agenc_relay_types::FederationOpcode::Message
                 | agenc_relay_types::FederationOpcode::NickChange
+                | agenc_relay_types::FederationOpcode::UserMode
                 | agenc_relay_types::FederationOpcode::Setname
                 | agenc_relay_types::FederationOpcode::Invite
                 | agenc_relay_types::FederationOpcode::Topic
