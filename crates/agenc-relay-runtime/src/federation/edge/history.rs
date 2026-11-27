@@ -41,6 +41,12 @@ pub(super) struct HistoryRequests {
     retention: crate::federation::history_retention::Retention,
 }
 
+/// Client batch references allow letters, digits and hyphens (companion §11.7).
+/// Keep the whole request identity so different reads have different references.
+fn batch_reference(id: RequestId) -> String {
+    format!("h-{:032x}", u128::from_be_bytes(*id.as_bytes()))
+}
+
 struct Batch {
     channel: ChannelInstanceId,
     query: HistoryQuery,
@@ -117,7 +123,7 @@ pub(super) fn begin(
     let batch = Batch {
         channel: *channel_id,
         query,
-        id: id.to_base64url(),
+        id: batch_reference(id),
         token: None,
         authorization: None,
         page: 0,
