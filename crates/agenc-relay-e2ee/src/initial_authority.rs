@@ -16,6 +16,8 @@
 #![forbid(unsafe_code)]
 
 mod anchors;
+/// Public first-Add evidence for a recipient awaiting its authenticated MLS context.
+pub mod first_welcome;
 mod prior;
 /// An independently pinned unsigned proposal for protected genesis signing.
 pub mod proposal;
@@ -25,15 +27,15 @@ pub use prior::PriorTerminal;
 use crate::context::verify_context_core;
 use crate::error::E2eeError;
 use crate::identity::ValidationTime;
-use crate::ids::semantic_id_of;
 use crate::limits::MAX_BINDING_PRINCIPALS;
 use crate::object::{ArcWireObject, ArcWireObjectKind};
-use crate::objects::conversation::{ArcContextCoreTbs, ArcConversationBindingPackage, ArcPolicy};
+use crate::objects::conversation::{
+    ArcContextCoreTbs, ArcConversationBindingPackage, ArcInitialMemberPlan, ArcPolicy,
+};
 use crate::policy::{VerifiedPolicy, verify_policy};
 use crate::route::{PrincipalRosters, VerifiedBinding, verify_binding_package};
 use crate::sequencer::VerifiedSequencerCredential;
 use crate::tls::{DecodeBudget, TlsDecode};
-use agenc_relay_crypto::SemanticHashDomain;
 
 /// Initial source identity established independently of the evidence upload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,42 +72,73 @@ pub struct InitialAuthorityEvidence<'a> {
     pub principals: &'a [InitialPrincipalEvidence<'a>],
 }
 
+/// Public genesis evidence independently available before a new member decrypts its first MLS Welcome.
+#[derive(Clone, Copy, Debug)]
+pub struct PublicGenesisEvidence<'a> {
+    /// Complete signed conversation binding.
+    pub binding_object: &'a [u8],
+    /// Complete signed generation-zero policy.
+    pub initial_policy_object: &'a [u8],
+    /// Exact TLS sequencer credential bound by the independently pinned binding.
+    pub sequencer_credential: &'a [u8],
+    /// Signed root and roster pair for every genesis principal, in binding order.
+    pub principals: &'a [InitialPrincipalEvidence<'a>],
+}
+
+impl<'a> From<&InitialAuthorityEvidence<'a>> for PublicGenesisEvidence<'a> {
+    fn from(evidence: &InitialAuthorityEvidence<'a>) -> Self {
+        Self {
+            binding_object: evidence.binding_object,
+            initial_policy_object: evidence.initial_policy_object,
+            sequencer_credential: evidence.sequencer_credential,
+            principals: evidence.principals,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct GenesisObjects {
+    pub(crate) binding: VerifiedBinding,
+    pub(crate) principals: PrincipalRosters,
+    pub(crate) policy: VerifiedPolicy,
+    pub(crate) sequencer: VerifiedSequencerCredential,
+    pub(crate) required_operational_policy_id: [u8; 32],
+    pub(crate) prior_terminal: Option<PriorTerminal>,
+    network: [u8; 32],
+    mls_version: u16,
+}
+
 /// Initial public authority revalidated under the independent binding pin.
 /// This value cannot clear a recovery gate or authorize a later context.
 #[derive(Debug)]
 pub struct InitialAuthority {
-    binding: VerifiedBinding,
-    principals: PrincipalRosters,
-    policy: VerifiedPolicy,
-    sequencer: VerifiedSequencerCredential,
+    pub(crate) genesis: GenesisObjects,
     validation_time: ValidationTime,
-    required_operational_policy_id: [u8; 32],
-    prior_terminal: Option<PriorTerminal>,
 }
 
 impl InitialAuthority {
     /// Original binding, including its verified approvals and root locks.
     #[must_use]
     pub const fn binding(&self) -> &VerifiedBinding {
-        &self.binding
+        &self.genesis.binding
     }
 
     /// Exact initial roots and rosters, independent of the current directory.
     #[must_use]
     pub const fn principals(&self) -> &PrincipalRosters {
-        &self.principals
+        &self.genesis.principals
     }
 
     /// Initial policy only; publication does not prove later adoption.
     #[must_use]
     pub const fn policy(&self) -> &VerifiedPolicy {
-        &self.policy
+        &self.genesis.policy
     }
 
     /// Credential selected directly by the trusted initial binding.
     #[must_use]
     pub const fn sequencer(&self) -> &VerifiedSequencerCredential {
-        &self.sequencer
+        &self.genesis.sequencer
     }
 
     /// Canonical initial time committed by the context core.
@@ -117,14 +150,14 @@ impl InitialAuthority {
     /// Required future bootstrap policy ID; its body and adoption are unverified.
     #[must_use]
     pub const fn required_operational_policy_id(&self) -> &[u8; 32] {
-        &self.required_operational_policy_id
+        &self.genesis.required_operational_policy_id
     }
 
     /// The closed incarnation a recreated route follows; `None` at
     /// semantic incarnation zero.
     #[must_use]
     pub const fn prior_terminal(&self) -> Option<&PriorTerminal> {
-        self.prior_terminal.as_ref()
+        self.genesis.prior_terminal.as_ref()
     }
 }
 
@@ -174,6 +207,16 @@ fn authenticate(
     evidence: &InitialAuthorityEvidence<'_>,
     budget: &mut DecodeBudget,
 ) -> Result<InitialAuthority, E2eeError> {
+    let (genesis, _) = authenticated_objects(expected, prior, &evidence.into(), budget)?;
+    genesis.complete(evidence.context_core, budget)
+}
+
+fn authenticated_objects(
+    expected: &ExpectedInitialAuthority,
+    prior: Option<&PriorTerminal>,
+    evidence: &PublicGenesisEvidence<'_>,
+    budget: &mut DecodeBudget,
+) -> Result<(GenesisObjects, ArcInitialMemberPlan), E2eeError> {
     if evidence.principals.is_empty() || evidence.principals.len() > MAX_BINDING_PRINCIPALS {
         return Err(E2eeError::LimitExceeded);
     }
@@ -183,20 +226,14 @@ fn authenticate(
         budget,
     )?;
     anchors::binding(expected, prior, &package)?;
-    let core = ArcContextCoreTbs::decode_exact(evidence.context_core, budget)?;
-    let time = ValidationTime(core.initial_validation_time);
-    let principals = anchors::principals(expected, &package, evidence.principals, time, budget)?;
+    let tbs = &package.binding.tbs;
+    let principals = anchors::principals(expected, &package, evidence.principals, budget)?;
     let binding = verify_binding_package(&expected.network_id, &package, &principals)?;
-    verify_context_core(&expected.network_id, &core, &binding)?;
-    anchors::core(&package.binding.tbs, &core)?;
     let policy: ArcPolicy = decode_object(
         evidence.initial_policy_object,
         ArcWireObjectKind::Policy,
         budget,
     )?;
-    if semantic_id_of(SemanticHashDomain::PolicyId, &policy.tbs)? != core.initial_policy_id {
-        return Err(E2eeError::InvalidValue);
-    }
     let policy = verify_policy(
         &expected.network_id,
         &expected.conversation_id,
@@ -204,17 +241,56 @@ fn authenticate(
         &principals,
         None,
     )?;
+    if policy.policy_id != tbs.initial_policy_id
+        || tbs.initial_policy_id == [0; 32]
+        || tbs.required_operational_policy_id == [0; 32]
+        || tbs.required_operational_policy_id == tbs.initial_policy_id
+    {
+        return Err(E2eeError::InvalidValue);
+    }
     anchors::bootstrap(&package, &policy, &principals)?;
-    let sequencer = anchors::sequencer(expected, evidence.sequencer_credential, &core, budget)?;
-    Ok(InitialAuthority {
-        binding,
-        principals,
-        policy,
-        sequencer,
-        validation_time: time,
-        required_operational_policy_id: core.required_operational_policy_id,
-        prior_terminal: prior.cloned(),
-    })
+    let sequencer = anchors::sequencer(
+        expected,
+        evidence.sequencer_credential,
+        &tbs.sequencer_credential_id,
+        budget,
+    )?;
+    Ok((
+        GenesisObjects {
+            binding,
+            principals,
+            policy,
+            sequencer,
+            network: expected.network_id,
+            mls_version: tbs.mls_version,
+            required_operational_policy_id: tbs.required_operational_policy_id,
+            prior_terminal: prior.cloned(),
+        },
+        package.initial_member_plan,
+    ))
+}
+
+impl GenesisObjects {
+    fn complete(
+        self,
+        bytes: &[u8],
+        budget: &mut DecodeBudget,
+    ) -> Result<InitialAuthority, E2eeError> {
+        let core = ArcContextCoreTbs::decode_exact(bytes, budget)?;
+        verify_context_core(&self.network, &core, &self.binding)?;
+        if core.mls_version != self.mls_version
+            || core.initial_policy_id != self.policy.policy_id
+            || core.required_operational_policy_id != self.required_operational_policy_id
+        {
+            return Err(E2eeError::InvalidValue);
+        }
+        let validation_time = ValidationTime(core.initial_validation_time);
+        anchors::require_initial_time(&self.principals, &self.sequencer, validation_time)?;
+        Ok(InitialAuthority {
+            genesis: self,
+            validation_time,
+        })
+    }
 }
 
 fn decode_object<T: TlsDecode>(

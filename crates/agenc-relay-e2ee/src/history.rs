@@ -333,8 +333,17 @@ impl HistoricalChain {
         initial: &InitialAuthority,
         limits: ChainLimits,
     ) -> Result<Self, E2eeError> {
-        let binding = initial.binding();
-        let anchored = match initial.prior_terminal() {
+        Self::from_genesis(network_id, conversation_id, &initial.genesis, limits)
+    }
+
+    pub(crate) fn from_genesis(
+        network_id: &[u8; 32],
+        conversation_id: &SemanticId,
+        initial: &crate::initial_authority::GenesisObjects,
+        limits: ChainLimits,
+    ) -> Result<Self, E2eeError> {
+        let binding = &initial.binding;
+        let anchored = match initial.prior_terminal.as_ref() {
             None => binding.route.incarnation == 0,
             Some(prior) => prior.precedes(network_id, conversation_id, &binding.route),
         };
@@ -349,15 +358,15 @@ impl HistoricalChain {
             context_core_id: binding.context_core_id,
         };
         let anchor = semantic_id_of(SemanticHashDomain::GroupGenesisId, &genesis)?;
-        let sequencer = *initial.sequencer();
+        let sequencer = initial.sequencer;
         Ok(Self {
             network_id: *network_id,
             conversation_id: *conversation_id,
             binding: binding.clone(),
-            principals: initial.principals().clone(),
-            policy: initial.policy().clone(),
+            principals: initial.principals.clone(),
+            policy: initial.policy.clone(),
             sequencer,
-            required_operational_policy_id: *initial.required_operational_policy_id(),
+            required_operational_policy_id: initial.required_operational_policy_id,
             bootstrap_pending: true,
             epoch: 0,
             accepted_state_id: anchor,
