@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-for tool in systemd-analyze tor; do
+for tool in systemd-analyze tor rg; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "stage-six qualification: missing $tool" >&2
         exit 1
@@ -60,6 +60,12 @@ if rg -n --hidden --glob '!target/**' --glob '!fuzz/target/**' \
     crates deploy; then
     echo "stage-six qualification: forbidden socket, proxy, or DNS path found" >&2
     exit 1
+else
+    scan_status=$?
+    if [[ "$scan_status" != 1 ]]; then
+        echo "stage-six qualification: source scan failed (rg status $scan_status)" >&2
+        exit "$scan_status"
+    fi
 fi
 
 echo "stage-six controlled host and Tor qualification: ok"
