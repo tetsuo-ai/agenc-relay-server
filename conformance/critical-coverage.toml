@@ -4,7 +4,7 @@ minimum_overall_line_percent = 90.0
 critical_region_percent = 100.0
 required_categories = ["authorization-decisions", "parser-error-discriminants", "persistence-recovery", "protocol-enum-arms", "section-27-invariant-checkers"]
 reviewed_source_files = 1177
-reviewed_source_sha256 = "05ded14c9050371c78173a808cae03a68fb4cde8e77279931621e45ed341e461"
+reviewed_source_sha256 = "83a1d1cdd4cbbf288708351775355157234145a97427c634b3d937908dcfa6ed"
 deferred = []
 
 [[region]]
@@ -864,9 +864,21 @@ id = "pending-companion-security-account"
 category = "authorization-decisions"
 file = "crates/agenc-relay-runtime/src/e2ee/coordinator/mod.rs"
 item = "blocks_account_deletion"
-source_sha256 = "a371ce0f025e6f1dec4d9c45bc5ae482da2e356c02c5e9c739dcd4bf4c6c34a9"
-start_line = 1354
-end_line = 1354
+source_sha256 = "8b390c564516cd6498faeb7a8cbf559b0e12dfc394ff61473797f16420824707"
+start_line = 1359
+end_line = 1359
 span_sha256 = "21794f8ca913b4779fbb2eef725ec1e1ed09bd5d71726a118fb34b1ed9e5d718"
 metric = "branches"
 reason = "Only its authenticated owner is held by a staged security transition or successfully granted reservation."
+
+[[region]]
+id = "pending-root-at-account-deletion"
+category = "authorization-decisions"
+file = "crates/agenc-relay-runtime/src/e2ee/coordinator/mod.rs"
+item = "blocks_account_deletion"
+source_sha256 = "8b390c564516cd6498faeb7a8cbf559b0e12dfc394ff61473797f16420824707"
+start_line = 1356
+end_line = 1356
+span_sha256 = "f734f72c7c82391a96aa4f1da7aa404a865d2d75274a5d4f9e6a398f187055b9"
+metric = "branches"
+reason = "A published pending identity holds its own account until the new root has an accepted roster, including after recovery."

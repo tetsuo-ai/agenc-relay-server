@@ -9,6 +9,9 @@
 //! its roster and device, a restart included.
 #![forbid(unsafe_code)]
 
+#[path = "root_rotation/account_deletion.rs"]
+mod account_deletion;
+
 use agenc_relay_testkit::e2ee::objects::identity::{ArcDeviceRoster, ArcRootIdentity};
 
 use super::recovery_submission::{attach_when_active, settle};
