@@ -409,24 +409,27 @@ fn frames_for(
             let Some(name) = name_of(*channel_id) else {
                 return Ok(Vec::new());
             };
+            let mut frames = Vec::new();
             if recipient == named_target.user_id {
-                vec![line(
+                frames.push(line(
                     &prefix(inviter)?,
                     "INVITE",
                     &[named_target.nickname.presentation()],
                     Some(&name),
-                )?]
-            } else if recipient == inviter.user_id {
-                vec![numeric(
+                )?);
+            }
+            if recipient == inviter.user_id {
+                // When the inviter names itself, the independent invitee notification
+                // precedes the inviter's numeric. Only the latter can take its label.
+                frames.push(numeric(
                     server,
                     341,
                     inviter.nickname.presentation(),
                     &[named_target.nickname.presentation(), &name],
                     None,
-                )?]
-            } else {
-                Vec::new()
+                )?);
             }
+            frames
         }
         ProjectedEvent::AwayChanged { view, away } => {
             if !enabled(capabilities, "away-notify") {

@@ -34,7 +34,7 @@ pub(crate) use join::{
     original_channel_targets,
 };
 pub(crate) use local_join::render_local_join_start;
-pub(crate) use message_result::message_failure_replies;
+pub(crate) use message_result::{message_failure_replies, target_failure_replies};
 
 mod away;
 pub(crate) use away::away_result_replies;

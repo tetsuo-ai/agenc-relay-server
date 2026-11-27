@@ -90,6 +90,7 @@ pub(super) fn capture(
         ProjectedEvent::MessageDelivered(record) => record.sender.user_id,
         ProjectedEvent::TopicChanged { actor, .. } => actor.user_id,
         ProjectedEvent::MemberParted { source, .. } => source.user_id,
+        ProjectedEvent::Invited { inviter, .. } => inviter.user_id,
         ProjectedEvent::NicknameChanged { view, .. }
         | ProjectedEvent::DisplayNameChanged { view, .. } => view.source.user_id,
         _ => return Ok(()),
@@ -230,6 +231,9 @@ fn labeled_targets(
                 channel_id, reason, ..
             },
         ) => departure_targets(echo_channels.as_ref(), channel_id, reason),
+        (FederationOpcode::Invite, ProjectedEvent::Invited {channel_id, named_target, ..}) => {
+            matches!(echo_channels, Some(EchoChannels::Invite(original)) if original.matches(*channel_id, message, &named_target.nickname)).then_some(1)
+        }
         (FederationOpcode::NickChange, ProjectedEvent::NicknameChanged { view, .. }) => {
             let requested = message
                 .middle()

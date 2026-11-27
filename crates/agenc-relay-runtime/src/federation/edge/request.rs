@@ -34,6 +34,8 @@ pub(crate) use departure::PartRequester;
 #[path = "requester.rs"]
 mod requester;
 use requester::ReplyRequester;
+#[path = "invitation.rs"]
+mod invitation;
 #[path = "message_results.rs"]
 mod message_results;
 
@@ -183,6 +185,7 @@ pub enum EdgeCompletion {
 /// Physical channels selected when the originating command was admitted.
 pub(crate) enum EchoChannels {
     Topic(agenc_relay_types::ChannelInstanceId),
+    Invite(invitation::InviteRequester),
     UnlabeledPart(PartRequester),
     Message(message_results::MessageRequester),
     Part {
@@ -918,7 +921,7 @@ fn forward_command(
     operation: FederatedOperation,
     message: Box<ParsedMessage>,
 ) -> Result<Routed, (Box<ParsedMessage>, DomainError)> {
-    let requester = match join_requester(edge, context, user_id, &operation) {
+    let requester = match command_requester(edge, context, user_id, &operation) {
         Ok(requester) => requester,
         Err(error) => return Err((message, error)),
     };
@@ -926,7 +929,11 @@ fn forward_command(
         return Err((message, DomainError::ServerBusy));
     };
     let pending = match requester {
-        Some(requester) => PendingKind::Join { message, requester },
+        Some(CommandRequester::Join(requester)) => PendingKind::Join { message, requester },
+        Some(CommandRequester::Invite(requester)) => PendingKind::Command {
+            message,
+            echo_channels: Some(EchoChannels::Invite(requester)),
+        },
         None => PendingKind::for_operation(message, operation, None),
     };
     register_request(edge, context, generation, prepared, pending);
@@ -954,13 +961,21 @@ pub(super) fn reserve_departure_backing(
         .map_err(|_| DomainError::ServerBusy)
 }
 
-fn join_requester(
+enum CommandRequester {
+    Join(crate::mutation_render::JoinRequester),
+    Invite(invitation::InviteRequester),
+}
+
+fn command_requester(
     edge: &EdgeFederation,
     context: &StateCoreContext,
     user: UserId,
     operation: &FederatedOperation,
-) -> Result<Option<crate::mutation_render::JoinRequester>, DomainError> {
-    if !matches!(operation, FederatedOperation::Join { .. }) {
+) -> Result<Option<CommandRequester>, DomainError> {
+    if !matches!(
+        operation,
+        FederatedOperation::Join { .. } | FederatedOperation::Invite { .. }
+    ) {
         return Ok(None);
     }
     let Some((session, caps)) = edge
@@ -970,11 +985,17 @@ fn join_requester(
     else {
         return Err(DomainError::RegistrationRequired);
     };
-    let requester = crate::mutation_render::JoinRequester {
-        nickname: session.nickname.clone(),
-        replies: agenc_relay_client_wire::StandardReplies::negotiated(caps),
-    };
-    Ok(Some(requester))
+    if let FederatedOperation::Invite { channel_id, .. } = operation {
+        return Ok(Some(CommandRequester::Invite(
+            invitation::InviteRequester::new(*channel_id, session.nickname.presentation(), caps)?,
+        )));
+    }
+    Ok(Some(CommandRequester::Join(
+        crate::mutation_render::JoinRequester {
+            nickname: session.nickname.clone(),
+            replies: agenc_relay_client_wire::StandardReplies::negotiated(caps),
+        },
+    )))
 }
 
 pub(super) fn defer_account_carrier(
@@ -1820,6 +1841,12 @@ pub(super) fn receive_result(
         replies.push(reply_frame(&edge.config.server_name, reply)?);
     }
     project_join_result(context, pending, &checked.arm, &mut replies)?;
+    invitation::project(
+        context.server_prefix(),
+        &pending.kind,
+        &checked.arm,
+        &mut replies,
+    )?;
     if let PendingKind::Command {
         message,
         echo_channels: Some(EchoChannels::Message(requester)),
@@ -2205,7 +2232,8 @@ fn completed_request(
                     Some(
                         EchoChannels::Part { .. }
                         | EchoChannels::UnlabeledPart(_)
-                        | EchoChannels::Message(_),
+                        | EchoChannels::Message(_)
+                        | EchoChannels::Invite(_),
                     ),
             },
             ResultArm::Failed { .. },
@@ -2284,6 +2312,7 @@ fn completed_request(
             agenc_relay_types::FederationOpcode::Message
                 | agenc_relay_types::FederationOpcode::NickChange
                 | agenc_relay_types::FederationOpcode::Setname
+                | agenc_relay_types::FederationOpcode::Invite
                 | agenc_relay_types::FederationOpcode::Topic
         ) || matches!(
             echo_channels,
