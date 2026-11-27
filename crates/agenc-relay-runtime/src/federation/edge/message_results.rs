@@ -109,33 +109,25 @@ impl MessageRequester {
         arm: &ResultArm,
         replies: &mut Vec<WireMessage>,
     ) -> Result<(), Violation> {
-        if request.command() == "NOTICE" {
-            // A stored v1 failed arm can predate the no_content suppression.
-            return if replies.is_empty()
-                && matches!(
-                    arm,
-                    ResultArm::NoContent | ResultArm::Committed { .. } | ResultArm::Failed { .. }
-                ) {
-                Ok(())
-            } else {
-                Err(Violation::Consistency)
-            };
-        }
-        if matches!(arm, ResultArm::Failed { .. }) && replies.is_empty() {
-            // Legacy/coarse or service-wide refusal. Its arm does not identify an
-            // individual target. Leave it to the existing command-level renderer.
-            return Ok(());
-        }
         let targets = original_targets(request)?;
         let remote_count = targets
             .len()
             .checked_sub(self.absent.count_ones() as usize)
             .ok_or(Violation::Consistency)?;
-        match arm {
-            ResultArm::Committed { .. } if replies.len() < remote_count => {}
-            ResultArm::Failed { .. } if replies.len() == remote_count && remote_count != 0 => {}
-            _ => return Err(Violation::Consistency),
+        if !covered_result(request.command(), arm, replies.len(), remote_count)? {
+            return Ok(());
         }
+        self.project_covered(prefix, request, targets, arm, replies)
+    }
+
+    fn project_covered(
+        &self,
+        prefix: &str,
+        request: &ParsedMessage,
+        targets: Vec<&str>,
+        arm: &ResultArm,
+        replies: &mut Vec<WireMessage>,
+    ) -> Result<(), Violation> {
         let nick = self.origin.nickname()?;
         let mut remaining = replies.iter().peekable();
         let mut first = None;
@@ -158,39 +150,80 @@ impl MessageRequester {
             } else {
                 continue;
             };
-            let target = if name.starts_with('#') {
-                FailedTarget::Channel(
-                    ChannelNameValue::parse(name).map_err(|_| Violation::Consistency)?,
-                )
-            } else {
-                FailedTarget::User(NicknameValue::parse(name).map_err(|_| Violation::Consistency)?)
-            };
-            projected.push(
-                crate::client_render::projected_failure(
-                    self.origin.dialect,
-                    prefix,
-                    nick,
-                    request,
-                    error,
-                    Some(&target),
-                )
-                .map_err(|_| Violation::Codec)?,
-            );
+            projected.push(self.refusal(prefix, request, name, error)?);
         }
         if remaining.next().is_some() {
             return Err(Violation::Consistency);
         }
-        if let ResultArm::Failed { code, context } = arm {
-            let (name, error) = first.ok_or(Violation::Consistency)?;
-            if code != crate::federation::codec::results::failure_code(error)
-                || !(context.is_empty() || context.eq_ignore_ascii_case(name))
-            {
-                return Err(Violation::Consistency);
-            }
-        }
+        check_first_failure(arm, first)?;
         *replies = projected;
         Ok(())
     }
+    fn refusal(
+        &self,
+        prefix: &str,
+        request: &ParsedMessage,
+        name: &str,
+        error: DomainError,
+    ) -> Result<WireMessage, Violation> {
+        let target = if name.starts_with('#') {
+            FailedTarget::Channel(
+                ChannelNameValue::parse(name).map_err(|_| Violation::Consistency)?,
+            )
+        } else {
+            FailedTarget::User(NicknameValue::parse(name).map_err(|_| Violation::Consistency)?)
+        };
+        crate::client_render::projected_failure(
+            self.origin.dialect,
+            prefix,
+            self.origin.nickname()?,
+            request,
+            error,
+            Some(&target),
+        )
+        .map_err(|_| Violation::Codec)
+    }
+}
+
+fn covered_result(
+    command: &str,
+    arm: &ResultArm,
+    received: usize,
+    remote_count: usize,
+) -> Result<bool, Violation> {
+    if command == "NOTICE" {
+        // A stored v1 refusal can predate the explicit no_content suppression.
+        return match arm {
+            ResultArm::NoContent | ResultArm::Committed { .. } | ResultArm::Failed { .. }
+                if received == 0 =>
+            {
+                Ok(false)
+            }
+            _ => Err(Violation::Consistency),
+        };
+    }
+    match arm {
+        // An old failure or a command-level error cannot identify individual targets.
+        ResultArm::Failed { .. } if received == 0 => Ok(false),
+        ResultArm::Committed { .. } if received < remote_count => Ok(true),
+        ResultArm::Failed { .. } if received == remote_count => Ok(true),
+        _ => Err(Violation::Consistency),
+    }
+}
+
+fn check_first_failure(
+    arm: &ResultArm,
+    first: Option<(&str, DomainError)>,
+) -> Result<(), Violation> {
+    if let ResultArm::Failed { code, context } = arm {
+        let (name, error) = first.ok_or(Violation::Consistency)?;
+        if code != crate::federation::codec::results::failure_code(error)
+            || !(context.is_empty() || context.eq_ignore_ascii_case(name))
+        {
+            return Err(Violation::Consistency);
+        }
+    }
+    Ok(())
 }
 
 // Only the closed public numeric and the original requester/target can be
@@ -201,19 +234,20 @@ fn covered_error(frame: &WireMessage, nick: &str, target: &str) -> Option<Domain
         return None;
     }
     let channel = target.starts_with('#');
-    match (frame.command(), middle, frame.trailing()) {
-        ("481", [], Some("Command is unavailable")) if !channel => Some(DomainError::Forbidden),
-        (code, [name], description) if name.eq_ignore_ascii_case(target) => {
-            match (code, channel, description) {
-                ("401", false, Some("No such nick")) => Some(DomainError::NotFound),
-                ("403", true, Some("No such channel")) => Some(DomainError::SecretUnavailable),
-                ("482", true, Some("Permission denied for channel")) => {
-                    Some(DomainError::Forbidden)
-                }
-                ("404", true, Some("Cannot send to channel")) => Some(DomainError::EncryptedRoute),
-                _ => None,
-            }
-        }
+    if middle.is_empty() {
+        return (!channel
+            && frame.command() == "481"
+            && frame.trailing() == Some("Command is unavailable"))
+        .then_some(DomainError::Forbidden);
+    }
+    if !matches!(middle, [name] if name.eq_ignore_ascii_case(target)) {
+        return None;
+    }
+    match (frame.command(), channel, frame.trailing()) {
+        ("401", false, Some("No such nick")) => Some(DomainError::NotFound),
+        ("403", true, Some("No such channel")) => Some(DomainError::SecretUnavailable),
+        ("482", true, Some("Permission denied for channel")) => Some(DomainError::Forbidden),
+        ("404", true, Some("Cannot send to channel")) => Some(DomainError::EncryptedRoute),
         _ => None,
     }
 }

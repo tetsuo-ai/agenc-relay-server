@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use super::*;
 use crate::test_support::{TestResult, negotiated_capabilities};
 use agenc_relay_client_wire::{CapabilityState, FramedLine, numeric_reply, parse_message};

@@ -839,13 +839,33 @@ fn route_command(
         Ok(command) => command,
         Err(error) => return Err((message, error)),
     };
+    route_admitted(
+        edge,
+        context,
+        generation,
+        kind,
+        (session_id, user_id),
+        &command,
+        message,
+    )
+}
+
+fn route_admitted(
+    edge: &mut EdgeFederation,
+    context: &mut StateCoreContext,
+    generation: ConnectionGeneration,
+    kind: RegisteredCommandKind,
+    (session_id, user_id): (SessionId, UserId),
+    command: &CanonicalCommand,
+    message: Box<ParsedMessage>,
+) -> Result<Routed, (Box<ParsedMessage>, DomainError)> {
     if matches!(command.view(), CanonicalCommandView::Part(_, _)) {
         return departure::route(
             edge,
             context,
             generation,
             (session_id, user_id),
-            &command,
+            command,
             message,
         );
     }
@@ -859,10 +879,10 @@ fn route_command(
             message,
         );
     }
-    if let Some(answered) = local_answer(edge, context, kind, user_id, &message, &command) {
+    if let Some(answered) = local_answer(edge, context, kind, user_id, &message, command) {
         return Routed::local(answered, message);
     }
-    let operation = match operation_of(edge, session_id, user_id, &message, &command) {
+    let operation = match operation_of(edge, session_id, user_id, &message, command) {
         Ok(operation) => operation,
         Err(error) => return Err((message, error)),
     };

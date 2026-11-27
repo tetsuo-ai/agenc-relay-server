@@ -58,6 +58,20 @@ pub(super) struct MessageEcho {
     permit: MemoryPermit,
 }
 
+impl MessageEcho {
+    fn replace_frame(
+        &mut self,
+        channel: Option<ChannelInstanceId>,
+        frame: WireMessage,
+    ) -> Result<(), Violation> {
+        if self.parted_channel != channel || self.frame.middle() != frame.middle() {
+            return Err(Violation::Consistency);
+        }
+        self.frame = frame;
+        Ok(())
+    }
+}
+
 /// Takes the requester's own copy of a delivered message out of `frames`
 /// and holds it on the request it answers, when that request is a labeled
 /// message whose label the connection negotiated; any other copy stays in
@@ -94,9 +108,10 @@ pub(super) fn capture(
         message,
         echo_channels: Some(EchoChannels::Message(_)),
     } = &pending.kind
+        && let ProjectedEvent::MessageDelivered(record) = event
         && frames
             .last()
-            .is_some_and(|frame| !original_message_echo(message, frame))
+            .is_some_and(|frame| !original_message_echo(message, frame, &record.tags))
     {
         return Ok(());
     }
@@ -133,32 +148,13 @@ fn hold_echo(
         return Err(Violation::Consistency);
     }
     check_departure_reply(parted_channel, &frame, &pending.replies)?;
-    if let PendingKind::Command {
-        message,
-        echo_channels: Some(EchoChannels::Message(_)),
-    } = &pending.kind
-    {
-        check_message_replies(
-            message,
-            pending
-                .message_echoes
-                .iter()
-                .filter(|held| held.event != header.event_id)
-                .map(|held| &held.frame)
-                .chain(std::iter::once(&frame)),
-            &pending.replies,
-        )?;
-    }
+    validate_incoming_message_echo(pending, header.event_id, &frame)?;
     if let Some(held) = pending
         .message_echoes
         .iter_mut()
         .find(|echo| echo.event == header.event_id)
     {
-        if held.parted_channel != parted_channel || held.frame.middle() != frame.middle() {
-            return Err(Violation::Consistency);
-        }
-        held.frame = frame;
-        return Ok(());
+        return held.replace_frame(parted_channel, frame);
     }
     if parted_channel.is_some()
         && pending
@@ -318,11 +314,57 @@ pub(super) fn validate_message_replies(
     )
 }
 
-fn original_message_echo(message: &ParsedMessage, frame: &WireMessage) -> bool {
+fn validate_incoming_message_echo(
+    pending: &PendingRequest,
+    event: EventId,
+    frame: &WireMessage,
+) -> Result<(), Violation> {
+    if let PendingKind::Command {
+        message,
+        echo_channels: Some(EchoChannels::Message(_)),
+    } = &pending.kind
+    {
+        check_message_replies(
+            message,
+            pending
+                .message_echoes
+                .iter()
+                .filter(|held| held.event != event)
+                .map(|held| &held.frame)
+                .chain(std::iter::once(frame)),
+            &pending.replies,
+        )?;
+    }
+    Ok(())
+}
+
+fn original_message_echo(
+    message: &ParsedMessage,
+    frame: &WireMessage,
+    tags: &[(String, String)],
+) -> bool {
     matches!(frame.middle(), [name] if message.middle().first().is_some_and(|names|
         names.split(',').any(|original| original.eq_ignore_ascii_case(name))))
         && message.command() == frame.command()
         && message.trailing() == frame.trailing()
+        && original_client_tags(message, tags)
+}
+
+fn original_client_tags(message: &ParsedMessage, delivered: &[(String, String)]) -> bool {
+    // Federation represents a missing tag value as the empty string and
+    // canonically sorts unique client-owned keys. Session labels and tags
+    // supplied by the server are outside the original application payload.
+    let mut count = 0;
+    for tag in message.tags().iter().filter(|tag| tag.is_client_only()) {
+        if !delivered
+            .iter()
+            .any(|(key, value)| key == tag.key() && value == tag.value().unwrap_or(""))
+        {
+            return false;
+        }
+        count += 1;
+    }
+    count == delivered.len()
 }
 
 fn check_message_replies<'a>(

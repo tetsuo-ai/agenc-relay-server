@@ -80,6 +80,19 @@ fn edge_with(command: &str, opcode: FederationOpcode) -> TestResult<EdgeFederati
 fn message_echoes_and_refusals_bind_the_same_original_targets_in_either_order() -> TestResult {
     let request = parse_message(FramedLine::new("PRIVMSG bob,#Room :hi")?)?.ok_or("request")?;
     let echo = |name, text| WireMessage::new("sam!u-a@h-b.invalid", "PRIVMSG", &[name], Some(text));
+    let tagged = parse_message(FramedLine::new(
+        "@label=x;+sample/typing=on;+empty TAGMSG #room",
+    )?)?
+    .ok_or("original tagged request")?;
+    let frame = WireMessage::new("sam", "TAGMSG", &["#room"], None)?;
+    let tags = [
+        ("+empty".to_owned(), String::new()),
+        ("+sample/typing".to_owned(), "on".to_owned()),
+    ];
+    assert!(original_message_echo(&tagged, &frame, &tags));
+    assert!(!original_message_echo(&tagged, &frame, &tags[..1]));
+    let changed = [tags[0].clone(), (tags[1].0.clone(), "off".to_owned())];
+    assert!(!original_message_echo(&tagged, &frame, &changed));
     let room = echo("#room", "hi")?;
     let bob = echo("Bob", "hi")?;
     let other = echo("#other", "hi")?;
@@ -104,13 +117,13 @@ fn message_echoes_and_refusals_bind_the_same_original_targets_in_either_order() 
         &[],
         Some("Command is unavailable"),
     )?;
-    assert!(original_message_echo(&request, &room));
+    assert!(original_message_echo(&request, &room, &[]));
     for unmatched in [
         &other,
         &echo("#room", "other")?,
         &WireMessage::new("sam", "NOTICE", &["#room"], Some("hi"))?,
     ] {
-        assert!(!original_message_echo(&request, unmatched));
+        assert!(!original_message_echo(&request, unmatched, &[]));
     }
     assert_eq!(
         check_message_replies(&request, [&room, &bob].into_iter(), &[]),
