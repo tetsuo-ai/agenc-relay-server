@@ -194,6 +194,21 @@ treats a `904` as a hard failure.
 - These are development-host runs of the Stage 08 fixture. Native release
   qualification of the whole drill campaign remains with REL-10 (#84).
 
+## Account deletion during a route reservation
+
+The coordinator checks the authenticated account that requested a route grant before staging a valid `ACCT DELETE CONFIRM`. A live grant consumes the deletion challenge and returns the existing `BAD_STATE` reply. The account and credential survive. The account named as the intended peer can still delete its own account. Local and edge confirmations use the same check.
+
+The in-memory ownership index is rebuilt from durable grants on startup. At the exact expiry second a grant stops blocking deletion, even if storage cleanup has not run. An unreliable wall clock leaves the grant in force. During a storage commit the coordinator also retains the original account digest for an accepted security mutation or reservation. Unrelated accounts, reads and snapshot transfers do not acquire this restriction. Recovery uses the existing signed grant and reservation row.
+
+The Linux test refused the owner through the edge, allowed the named peer to delete its own account, restarted the coordinator, and refused the owner again through a fresh local login. It passed in 19.87 seconds.
+
+```sh
+cargo test --locked -p agenc-relay-server --all-features --test stage_eight_e2ee \
+  recreated_routes::a_live_direct_reservation_refuses_only_its_owners_account_deletion -- --exact
+```
+
+Already-bound encrypted groups and longer-lived transitions within those groups require separate account-deletion evidence.
+
 ## Evidence
 
 Sources:

@@ -477,6 +477,8 @@ pub struct PendingCompanion {
     pub correlation: Correlation,
     /// The request object identifier.
     pub request_object_id: [u8; 32],
+    /// Authenticated owner of this pending security transition or successful route grant.
+    pub(crate) security_owner: Option<[u8; 32]>,
     /// The encoded result object.
     pub result: Vec<u8>,
     /// Response objects in descriptor order.
@@ -1333,6 +1335,32 @@ impl CompanionCoordinator {
         self.queued
             .get(&peer)
             .is_some_and(|queue| !queue.is_empty())
+    }
+
+    /// An issued route reservation belongs to its authenticated requester. Both local
+    /// and forwarded confirmations inspect its authoritative lease immediately before
+    /// staging. A missing trusted clock cannot release a retained lease early.
+    pub(crate) fn blocks_account_deletion(
+        &self,
+        context: &crate::state_core::StateCoreContext,
+        account: agenc_relay_types::AccountId,
+    ) -> bool {
+        let Ok(owner) = agenc_relay_e2ee::ids::account_id_digest(
+            &self.network_id,
+            account.to_text().as_bytes(),
+        ) else {
+            return true;
+        };
+        if matches!(&self.pending, Some(sync::PendingWork::Request(work)) if work.security_owner == Some(owner))
+        {
+            return true;
+        }
+        let now = context
+            .utc_now()
+            .ok()
+            .filter(|wall| context.drift().accepts_wall(context.now(), *wall))
+            .map_or(0, |wall| wall.get());
+        self.state.reservations.live_for_owner(owner, now)
     }
 
     /// Whether a staged batch awaits its commit.

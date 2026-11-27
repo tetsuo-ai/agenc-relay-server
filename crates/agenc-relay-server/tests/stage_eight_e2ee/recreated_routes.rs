@@ -323,12 +323,7 @@ fn a_closed_direct_conversation_is_recreated_across_coordinator_and_edge_restart
     super::encrypted_clients::run_network(recreation_across_restarts)
 }
 
-fn recreation_across_restarts(
-    network: &Network,
-    coordinator: &mut DaemonProcess,
-    edge_a: &mut DaemonProcess,
-    _edge_b: &mut DaemonProcess,
-) -> TestResult {
+fn attached_pair(network: &Network) -> TestResult<(Party, Party)> {
     wait_for_link(&network.edge_a, 0)?;
     wait_for_link(&network.edge_b, 0)?;
     wait_for_account_authority(&network.edge_a)?;
@@ -365,11 +360,81 @@ fn recreation_across_restarts(
         publish_and_attach(&mut bob.client, &mut bob.keys),
     )?;
     // The smaller account of the pair creates every incarnation.
-    let (mut creator, mut peer) = if alice.keys.account <= bob.keys.account {
+    Ok(if alice.keys.account <= bob.keys.account {
         (alice, bob)
     } else {
         (bob, alice)
+    })
+}
+
+#[test]
+fn a_live_direct_reservation_refuses_only_its_owners_account_deletion() -> TestResult {
+    use super::stage_ten_drills::{
+        acct_reply, issue_deletion_challenge, quit_and_drain, read_deleted_connection_closure,
     };
+
+    super::encrypted_clients::run_network(|network, coordinator, _, _| {
+        let (mut creator, mut peer) = attached_pair(network)?;
+        settle("the creator's signed reservation", || {
+            let reply = reserve(&mut creator, &peer)?;
+            assert_contains(&reply, " EGROUP RESERVED ")
+        })?;
+        let refuse = |client: &mut ArcClient| -> TestResult {
+            let token = issue_deletion_challenge(client)?;
+            client.send(&format!("ACCT DELETE CONFIRM {token}"))?;
+            let reply = acct_reply(client)?;
+            if !reply.contains(" FAIL ACCT BAD_STATE ") {
+                return Err(failure(
+                    "the live reservation owner was not refused BAD_STATE",
+                ));
+            }
+            Ok(())
+        };
+        step("edge owner confirmation", refuse(&mut creator.client))?;
+        quit_and_drain(&mut creator.client, "changing issuer")?;
+
+        // The creator requested the grant. Merely naming a peer cannot block that peer's deletion.
+        let token = issue_deletion_challenge(&mut peer.client)?;
+        peer.client.send(&format!("ACCT DELETE CONFIRM {token}"))?;
+        read_deleted_connection_closure(&mut peer.client.reader)?;
+
+        let before = links_established(&network.edge_a);
+        if !coordinator.stop()?.success() {
+            return Err(failure(
+                "coordinator did not stop cleanly before lease reconstruction",
+            ));
+        }
+        *coordinator = DaemonProcess::start(&network.coordinator.config_path)?;
+        wait_for_link(&network.edge_a, before)?;
+        let mut local = ArcClient::connect(&network.coordinator)?;
+        local.negotiate_sasl()?;
+        local.send_until(
+            "CAP REQ :standard-replies agenc.ag/account-controls",
+            " CAP * ACK ",
+        )?;
+        authenticate_live_account(
+            &mut local,
+            &network.coordinator,
+            creator.login,
+            ACCOUNT_PASSWORD,
+            72,
+            creator.account,
+        )?;
+        local.complete_registration("owner-local")?;
+        step("local owner confirmation", refuse(&mut local))?;
+        quit_and_drain(&mut local, "finished confirmation")?;
+
+        Ok(())
+    })
+}
+
+fn recreation_across_restarts(
+    network: &Network,
+    coordinator: &mut DaemonProcess,
+    edge_a: &mut DaemonProcess,
+    _edge_b: &mut DaemonProcess,
+) -> TestResult {
+    let (mut creator, mut peer) = attached_pair(network)?;
 
     // Incarnation zero binds, bootstraps and carries traffic; while it is
     // live the pair takes no other reservation and refuses plaintext.

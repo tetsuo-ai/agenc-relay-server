@@ -326,6 +326,9 @@ pub(crate) fn run_with_object(
             peer,
             correlation: complete.correlation,
             request_object_id: decoded.request_object_id,
+            security_owner: origin
+                .account_digest
+                .filter(|_| assembled.blocks_account_deletion),
             result: assembled.result,
             responses: assembled.responses,
             events: assembled.copies,
@@ -791,6 +794,7 @@ fn binding_plan(
 
 /// One assembled batch.
 struct Assembled {
+    blocks_account_deletion: bool,
     result: Vec<u8>,
     responses: Vec<Vec<u8>>,
     copies: Vec<events::CopyToSend>,
@@ -1043,6 +1047,8 @@ fn assemble(
         }
     }));
     Ok(Assembled {
+        blocks_account_deletion: outcome.security_mutation
+            || matches!(outcome.result, request::ResultBody::Reserved(..)),
         result,
         responses,
         copies,
