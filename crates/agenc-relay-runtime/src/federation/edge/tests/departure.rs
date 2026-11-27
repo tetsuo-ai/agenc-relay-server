@@ -76,20 +76,23 @@ fn current_and_legacy_departure_results_preserve_each_original_target() -> TestR
     assert!(
         matches!(absent_at_authority.as_slice(), [missing, _, _] if missing.command() == "403" && missing.middle() == ["Sam", "#a"])
     );
-    let mut coarse = Vec::new();
-    assert_eq!(
-        requester.project(
-            "edge.example",
-            &request,
-            &failed("NOT_ALLOWED", ""),
-            &mut coarse,
-        ),
-        Ok(())
-    );
-    assert!(
-        matches!(coarse.as_slice(), [first, missing] if first.middle() == ["Sam", "#a"]
-        && missing.middle() == ["Sam", "#b"])
-    );
+    // Both legacy encodings identify the first admitted canonical channel. Only the
+    // local absence is independently known for the other targets.
+    for context in ["", "#A"] {
+        let mut coarse = Vec::new();
+        assert_eq!(
+            requester.project(
+                "edge.example",
+                &request,
+                &failed("NOT_ALLOWED", context),
+                &mut coarse
+            ),
+            Ok(())
+        );
+        assert!(matches!(coarse.as_slice(), [first, missing]
+            if first.command() == "482" && first.middle() == ["Sam", "#a"]
+            && missing.command() == "403" && missing.middle() == ["Sam", "#b"]));
+    }
     for general in ["STALE_STATE", "SERVER_BUSY"] {
         let mut unanswered = Vec::new();
         assert_eq!(
