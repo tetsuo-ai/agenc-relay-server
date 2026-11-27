@@ -3212,11 +3212,27 @@ impl DomainState {
             .get(&name)
             .copied()
             .ok_or(DomainError::NotFound)?;
-        let target_user = self
-            .nicknames
-            .get(&target)
-            .copied()
-            .ok_or(DomainError::NotFound)?;
+        let channel = self
+            .channels
+            .get(&channel_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        let actor = self
+            .sessions
+            .get(&user_id)
+            .ok_or(DomainError::InvariantViolation)?;
+        if effective_mask(channel, actor, true) {
+            return Err(DomainError::Forbidden);
+        }
+        // The caller's channel visibility, mask and operator role have already been
+        // authorized. Only this specific missing nickname is a target refusal.
+        let Some(target_user) = self.nicknames.get(&target).copied() else {
+            return self.rejected_plan(
+                DomainCommandKind::Invite,
+                vec![TargetFailure::user(0, target, DomainError::NotFound)?],
+                charges,
+                false,
+            );
+        };
         let target_session = self
             .sessions
             .get(&target_user)
@@ -3229,19 +3245,8 @@ impl DomainState {
         let expires_at = invite_expiry(now)?;
         let created_at_utc = inputs.utc_now.ok_or(DomainError::ExternalInputMismatch)?;
         let expires_at_utc = created_at_utc.checked_add(INVITE_LIFETIME_SECONDS)?;
-        let channel = self
-            .channels
-            .get(&channel_id)
-            .ok_or(DomainError::InvariantViolation)?;
         let target_principal = target_session.principal();
         let expired_invites = self.validate_invite_capacity(channel, target_principal, now)?;
-        let actor = self
-            .sessions
-            .get(&user_id)
-            .ok_or(DomainError::InvariantViolation)?;
-        if effective_mask(channel, actor, true) {
-            return Err(DomainError::Forbidden);
-        }
         let invite = Invite {
             invite_id,
             target: target_principal,

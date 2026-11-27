@@ -90,6 +90,7 @@ pub(super) fn capture(
         ProjectedEvent::MessageDelivered(record) => record.sender.user_id,
         ProjectedEvent::TopicChanged { actor, .. } => actor.user_id,
         ProjectedEvent::MemberParted { source, .. } => source.user_id,
+        ProjectedEvent::Invited { inviter, .. } => inviter.user_id,
         ProjectedEvent::NicknameChanged { view, .. }
         | ProjectedEvent::DisplayNameChanged { view, .. } => view.source.user_id,
         _ => return Ok(()),
@@ -197,14 +198,9 @@ fn labeled_targets(
     else {
         return None;
     };
-    let labeled = message
-        .tags()
-        .iter()
-        .any(|tag| tag.key() == "label" && tag.value().is_some());
     if pending.generation != generation
         || pending.sink_gone
-        || !labeled
-        || !capabilities.is_some_and(|state| state.enabled("labeled-response"))
+        || !label_negotiated(message, capabilities)
     {
         return None;
     }
@@ -230,6 +226,9 @@ fn labeled_targets(
                 channel_id, reason, ..
             },
         ) => departure_targets(echo_channels.as_ref(), channel_id, reason),
+        (FederationOpcode::Invite, ProjectedEvent::Invited {channel_id, named_target, ..}) => {
+            matches!(echo_channels, Some(EchoChannels::Invite(original)) if original.matches(*channel_id, message, &named_target.nickname)).then_some(1)
+        }
         (FederationOpcode::NickChange, ProjectedEvent::NicknameChanged { view, .. }) => {
             let requested = message
                 .middle()
@@ -248,6 +247,14 @@ fn labeled_targets(
         }
         _ => None,
     }
+}
+
+fn label_negotiated(message: &ParsedMessage, capabilities: Option<&CapabilityState>) -> bool {
+    capabilities.is_some_and(|state| state.enabled("labeled-response"))
+        && message
+            .tags()
+            .iter()
+            .any(|tag| tag.key() == "label" && tag.value().is_some())
 }
 
 fn departure_targets(

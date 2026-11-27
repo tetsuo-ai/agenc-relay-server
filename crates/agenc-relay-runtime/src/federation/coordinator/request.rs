@@ -1189,6 +1189,14 @@ fn finish_rejected(
                 rejected.failures(),
             )
         }
+        agenc_relay_types::FederationOpcode::Invite => {
+            crate::mutation_render::target_failure_replies(
+                context,
+                fresh.bound.ok_or(Violation::Codec)?,
+                "INVITE",
+                rejected.failures(),
+            )
+        }
         agenc_relay_types::FederationOpcode::Message => {
             let Some(agenc_relay_domain::CanonicalCommandView::Message(message)) = fresh
                 .command

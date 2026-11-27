@@ -34,7 +34,7 @@ pub(crate) use join::{
     original_channel_targets,
 };
 pub(crate) use local_join::render_local_join_start;
-pub(crate) use message_result::message_failure_replies;
+pub(crate) use message_result::{message_failure_replies, target_failure_replies};
 
 mod away;
 pub(crate) use away::away_result_replies;
@@ -1069,16 +1069,16 @@ fn render_invite(
         .domain()
         .resolve_nickname(target)
         .ok_or(RuntimeError::InvalidValue)?;
-    builder.add_simple(
+    // The invitee receives its own notification, even when the inviter is
+    // the same connection. Only the inviter's 341 belongs to the request.
+    let notification = WireMessage::new(
         source,
         "INVITE",
-        &[
-            target.presentation().to_owned(),
-            channel.presentation().to_owned(),
-        ],
+        &[target.presentation(), channel.presentation()],
         None,
-        &[target_user],
-    )?;
+    )
+    .map_err(|_| RuntimeError::InvalidValue)?;
+    builder.push_to_user(notification, target_user)?;
     if builder
         .reply
         .is_some_and(|reply| reply.requester == user_id)

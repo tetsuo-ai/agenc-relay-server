@@ -14,6 +14,15 @@ pub(crate) fn message_failure_replies(
         MessageKind::Privmsg => "PRIVMSG",
         MessageKind::Tagmsg => "TAGMSG",
     };
+    target_failure_replies(context, bound, command, failures)
+}
+
+pub(crate) fn target_failure_replies(
+    context: &StateCoreContext,
+    bound: BoundSession,
+    command: &str,
+    failures: &[TargetFailure],
+) -> Result<Vec<SchemaObject>, RuntimeError> {
     if failures.is_empty() {
         return Ok(Vec::new());
     }
