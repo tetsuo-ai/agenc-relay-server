@@ -1624,7 +1624,7 @@ const fn list_letter(list: MaskList) -> char {
     }
 }
 
-fn typed_mask_text(mask: &TypedMask) -> String {
+pub(crate) fn typed_mask_text(mask: &TypedMask) -> String {
     let subject = match mask.subject() {
         MaskSubject::Account(account) => format!("$a:{}", account.to_text()),
         MaskSubject::User(user_id) => format!("$u:{}", user_id.to_base64url()),

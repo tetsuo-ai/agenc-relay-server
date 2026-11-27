@@ -1508,6 +1508,7 @@ fn an_edge_gives_a_labeled_channel_message_one_labeled_response() -> TestResult 
         .and_then(|()| wait_for_link(&network.edge_b, 0))
         .and_then(|()| exercise_labeled_channel_messages(&network))
         .and_then(|()| verify_labeled_public_topics(&network))
+        .and_then(|()| verify_labeled_channel_modes(&network))
         .and_then(|()| verify_labeled_departures(&network));
     let stopped_a = edge_a.stop();
     let stopped_b = edge_b.stop();
@@ -1833,6 +1834,91 @@ fn verify_departure_batch(frames: &[String], label: &str, outcomes: &[String]) -
         return Err(failure(format!(
             "wrong target decisions for {label}: {scoped:?}"
         )));
+    }
+    Ok(())
+}
+
+fn verify_labeled_channel_modes(network: &Network) -> TestResult {
+    for (node, first, second, channel) in [
+        (
+            &network.coordinator,
+            "coremodes",
+            "coremodpeer",
+            "#coremodes",
+        ),
+        (&network.edge_a, "edgemodes", "edgemodpeer", "#edgemodes"),
+    ] {
+        let mut owner = register_when_available(node, first)?;
+        let mut observer = register_when_available(&network.edge_b, second)?;
+        owner.send("CAP REQ :message-tags batch labeled-response")?;
+        owner.read_until(|line| line.contains(" ACK "))?;
+        for (client, nickname) in [(&mut owner, first), (&mut observer, second)] {
+            client.send(&format!("JOIN {channel}"))?;
+            client.read_until(|line| line.contains(&format!(" 366 {nickname} {channel} ")))?;
+        }
+        let mask = format!(
+            "+b $a:{}",
+            agenc_relay_types::AccountRandomId::from_bytes([71; 16]).to_text()
+        );
+        let voice = format!("+v {second}");
+        let vector = format!("+o-o {second} {second}");
+        let half_operator = format!("+h {second}");
+        for (label, request, local, projected) in [
+            ("moderated", "+m", "+m", "+m"),
+            ("key", "+k private-test-key", "+k", "+k *"),
+            ("limit", "+l 17", "+l 17", "+l 17"),
+            ("clear", "-m", "-m", "-m"),
+            ("voice", voice.as_str(), voice.as_str(), voice.as_str()),
+            ("mask", mask.as_str(), mask.as_str(), mask.as_str()),
+            ("compoundprefix", &vector, &vector, &half_operator),
+        ] {
+            // The coordinator omits a join key. The federation projection sends presence only.
+            let expected = if node.public_address == network.coordinator.public_address {
+                local
+            } else {
+                projected
+            };
+            let end = format!(" MODE {channel} {expected}");
+            let received =
+                labeled_exchange(&mut owner, label, &format!("MODE {channel} {request}"))?;
+            let own: Vec<_> = received
+                .iter()
+                .filter(|line| {
+                    line.contains(" MODE ") || line.starts_with(&format!("@label={label} "))
+                })
+                .collect();
+            if !matches!(own.as_slice(), [line] if line.starts_with(&format!("@label={label} :{first}!")) && line.ends_with(&end))
+            {
+                return Err(failure(format!(
+                    "original {first} channel mode {label} did not have exactly one labeled echo"
+                )));
+            }
+            let end = format!(" MODE {channel} {projected}");
+            let mut broadcast =
+                observer
+                    .read_until(|line| line.ends_with(&end))
+                    .map_err(|error| {
+                        failure(format!("observer awaiting {first} mode {label}: {error}"))
+                    })?;
+            let barrier = format!("observed-{label}");
+            observer.send(&format!("PING :{barrier}"))?;
+            broadcast.extend(observer.read_until(|line| line.ends_with(&format!(" :{barrier}")))?);
+            let copies: Vec<_> = broadcast
+                .iter()
+                .filter(|line| line.ends_with(&end))
+                .collect();
+            if !matches!(copies.as_slice(), [line] if !line.contains("label=") && line.contains(&format!(":{first}!")))
+            {
+                return Err(failure(format!(
+                    "ordinary {first} mode {label} had {} matching copies, original actor {}, requester label {}",
+                    copies.len(),
+                    copies
+                        .iter()
+                        .any(|line| line.contains(&format!(":{first}!"))),
+                    copies.iter().any(|line| line.contains("label="))
+                )));
+            }
+        }
     }
     Ok(())
 }

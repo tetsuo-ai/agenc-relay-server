@@ -1633,24 +1633,19 @@ impl Derivation<'_> {
             else {
                 continue;
             };
-            if after.session_role == membership.session_role {
+            let Some((direction, mode_code)) =
+                prefix_delta(membership.session_role, after.session_role)
+            else {
                 continue;
-            }
+            };
             let Some(view) = self.membership_view(post.channel_id, membership.user_id) else {
                 continue;
             };
-            let (direction, code) = if after.session_role > membership.session_role {
-                (ModeDirection::Add, prefix_code(after.session_role))
-            } else {
-                (ModeDirection::Remove, prefix_code(membership.session_role))
-            };
-            if let Some(mode_code) = code {
-                changes.push(ProjectedModeChange::Prefix {
-                    direction,
-                    mode_code,
-                    view,
-                });
-            }
+            changes.push(ProjectedModeChange::Prefix {
+                direction,
+                mode_code,
+                view,
+            });
         }
     }
 
@@ -2457,6 +2452,40 @@ fn principal_of(session: &DurableSession) -> Principal {
     session
         .account_id
         .map_or(Principal::Guest(session.user_id), Principal::Account)
+}
+
+/// Apply one B.4 channel prefix selector using the same role rules as the coordinator.
+pub fn apply_prefix_code(
+    current: Role,
+    direction: ModeDirection,
+    code: u16,
+) -> Result<Role, DomainError> {
+    use crate::ModeOperation;
+    let role = [
+        Role::Owner,
+        Role::Administrator,
+        Role::Operator,
+        Role::HalfOperator,
+        Role::Voice,
+    ]
+    .into_iter()
+    .find(|role| prefix_code(*role) == Some(code))
+    .ok_or(DomainError::InvalidArgument)?;
+    let operation = match direction {
+        ModeDirection::Add => ModeOperation::Add,
+        ModeDirection::Remove => ModeOperation::Remove,
+    };
+    crate::decision::resulting_role(current, operation, role)
+}
+
+/// The single canonical B.5 prefix delta for a member's before and after roles.
+#[must_use]
+pub fn prefix_delta(before: Role, after: Role) -> Option<(ModeDirection, u16)> {
+    match after.cmp(&before) {
+        std::cmp::Ordering::Greater => Some((ModeDirection::Add, prefix_code(after)?)),
+        std::cmp::Ordering::Less => Some((ModeDirection::Remove, prefix_code(before)?)),
+        std::cmp::Ordering::Equal => None,
+    }
 }
 
 fn prefix_code(role: Role) -> Option<u16> {

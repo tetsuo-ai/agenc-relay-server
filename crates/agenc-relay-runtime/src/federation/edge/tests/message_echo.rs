@@ -275,6 +275,389 @@ fn header(event: u8, generation: u64) -> EventHeader {
 }
 
 #[test]
+fn the_original_mode_delta_requires_the_admitted_instance_actor_and_commit_generation() -> TestResult
+{
+    use crate::federation::codec::operations::ModeChangeArg;
+    use agenc_relay_domain::federation::{ActorView, ModeDirection, ProjectedModeChange};
+    use zeroize::Zeroizing;
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let caps = negotiated_capabilities(&["message-tags", "batch", "labeled-response"])?;
+    let channel = ChannelInstanceId::from_bytes([7; 16]);
+    let other = ChannelInstanceId::from_bytes([8; 16]);
+    let add = ModeDirection::Add;
+    let subtract = ModeDirection::Remove;
+    let args = |mode_code, direction, bytes: &[u8]| ModeChangeArg {
+        mode_code,
+        direction,
+        argument: Zeroizing::new(bytes.to_vec()),
+    };
+    let replica = agenc_relay_domain::federation::EdgeReplica::new(ServerId::from_bytes([2; 16]));
+    for (instance, before, issued, observed, source, matched) in [
+        (channel, 2, 7, 7, Some(SENDER), true),
+        (other, 2, 7, 7, Some(SENDER), false),
+        (channel, 7, 7, 7, Some(SENDER), false),
+        (channel, 2, 6, 7, Some(SENDER), false),
+        (channel, 2, 7, 6, Some(SENDER), false),
+        (channel, 2, 7, 7, None, false),
+        (channel, 2, 7, 7, Some(UserId::from_bytes([15; 16])), false),
+    ] {
+        let mut edge = edge_with("@label=a MODE #test +m", FederationOpcode::ChannelMode)?;
+        let PendingKind::Command { echo_channels, .. } = &mut pending(&mut edge)?.kind else {
+            return Err("missing mode requester".into());
+        };
+        *echo_channels = Some(EchoChannels::ChannelModes(ChannelModeRequester::new(
+            context,
+            &replica,
+            channel,
+            before,
+            &[args(7, add, &[])],
+        )?));
+        let actor = source
+            .map(|user_id| {
+                Ok::<_, Box<dyn std::error::Error>>(SourceView {
+                    user_id,
+                    nickname: NicknameValue::parse("sam")?,
+                    public_cloak: agenc_relay_testkit::deterministic_cloak(1)?,
+                    account_label: None,
+                })
+            })
+            .transpose()?;
+        let delta = ProjectedEvent::ChannelModesChanged {
+            channel_id: instance,
+            resulting_revision: Revision::new(observed)?,
+            actor: ActorView(actor),
+            changes: vec![ProjectedModeChange::Simple {
+                mode_code: 7,
+                direction: add,
+            }],
+        };
+        let mut event_header = header(1, issued);
+        event_header.event_kind = FederationEventKind::ChannelModesChanged;
+        let mut frames = vec![WireMessage::new(
+            "sam!u-a@h-b.invalid",
+            "MODE",
+            &["#test", "+m"],
+            None,
+        )?];
+        capture(
+            &mut edge,
+            context,
+            &event_header,
+            &delta,
+            (SENDER, CONNECTION, Some(&caps)),
+            &mut frames,
+        )
+        .map_err(|error| format!("mode capture: {error:?}"))?;
+        assert_eq!(frames.is_empty(), matched);
+        if matched {
+            assert!(
+                validate_result(
+                    pending(&mut edge)?,
+                    &ResultArm::Committed {
+                        resulting_state_generation: issued + 1
+                    }
+                )
+                .is_err()
+            );
+            assert!(
+                validate_result(
+                    pending(&mut edge)?,
+                    &ResultArm::Committed {
+                        resulting_state_generation: issued
+                    }
+                )
+                .is_ok()
+            );
+        }
+    }
+    let requested = ChannelModeRequester::new(
+        context,
+        &replica,
+        channel,
+        2,
+        &[
+            args(10, add, &[]),
+            args(5, add, b"17"),
+            args(4, subtract, &[]),
+        ],
+    )?;
+    let change = |mode_code, direction| ProjectedModeChange::Simple {
+        mode_code,
+        direction,
+    };
+    assert!(requested.matches(
+        channel,
+        7,
+        &[
+            change(10, add),
+            change(9, subtract),
+            ProjectedModeChange::Limit {
+                direction: add,
+                limit: 17
+            }
+        ]
+    ));
+    assert!(!requested.matches(channel, 7, &[change(10, subtract)]));
+    assert!(!requested.matches(channel, 7, &[change(7, add)]));
+    assert!(!requested.matches(
+        channel,
+        7,
+        &[ProjectedModeChange::Limit {
+            direction: add,
+            limit: 18
+        }]
+    ));
+    assert!(!requested.matches(channel, 7, &[]));
+    Ok(())
+}
+
+#[test]
+fn channel_mode_targets_match_the_original_public_mask_and_physical_member() -> TestResult {
+    use crate::federation::codec::operations::ModeChangeArg;
+    use agenc_relay_domain::federation::{
+        MembershipRecord, MembershipView, ModeDirection, ModeListEntryRecord, ProjectedModeChange,
+    };
+    use agenc_relay_types::{EntryId, UtcSecond};
+    let channel = ChannelInstanceId::from_bytes([7; 16]);
+    let other = ChannelInstanceId::from_bytes([8; 16]);
+    let target = UserId::from_bytes([13; 16]);
+    let neighbor = UserId::from_bytes([14; 16]);
+    let add = ModeDirection::Add;
+    let remove = ModeDirection::Remove;
+    let arg = |mode_code, direction, bytes: &[u8]| ModeChangeArg {
+        mode_code,
+        direction,
+        argument: zeroize::Zeroizing::new(bytes.to_vec()),
+    };
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let replica = agenc_relay_domain::federation::EdgeReplica::new(ServerId::from_bytes([2; 16]));
+    let baseline = charged(context);
+    let original = ChannelModeRequester::new(
+        context,
+        &replica,
+        channel,
+        2,
+        &[
+            arg(2, remove, b"$n:OTHER"),
+            arg(1, add, b"$n:GuEsT**"),
+            arg(16, add, target.as_bytes()),
+            arg(4, add, b"private-test-key"),
+            arg(5, remove, b""),
+            arg(9, add, b""),
+        ],
+    )?;
+    assert!(charged(context) > baseline);
+    let source = SourceView {
+        user_id: target,
+        nickname: NicknameValue::parse("guest")?,
+        public_cloak: agenc_relay_testkit::deterministic_cloak(1)?,
+        account_label: None,
+    };
+    let now = UtcSecond::from_unix_seconds(7);
+    let list = |instance, code, direction, mask: &str| ProjectedModeChange::List {
+        direction,
+        entry: ModeListEntryRecord {
+            channel_id: instance,
+            mode_code: code,
+            entry_id: EntryId::from_bytes([1; 16]),
+            mask: mask.to_owned(),
+            setter: source.clone(),
+            created_at: now,
+            expires_at: None,
+        },
+    };
+    let revision = Revision::new(7)?;
+    let prefix = |instance, membership_user, source_user| ProjectedModeChange::Prefix {
+        direction: add,
+        mode_code: 16,
+        view: MembershipView {
+            membership: MembershipRecord {
+                channel_id: instance,
+                user_id: membership_user,
+                role: agenc_relay_domain::Role::Voice,
+                membership_revision: revision,
+                joined_at: now,
+            },
+            source: SourceView {
+                user_id: source_user,
+                ..source.clone()
+            },
+        },
+    };
+    let valid = [
+        list(channel, 1, add, "$n:guest*"),
+        list(channel, 2, remove, "$n:other"),
+        prefix(channel, target, target),
+        ProjectedModeChange::Key {
+            direction: add,
+            present: true,
+        },
+        ProjectedModeChange::Limit {
+            direction: remove,
+            limit: 0,
+        },
+        ProjectedModeChange::Simple {
+            direction: remove,
+            mode_code: 10,
+        },
+    ];
+    assert!(original.matches(channel, 7, &valid));
+    for changed in [
+        list(other, 1, add, "$n:guest*"),
+        list(channel, 1, add, "$n:other"),
+        list(channel, 1, remove, "$n:guest*"),
+        list(channel, 2, remove, "$n:guest*"),
+        prefix(other, target, target),
+        prefix(channel, target, neighbor),
+        prefix(channel, neighbor, neighbor),
+        ProjectedModeChange::Key {
+            direction: add,
+            present: false,
+        },
+    ] {
+        assert!(!original.matches(channel, 7, &[changed]));
+    }
+    drop(original);
+    assert_eq!(charged(context), baseline);
+    Ok(())
+}
+
+#[test]
+fn a_local_members_original_role_constrains_the_compound_prefix_delta() -> TestResult {
+    use crate::federation::codec::operations::ModeChangeArg;
+    use agenc_relay_domain::federation::{
+        ChannelDetailRecord, EdgeReplica, MembershipRecord, MembershipView, ModeDirection,
+        ProjectedModeChange, ProjectionRecord, SessionRecord,
+    };
+    use agenc_relay_domain::{
+        ChannelNameValue, ContentPolicy, DisplayNameValue, HistoryPolicy, PersistencePolicy, Role,
+        Visibility,
+    };
+    use agenc_relay_types::{SessionId, UtcSecond};
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let channel = ChannelInstanceId::from_bytes([7; 16]);
+    let server = ServerId::from_bytes([2; 16]);
+    let source = SourceView {
+        user_id: SENDER,
+        nickname: NicknameValue::parse("sam")?,
+        public_cloak: agenc_relay_testkit::deterministic_cloak(1)?,
+        account_label: None,
+    };
+    let arguments = [ModeDirection::Add, ModeDirection::Remove].map(|direction| ModeChangeArg {
+        direction,
+        mode_code: 14,
+        argument: zeroize::Zeroizing::new(SENDER.as_bytes().to_vec()),
+    });
+    for (before, direction, code, expected) in [
+        (Role::Member, ModeDirection::Add, 15, true),
+        (Role::Operator, ModeDirection::Remove, 14, true),
+        (Role::Operator, ModeDirection::Add, 15, false),
+        (Role::HalfOperator, ModeDirection::Add, 15, false),
+        (Role::Administrator, ModeDirection::Remove, 14, false),
+    ] {
+        let mut replica = EdgeReplica::new(server);
+        let previous = MembershipRecord {
+            channel_id: channel,
+            user_id: SENDER,
+            role: before,
+            membership_revision: Revision::new(2)?,
+            joined_at: UtcSecond::from_unix_seconds(1),
+        };
+        let entries = vec![
+            ProjectionRecord::Session(SessionRecord {
+                session_id: SessionId::from_bytes([4; 16]),
+                user_id: SENDER,
+                home_server_id: server,
+                session_revision: Revision::new(1)?,
+                account: None,
+                nickname: source.nickname.clone(),
+                display_name: DisplayNameValue::prepare("Sam")?,
+                public_cloak: source.public_cloak,
+                account_label: None,
+                user_mode_bits: 1,
+                away: None,
+            }),
+            ProjectionRecord::ChannelDetail(ChannelDetailRecord {
+                channel_id: channel,
+                name: ChannelNameValue::parse("#test")?,
+                channel_revision: Revision::new(2)?,
+                visibility: Visibility::Listed,
+                content_policy: ContentPolicy::Plaintext,
+                persistence: PersistencePolicy::Ephemeral,
+                simple_mode_bits: 4,
+                history: HistoryPolicy::Off,
+                e2ee_route_binding: None,
+            }),
+            ProjectionRecord::Membership(previous),
+        ];
+        replica.install(2, entries)?;
+        let origin = ChannelModeRequester::new(context, &replica, channel, 2, &arguments)?;
+        let event = ProjectedModeChange::Prefix {
+            direction,
+            mode_code: code,
+            view: MembershipView {
+                membership: MembershipRecord {
+                    role: Role::HalfOperator,
+                    membership_revision: Revision::new(7)?,
+                    ..previous
+                },
+                source: source.clone(),
+            },
+        };
+        assert_eq!(origin.matches(channel, 7, &[event]), expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_mode_matcher_reserves_only_its_public_targets_before_admission() -> TestResult {
+    use crate::federation::codec::operations::ModeChangeArg;
+    use agenc_relay_domain::federation::{EdgeReplica, ModeDirection};
+    let mut fixture = StateCoreFixture::new(Vec::new())?;
+    let context = fixture.context_mut()?;
+    let replica = EdgeReplica::new(ServerId::from_bytes([2; 16]));
+    let channel = ChannelInstanceId::from_bytes([7; 16]);
+    let arg = |mode_code, bytes: &[u8]| ModeChangeArg {
+        direction: ModeDirection::Add,
+        mode_code,
+        argument: zeroize::Zeroizing::new(bytes.to_vec()),
+    };
+    let baseline = charged(context);
+    let key = ChannelModeRequester::new(
+        context,
+        &replica,
+        channel,
+        2,
+        &[arg(4, b"private-test-key")],
+    )?;
+    assert_eq!(charged(context), baseline);
+    drop(key);
+    let public = [arg(1, b"$n:guest"), arg(16, SENDER.as_bytes())];
+    let target = ChannelModeRequester::new(context, &replica, channel, 2, &public)?;
+    assert!(charged(context) > baseline);
+    drop(target);
+    assert_eq!(charged(context), baseline);
+    let available = context.backing_budget_for_test().available();
+    let other_work = context.reserve_kept_output(available)?;
+    assert!(matches!(
+        ChannelModeRequester::new(context, &replica, channel, 2, &public),
+        Err(agenc_relay_domain::DomainError::ServerBusy)
+    ));
+    drop(other_work);
+    for malformed in [arg(1, b"broken"), arg(12, b"short"), arg(5, b"unknown")] {
+        assert!(matches!(
+            ChannelModeRequester::new(context, &replica, channel, 2, &[malformed]),
+            Err(agenc_relay_domain::DomainError::InvalidArgument)
+        ));
+        assert_eq!(charged(context), baseline);
+    }
+    Ok(())
+}
+
+#[test]
 fn only_the_original_topic_instance_actor_and_text_are_held() -> TestResult {
     let mut fixture = StateCoreFixture::new(Vec::new())?;
     let context = fixture.context_mut()?;

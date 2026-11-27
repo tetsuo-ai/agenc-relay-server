@@ -185,6 +185,7 @@ pub enum EdgeCompletion {
 /// Physical channels selected when the originating command was admitted.
 pub(crate) enum EchoChannels {
     Topic(agenc_relay_types::ChannelInstanceId),
+    ChannelModes(super::message_echo::ChannelModeRequester),
     Invite(invitation::InviteRequester),
     UserMode {
         session: SessionId,
@@ -933,7 +934,7 @@ fn forward_command(
     operation: FederatedOperation,
     message: Box<ParsedMessage>,
 ) -> Result<Routed, (Box<ParsedMessage>, DomainError)> {
-    let requester = match command_requester(edge, context, user_id, &operation) {
+    let requester = match command_requester(edge, context, user_id, &operation, &message) {
         Ok(requester) => requester,
         Err(error) => return Err((message, error)),
     };
@@ -942,6 +943,10 @@ fn forward_command(
     };
     let pending = match requester {
         Some(CommandRequester::Join(requester)) => PendingKind::Join { message, requester },
+        Some(CommandRequester::ChannelModes(requester)) => PendingKind::Command {
+            message,
+            echo_channels: Some(EchoChannels::ChannelModes(requester)),
+        },
         Some(CommandRequester::Invite(requester)) => PendingKind::Command {
             message,
             echo_channels: Some(EchoChannels::Invite(requester)),
@@ -974,6 +979,7 @@ pub(super) fn reserve_departure_backing(
 }
 
 enum CommandRequester {
+    ChannelModes(super::message_echo::ChannelModeRequester),
     Join(crate::mutation_render::JoinRequester),
     Invite(invitation::InviteRequester),
 }
@@ -983,7 +989,30 @@ fn command_requester(
     context: &StateCoreContext,
     user: UserId,
     operation: &FederatedOperation,
+    message: &ParsedMessage,
 ) -> Result<Option<CommandRequester>, DomainError> {
+    if let FederatedOperation::ChannelMode {
+        channel_id,
+        expected_channel_revision,
+        changes,
+        ..
+    } = operation
+    {
+        if !super::message_echo::label_negotiated(
+            message,
+            context.sessions().capabilities_for_user(user),
+        ) {
+            return Ok(None);
+        }
+        let requester = super::message_echo::ChannelModeRequester::new(
+            context,
+            &edge.replica,
+            *channel_id,
+            *expected_channel_revision,
+            changes,
+        )?;
+        return Ok(Some(CommandRequester::ChannelModes(requester)));
+    }
     if !matches!(
         operation,
         FederatedOperation::Join { .. } | FederatedOperation::Invite { .. }
@@ -2329,7 +2358,11 @@ fn completed_request(
                 | agenc_relay_types::FederationOpcode::Topic
         ) || matches!(
             echo_channels,
-            Some(EchoChannels::Part { .. } | EchoChannels::UnlabeledPart(_))
+            Some(
+                EchoChannels::Part { .. }
+                    | EchoChannels::UnlabeledPart(_)
+                    | EchoChannels::ChannelModes(_)
+            )
         ) =>
         {
             super::message_echo::complete(
